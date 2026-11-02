@@ -1,0 +1,437 @@
+"""Local durable media archive. No provider calls or cloud project operations.
+
+Content addressing / verified staged copies follow the old Flow2API library's
+archival approach. Provenance remains a separate immutable record per source.
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import time
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+
+from PIL import Image
+from material_tags import TagIndex, DIMENSIONS
+
+
+def digest(path):
+    with Path(path).open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+class Library(TagIndex):
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (self.root / "objects").mkdir(exist_ok=True)
+        (self.root / "staging").mkdir(exist_ok=True)
+        self.db = self.root / "library.db"
+        with self.connect() as c:
+            c.executescript("""
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS assets(
+              id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, relative_path TEXT NOT NULL,
+              media_type TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
+              width INTEGER, height INTEGER, duration REAL, added REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS origins(
+              source TEXT NOT NULL, source_id TEXT NOT NULL, asset_id TEXT NOT NULL,
+              account_id TEXT, account_email TEXT, project_id TEXT, media_id TEXT,
+              request_id TEXT, model TEXT, prompt TEXT, created TEXT, details TEXT,
+              PRIMARY KEY(source,source_id));
+            CREATE INDEX IF NOT EXISTS origin_asset ON origins(asset_id);
+            CREATE TABLE IF NOT EXISTS tags(asset_id TEXT, value TEXT, PRIMARY KEY(asset_id,value));
+            CREATE TABLE IF NOT EXISTS archive_queue(
+              key TEXT PRIMARY KEY, path TEXT NOT NULL, metadata TEXT NOT NULL,
+              state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER DEFAULT 0,
+              next_try REAL DEFAULT 0, error TEXT);
+            """)
+        self.db.chmod(0o600)
+        self.init_index()
+
+    @contextmanager
+    def connect(self):
+        c = sqlite3.connect(self.db, timeout=15)
+        c.row_factory = sqlite3.Row
+        try:
+            with c:
+                yield c
+        finally:
+            c.close()
+
+    def archive(self, path, meta, expected=None):
+        source, source_id = meta["source"], str(meta["source_id"])
+        path = Path(path).resolve()
+        if not path.is_file() or not 0 < path.stat().st_size <= 1024**3:
+            raise ValueError("素材文件不存在、为空或超过 1GB。")
+        stage = self.root / "staging" / (uuid.uuid4().hex + ".part")
+        try:
+            with path.open("rb") as src, stage.open("xb") as dst:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+                dst.flush()
+                os.fsync(dst.fileno())
+            sha = digest(stage)
+            if expected and sha != expected:
+                raise ValueError("素材完整性校验不一致，未导入。")
+            width = height = None
+            with stage.open("rb") as f:
+                header = f.read(32)
+            if (
+                len(header) >= 12
+                and header[4:8] == b"ftyp"
+                and not any(b in header[8:] for b in (b"avif", b"avis"))
+            ):
+                kind, mime, ext = "video", "video/mp4", ".mp4"
+                size, offset, boxes = stage.stat().st_size, 0, set()
+                with stage.open("rb") as f:
+                    while offset < size:
+                        f.seek(offset)
+                        box = f.read(16)
+                        if len(box) < 8:
+                            raise ValueError("视频文件不完整。")
+                        length = int.from_bytes(box[:4], "big")
+                        minimum = 8
+                        if length == 1:
+                            length, minimum = int.from_bytes(box[8:16], "big"), 16
+                        elif length == 0:
+                            length = size - offset
+                        if length < minimum or offset + length > size:
+                            raise ValueError("视频文件不完整。")
+                        boxes.add(box[4:8])
+                        offset += length
+                if not {b"moov", b"mdat"} <= boxes:
+                    raise ValueError("视频缺少媒体数据。")
+            elif header.startswith(b"\x1aE\xdf\xa3"):
+                kind, mime, ext = "video", "video/webm", ".webm"
+            else:
+                with Image.open(stage) as im:
+                    width, height = im.size
+                    fmt = im.format
+                    im.verify()
+                if fmt not in {"JPEG", "PNG", "WEBP", "GIF", "BMP", "AVIF"}:
+                    raise ValueError("不支持的素材格式。")
+                kind, mime, ext = (
+                    "image",
+                    Image.MIME[fmt],
+                    "." + {"JPEG": "jpg"}.get(fmt, fmt.lower()),
+                )
+            if meta.get("media_type") and meta["media_type"] != kind:
+                raise ValueError("素材类型与原记录不一致。")
+            rel = Path("objects") / sha[:2] / (sha + ext)
+            dest = self.root / rel
+            dest.parent.mkdir(exist_ok=True)
+            if dest.exists():
+                if digest(dest) != sha:
+                    raise ValueError("目标文件校验失败，已保留原文件，未覆盖。")
+            else:
+                # Publish without replacing an existing immutable object.
+                try:
+                    os.link(stage, dest)
+                except FileExistsError:
+                    if digest(dest) != sha:
+                        raise ValueError("目标文件校验失败。") from None
+            with self.connect() as c:
+                c.execute("BEGIN IMMEDIATE")
+                old = c.execute(
+                    "SELECT asset_id FROM origins WHERE source=? AND source_id=?",
+                    (source, source_id),
+                ).fetchone()
+                if old and old["asset_id"] != sha:
+                    raise ValueError("同一来源的文件内容发生变化，已保留原始记录，未覆盖。")
+                c.execute(
+                    "INSERT OR IGNORE INTO assets VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sha,
+                        sha,
+                        rel.as_posix(),
+                        kind,
+                        mime,
+                        dest.stat().st_size,
+                        width or meta.get("width"),
+                        height or meta.get("height"),
+                        meta.get("duration"),
+                        time.time(),
+                    ),
+                )
+                columns = [
+                    "account_id",
+                    "account_email",
+                    "project_id",
+                    "media_id",
+                    "request_id",
+                    "model",
+                    "prompt",
+                    "created",
+                ]
+                values = [str(meta.get(k) or "") for k in columns]
+                c.execute(
+                    "INSERT OR IGNORE INTO origins VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        source,
+                        source_id,
+                        sha,
+                        *values,
+                        json.dumps(meta.get("details", {}), ensure_ascii=False),
+                    ),
+                )
+                # Re-import can complete a missing email from the original source DB;
+                # it cannot replace an existing identity or change project provenance.
+                if meta.get("account_email"):
+                    c.execute(
+                        "UPDATE origins SET account_email=? WHERE source=? AND source_id=? AND account_email=''",
+                        (meta["account_email"], source, source_id),
+                    )
+                for tag in meta.get("tags", []):
+                    if isinstance(tag, str) and 0 < len(tag.strip()) <= 80:
+                        c.execute("INSERT OR IGNORE INTO tags VALUES(?,?)", (sha, tag.strip()))
+                if meta.get("structured_tags"):
+                    manual = {r[0] for r in c.execute("SELECT dimension FROM manual_dimensions WHERE asset_id=?", (sha,))}
+                    self.write_dimensions(c, sha, {d: v for d, v in meta["structured_tags"].items() if d not in manual}, "legacy_import")
+                c.execute("INSERT OR IGNORE INTO index_jobs(asset_id) VALUES(?)", (sha,))
+                if meta.get("index_provenance"):
+                    c.execute("UPDATE index_jobs SET provenance=?,state=? WHERE asset_id=? AND state='pending'", (json.dumps(meta["index_provenance"]), meta.get("index_status", "pending"), sha))
+            return sha
+        finally:
+            stage.unlink(missing_ok=True)
+
+    def get(self, ident):
+        with self.connect() as c:
+            row = c.execute("SELECT * FROM assets WHERE id=?", (ident,)).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            result.pop("relative_path")
+            result["origins"] = [
+                dict(r)
+                for r in c.execute(
+                    "SELECT * FROM origins WHERE asset_id=? ORDER BY source,source_id", (ident,)
+                )
+            ]
+            for origin in result["origins"]:
+                origin.pop("asset_id")
+                origin["details"] = json.loads(origin["details"])
+            result["tags"] = [
+                r[0]
+                for r in c.execute(
+                    "SELECT value FROM tags WHERE asset_id=? ORDER BY value", (ident,)
+                )
+            ]
+            result["url"] = f"/api/library/{ident}/file"
+            result.update(self.dimension_data(c, ident))
+            result["thumbnail"] = (
+                f"/api/library/{ident}/thumbnail" if result["media_type"] == "image" else None
+            )
+            return result
+
+    def file(self, ident):
+        with self.connect() as c:
+            row = c.execute("SELECT relative_path FROM assets WHERE id=?", (ident,)).fetchone()
+        if not row:
+            return None
+        path = (self.root / row[0]).resolve()
+        return path if path.is_relative_to(self.root / "objects") and path.is_file() else None
+
+    def thumbnail(self, ident):
+        path = self.file(ident)
+        if not path:
+            raise ValueError("素材文件不存在。")
+        thumbs = self.root / "thumbnails"
+        thumbs.mkdir(exist_ok=True)
+        target = thumbs / (ident + ".jpg")
+        if not target.exists():
+            with Image.open(path) as im:
+                im.thumbnail((640, 480))
+                im = im.convert("RGB")
+                temp = thumbs / (uuid.uuid4().hex + ".part")
+                try:
+                    im.save(temp, format="JPEG", quality=80)
+                    os.replace(temp, target)
+                finally:
+                    temp.unlink(missing_ok=True)
+        return target
+
+    def search(self, q="", kind="", tag="", account="", page=1, *, dimensions=None,
+               model="", project_id="", created_from="", created_to="", index_status="",
+               limit=24, offset=None, account_id="", storage_status=""):
+        if kind not in {"", "image", "video"} or page < 1:
+            raise ValueError("筛选条件不正确。")
+        filters, args = [], []
+        if len(q) > 500 or not 1 <= limit <= 100 or offset is not None and offset < 0:
+            raise ValueError("检索长度或分页不正确。")
+        for dim, value in (dimensions or {}).items():
+            if dim not in DIMENSIONS or not isinstance(value, str) or len(value) > 100:
+                raise ValueError("标签维度或长度不正确。")
+            if value:
+                filters.append("EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND d.dimension=? AND d.value=? COLLATE NOCASE)")
+                args += [dim, value]
+        # Source constraints belong to the same origin, never mix accounts/projects across duplicates.
+        origin_filters, origin_args = [], []
+        for field, value in (("model", model), ("project_id", project_id), ("account_id", account_id)):
+            if value:
+                if len(str(value)) > 200:
+                    raise ValueError("来源筛选值过长。")
+                origin_filters.append("o." + field + "=?")
+                origin_args.append(str(value))
+        for operator, value in ((">=", created_from), ("<=", created_to)):
+            if value:
+                if len(value) > 40:
+                    raise ValueError("日期筛选值过长。")
+                origin_filters.append("substr(o.created,1,10)" + operator + "substr(?,1,10)")
+                origin_args.append(value)
+        if account:
+            origin_filters.append("(o.account_email=? OR o.source || ':' || o.account_id=?)")
+            origin_args += [account, account]
+        if origin_filters:
+            filters.append("EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND " + " AND ".join(origin_filters) + ")")
+            args += origin_args
+        if index_status:
+            if index_status not in {"pending", "processing", "ready", "failed"}:
+                raise ValueError("索引状态不正确。")
+            filters.append("EXISTS(SELECT 1 FROM index_jobs j WHERE j.asset_id=a.id AND j.state=?)")
+            args.append(index_status)
+        if storage_status and storage_status != "ready":
+            if storage_status not in {"pending", "downloading", "failed"}:
+                raise ValueError("保存状态不正确。")
+            filters.append("0")
+        if kind:
+            filters.append("a.media_type=?")
+            args.append(kind)
+        if tag:
+            filters.append("EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND t.value=?)")
+            args.append(tag)
+        if q:
+            filters.append(
+                "(EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND (instr(lower(coalesce(o.prompt,'')),lower(?))>0 OR instr(lower(coalesce(o.model,'')),lower(?))>0 OR instr(lower(coalesce(o.project_id,'')),lower(?))>0 OR instr(lower(coalesce(o.account_email,'')),lower(?))>0 OR instr(lower(coalesce(o.media_id,'')),lower(?))>0)) OR EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND instr(lower(t.value),lower(?))>0) OR EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND instr(lower(d.value),lower(?))>0))"
+            )
+            args.extend([q] * 7)
+        where = " WHERE " + " AND ".join(filters) if filters else ""
+        with self.connect() as c:
+            total = c.execute("SELECT count(*) FROM assets a" + where, args).fetchone()[0]
+            ids = [
+                r[0]
+                for r in c.execute(
+                    "SELECT a.id FROM assets a"
+                    + where
+                    + " ORDER BY a.added DESC,a.id LIMIT ? OFFSET ?",
+                    (*args, limit, (page - 1) * limit if offset is None else offset),
+                )
+            ]
+            stats = dict(c.execute("SELECT media_type,count(*) FROM assets GROUP BY media_type"))
+            stats["bytes"] = c.execute("SELECT coalesce(sum(size),0) FROM assets").fetchone()[0]
+            accounts = [
+                r[0]
+                for r in c.execute(
+                    "SELECT DISTINCT CASE WHEN account_email!='' THEN account_email ELSE source || ':' || account_id END FROM origins ORDER BY 1"
+                )
+            ]
+            tags = [r[0] for r in c.execute("SELECT DISTINCT value FROM tags ORDER BY value")]
+            pending = c.execute(
+                "SELECT count(*) FROM archive_queue WHERE state!='done'"
+            ).fetchone()[0]
+            errors = c.execute(
+                "SELECT count(*) FROM archive_queue WHERE error IS NOT NULL AND state!='done'"
+            ).fetchone()[0]
+        return {
+            "items": [self.get(i) for i in ids],
+            "total": total,
+            "page": page,
+            "pages": max(1, (total + limit - 1) // limit),
+            "limit": limit,
+            "offset": (page - 1) * limit if offset is None else offset,
+            "facets": self.facets(),
+            "stats": stats,
+            "accounts": accounts,
+            "tags": tags,
+            "pending": pending,
+            "errors": errors,
+        }
+
+    def set_tags(self, ident, tags):
+        if (
+            not isinstance(tags, list)
+            or len(tags) > 30
+            or any(not isinstance(t, str) or not 0 < len(t.strip()) <= 80 for t in tags)
+        ):
+            raise ValueError("最多填写 30 个标签，每个最多 80 字。")
+        with self.connect() as c:
+            if not c.execute("SELECT 1 FROM assets WHERE id=?", (ident,)).fetchone():
+                raise ValueError("素材不存在。")
+            c.execute("DELETE FROM tags WHERE asset_id=?", (ident,))
+            c.executemany(
+                "INSERT OR IGNORE INTO tags VALUES(?,?)", [(ident, t.strip()) for t in tags]
+            )
+
+    def enqueue_task(self, task, account, output):
+        if task["kind"] not in {"image", "video"}:
+            return
+        result = task.get("result") or {}
+        groups = [result] if result.get("files") else result.get("source_jobs", [])
+        for group in groups:
+            paths, media = group.get("files", []), group.get("media_ids", [])
+            for index, value in enumerate(paths):
+                path = Path(value).resolve()
+                if not path.is_relative_to(Path(output).resolve()):
+                    continue
+                key = task["id"] + ":" + str(group.get("job_id", "result")) + ":" + str(index)
+                meta = {
+                    "source": "studiowright",
+                    "source_id": key,
+                    "account_id": task["profile"],
+                    "account_email": (account or {}).get("email"),
+                    "project_id": group.get("project_id") or task["project"],
+                    "media_id": media[index] if len(paths) == len(media) else "",
+                    "request_id": task["id"],
+                    "model": task["params"].get("model"),
+                    "prompt": task["params"].get("prompt"),
+                    "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(task["created"])),
+                    "media_type": task["kind"],
+                    "details": {
+                        "job_id": group.get("job_id"),
+                        "stage": group.get("stage"),
+                        "file_name": path.name,
+                    },
+                }
+                with self.connect() as c:
+                    c.execute(
+                        "INSERT OR IGNORE INTO archive_queue(key,path,metadata) VALUES(?,?,?)",
+                        (key, str(path), json.dumps(meta, ensure_ascii=False)),
+                    )
+
+    def drain(self):
+        with self.connect() as c:
+            rows = [
+                dict(r)
+                for r in c.execute(
+                    "SELECT * FROM archive_queue WHERE state!='done' AND next_try<=? ORDER BY rowid LIMIT 4",
+                    (time.time(),),
+                )
+            ]
+        for row in rows:
+            try:
+                self.archive(row["path"], json.loads(row["metadata"]))
+                with self.connect() as c:
+                    c.execute(
+                        "UPDATE archive_queue SET state='done',error=NULL WHERE key=?",
+                        (row["key"],),
+                    )
+            except Exception:
+                # No credential/path disclosure; archival never resubmits generation.
+                with self.connect() as c:
+                    c.execute(
+                        "UPDATE archive_queue SET attempts=attempts+1,next_try=?,error=? WHERE key=?",
+                        (
+                            time.time() + min(3600, 30 * 2 ** min(row["attempts"], 7)),
+                            "本地归档失败，请检查文件完整性和磁盘空间；不会重新生成。",
+                            row["key"],
+                        ),
+                    )
+
+    def reconcile(self, store, output):
+        for row in store.rows(
+            "SELECT * FROM tasks WHERE kind IN ('image','video') AND result IS NOT NULL"
+        ):
+            task = store.decode(row)
+            self.enqueue_task(task, store.account(task["profile"]), output)

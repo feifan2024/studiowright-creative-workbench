@@ -1,0 +1,161 @@
+"""Authenticated loopback-only API for the existing creative workbench."""
+import argparse
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+from urllib.parse import urlsplit
+
+from unified_keys import UnifiedKeys
+
+
+def allowed_route(method, target):
+    parts = urlsplit(target)
+    path = parts.path
+    if parts.scheme or parts.netloc or parts.fragment or not path.startswith('/') or path.startswith('//'):
+        return None
+    if parts.query and not path.startswith('/api/library'):
+        return None
+    if len(target) > 3500:
+        return None
+    if method == 'GET':
+        if path in ('/api/health', '/api/snapshot', '/api/conversations'):
+            return 'workbench'
+        if re.fullmatch(r'/api/(?:conversations|real-pool/requests|real-pool/flow-requests)/[0-9a-f-]{36}', path):
+            return 'workbench'
+        if re.fullmatch(r'/api/gemini-images/[0-9a-f-]{36}/[0-3]', path):
+            return 'workbench'
+        if re.fullmatch(r'/api/library(?:/facets|/[0-9a-f]{64}(?:/(?:file|thumbnail))?)?', path):
+            return 'workbench'
+        if re.fullmatch(r'/api/tasks/[A-Za-z0-9_-]{1,128}/files/[0-9]{1,4}', path):
+            return 'flow'
+    if method == 'POST' and not parts.query:
+        if path in ('/api/conversations', '/api/real-pool/chat', '/api/real-pool/flow'):
+            return 'workbench'
+        if re.fullmatch(r'/api/real-pool/uploads/[0-9a-f-]{36}/[0-3]/(?:jpg|jpeg|png|webp|mp4|mov|webm|pdf)', path):
+            return 'workbench'
+    return None
+
+
+def handler_for(store, upstream_port=18920, flow_port=18888):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = 'StudioWrightAPI/1'
+
+        def log_message(self, *_args):
+            pass  # Never log keys, prompts, URLs, or request data.
+
+        def error_json(self, status, message):
+            body = json.dumps({'error': message}, ensure_ascii=False).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def run_request(self):
+            if (len(self.headers.get_all('Host', [])) != 1 or self.headers.get('Host', '').lower() not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}') or self.headers.get('Origin')):
+                return self.error_json(403, '请从可信本机程序调用。')
+            if self.command == 'GET' and self.path == '/health':
+                data = b'{"application":"studiowright-unified-api","ok":true}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            header = self.headers.get('Authorization', '')
+            try:
+                valid = len(self.headers.get_all('Authorization', [])) == 1 and header.startswith('Bearer ') and store.allows(header[7:])
+            except (OSError, ValueError, sqlite3.Error):
+                return self.error_json(503, '密钥服务暂不可用。')
+            if not valid:
+                return self.error_json(401, '密钥无效或已撤销。')
+            route = allowed_route(self.command, self.path)
+            if not route:
+                return self.error_json(404, '接口不存在。')
+            is_upload = self.path.startswith('/api/real-pool/uploads/')
+            size = 0
+            if self.command == 'POST':
+                length = self.headers.get('Content-Length', '')
+                maximum = 100 * 1024 * 1024 if is_upload else 100000
+                ctype = 'application/octet-stream' if is_upload else 'application/json'
+                if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1 or not length.isdigit() or not 0 < int(length) <= maximum
+                        or self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != ctype):
+                    return self.error_json(400, '请求内容格式或大小不正确。')
+                size = int(length)
+            target_port = upstream_port if route == 'workbench' else flow_port
+            headers = {'Host': f'127.0.0.1:{target_port}', 'Accept': self.headers.get('Accept', '*/*')}
+            if self.command == 'POST':
+                headers.update({'Content-Type': ctype, 'Content-Length': str(size),
+                                'Origin': f'http://127.0.0.1:{target_port}', 'X-Workbench-Request': '1'})
+                request_id = self.headers.get('Idempotency-Key')
+                if request_id:
+                    headers['Idempotency-Key'] = request_id
+            requested_range = self.headers.get('Range')
+            if requested_range:
+                if not re.fullmatch(r'bytes=\d*-\d*', requested_range):
+                    return self.error_json(400, '文件范围不正确。')
+                headers['Range'] = requested_range
+            connection = http.client.HTTPConnection('127.0.0.1', target_port, timeout=190)
+            started = False
+            try:
+                connection.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
+                for name, value in headers.items():
+                    connection.putheader(name, value)
+                connection.endheaders()
+                while size:
+                    chunk = self.rfile.read(min(size, 256 * 1024))
+                    if not chunk:
+                        raise OSError('incomplete request')
+                    connection.send(chunk)
+                    size -= len(chunk)
+                response = connection.getresponse()
+                length = response.getheader('Content-Length', '')
+                if not length.isdigit() or int(length) > 1024**3:
+                    return self.error_json(502, '服务返回的数据无法读取。')
+                self.send_response(response.status)
+                for name in ('Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges', 'Content-Disposition'):
+                    value = response.getheader(name)
+                    if value and '\r' not in value and '\n' not in value:
+                        self.send_header(name, value)
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.end_headers()
+                started = True
+                remaining = int(length)
+                while remaining:
+                    chunk = response.read(min(remaining, 256 * 1024))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except (OSError, http.client.HTTPException):
+                if not started:
+                    self.error_json(503, '连接工作台中断；如已提交，请先查询原请求记录。')
+            finally:
+                connection.close()
+
+        do_GET = run_request
+        do_POST = run_request
+    return Handler
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=18922)
+    parser.add_argument('--upstream-port', type=int, default=18920)
+    parser.add_argument('--flow-port', type=int, default=18888)
+    parser.add_argument('--state-dir', type=Path, default=Path.home()/'.local/state/creative-unified-workbench')
+    args = parser.parse_args()
+    os.umask(0o077)
+    server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(UnifiedKeys(args.state_dir/'api-keys.sqlite3'), args.upstream_port, args.flow_port))
+    server.serve_forever()
+
+
+if __name__ == '__main__':
+    main()

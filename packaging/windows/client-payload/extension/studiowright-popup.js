@@ -1,0 +1,3 @@
+const swButton=document.getElementById('swSync'),swText=document.getElementById('swStatus');
+async function swRefresh(){try{const state=await chrome.runtime.sendMessage({action:'sw_status'});swText.textContent=state.ok?(state.last?.message||(state.connected?'本机共享连接已就绪。打开已登录的 Flow 页面后点击同步。':'请在 StudioWright 后台连接本机插件。')):state.error;}catch{swText.textContent='请重新加载升级后的插件。';}}
+swButton.addEventListener('click',async()=>{swButton.disabled=true;swText.textContent='正在读取当前账号，并将登录信息同步到 Ubuntu 核对…';try{const result=await chrome.runtime.sendMessage({action:'sw_sync'});swText.textContent=result.ok?result.message:result.error;}catch(e){swText.textContent='同步中断：'+e.message+'。请在后台任务队列核对结果。';}finally{swButton.disabled=false;}});swRefresh();
