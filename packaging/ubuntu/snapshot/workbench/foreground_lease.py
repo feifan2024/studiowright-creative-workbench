@@ -1,0 +1,67 @@
+"""One cross-process FIFO lease for foreground-only work.
+
+The lease is released after the provider submit boundary, before waiting for
+the provider's result.  It does not retry or dispatch requests itself.
+"""
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from foreground_queue import ForegroundQueue
+
+
+class ForegroundLease:
+    def __init__(self):
+        self.queue = ForegroundQueue(Path.home() / '.local/state/creative-unified-workbench/foreground-input')
+        self._manager = None
+        self.owner = None
+
+    @property
+    def active(self):
+        return self._manager is not None
+
+    async def acquire(self):
+        if self.active:
+            raise RuntimeError('foreground_lease_already_active')
+        manager = self.queue.acquire_async(timeout=600)
+        await manager.__aenter__()
+        self._manager = manager
+        self.owner = asyncio.current_task()
+        return self
+
+    async def release(self):
+        manager = self._manager
+        if manager is None:
+            return
+        if self.owner is not asyncio.current_task():
+            raise RuntimeError('foreground_lease_wrong_owner')
+        self._manager = None
+        self.owner = None
+        await manager.__aexit__(None, None, None)
+
+    async def try_acquire(self):
+        if self.active:raise RuntimeError('foreground_lease_already_active')
+        manager=self.queue.try_acquire_async()
+        acquired=await manager.__aenter__()
+        if not acquired:
+            await manager.__aexit__(None,None,None);return False
+        self._manager=manager;self.owner=asyncio.current_task();return True
+
+    @asynccontextmanager
+    async def interaction(self, driver, target, page):
+        """Reenter for a later UI-only recovery/download action when necessary."""
+        if self.active:
+            if self.owner is not asyncio.current_task():
+                raise RuntimeError('foreground_lease_wrong_owner')
+            yield
+            return
+        await self.acquire()
+        try:
+            if not await driver.activate_and_confirm(target):
+                raise ValueError('desktop_focus_unconfirmed')
+            await page.bring_to_front()
+            if not await driver._os_focus_confirmed(target):
+                raise ValueError('desktop_focus_unconfirmed')
+            yield
+        finally:
+            await self.release()

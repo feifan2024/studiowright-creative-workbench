@@ -368,10 +368,19 @@ class Library(TagIndex):
         if task["kind"] not in {"image", "video"}:
             return
         result = task.get("result") or {}
-        groups = [result] if result.get("files") else result.get("source_jobs", [])
+        groups = [result] if result.get("files") else result.get("source_jobs")
+        if not isinstance(groups, list):
+            return
         for group in groups:
-            paths, media = group.get("files", []), group.get("media_ids", [])
+            if not isinstance(group, dict):
+                continue
+            paths, media = group.get("files"), group.get("media_ids")
+            if not isinstance(paths, list):
+                continue  # Older failed jobs may store files: null.
+            media = media if isinstance(media, list) else []
             for index, value in enumerate(paths):
+                if not isinstance(value, str) or not value:
+                    continue
                 path = Path(value).resolve()
                 if not path.is_relative_to(Path(output).resolve()):
                     continue

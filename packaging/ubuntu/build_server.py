@@ -112,7 +112,7 @@ def main():
         '"$runner" -B "$scratch/installer.py" "$@"',
         'exit $?']
     header = ('\n'.join(lines).replace('PAYLOAD_LINE', str(len(lines) + 1)) + '\n').encode('utf-8')
-    output = DIST / 'StudioWright-Ubuntu-Setup.run'
+    output = DIST / 'StudioWright-Ubuntu-LAN-Setup.run'
     with output.open('xb') as stream, archive.open('rb') as payload:
         stream.write(header)
         shutil.copyfileobj(payload, stream, 1024 * 1024)

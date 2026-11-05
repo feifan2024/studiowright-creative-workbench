@@ -149,9 +149,11 @@ class RealAdapter:
     async def run(self, task, account):
         if task['kind'] in {'image', 'video'}:
             from playwright.async_api import TimeoutError as PlaywrightTimeout
+            from browser_rendering import generation_lease
             phase = {'generation_invoked': False}
             try:
-                return await self._run(task, account, phase)
+                async with generation_lease(task['profile']):
+                    return await self._run(task, account, phase)
             except (PlaywrightTimeout, TimeoutError, ConnectionError) as exc:
                 if not phase['generation_invoked']:
                     raise PreSubmissionTransient(str(exc)) from exc
@@ -181,7 +183,10 @@ class RealAdapter:
             return {
                 "message": "已在 Ubuntu 打开此账号的独立登录窗口。完成登录并关闭窗口后，点击检查登录与项目。"
             }
-        async with self.Studio(profile) as studio:
+        studio = self.Studio(profile)
+        if kind in {'image', 'video'}:
+            studio.configure_task(task['id'])
+        async with studio:
             from studiowright.flow.page import FLOW_ROOT
 
             page = await studio.session.page_for(FLOW_ROOT)
@@ -228,6 +233,17 @@ class RealAdapter:
                     if not state["signed_in"] or len(state["emails"]) != 1:
                         raise ValueError(recovery["reason"])
             if not state["signed_in"] or len(state["emails"]) != 1:
+                if kind in ('image','video') and hasattr(studio.session,'_safe_editor'):
+                    from task_coordinator import record
+                    # Refresh only this owned, empty preparation window. A login
+                    # challenge is retained for the user, never clicked through.
+                    await studio.session._safe_editor(page)
+                    record('login_page_recheck')
+                    await page.goto(FLOW_ROOT,wait_until='domcontentloaded',timeout=30000)
+                    state=await read_when_ready(page,READ_STATE)
+            if not state["signed_in"] or len(state["emails"]) != 1:
+                if kind in ('image','video'):
+                    raise ValueError('task_window_requires_login')
                 raise ValueError(
                     "Flow 未返回唯一的已登录邮箱。请检查 Ubuntu 此账号的登录窗口；未提交生成。"
                 )

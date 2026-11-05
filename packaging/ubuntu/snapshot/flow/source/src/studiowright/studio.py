@@ -574,7 +574,18 @@ class Studio:
                 saved.rename(target)
             else:
                 target = out / f"{stem}-{number}{default_suffix}"
-                await flow.download(url, target)
+                from studiowright.flow.page import DownloadAddressExpired
+                try:
+                    await flow.download(url, target)
+                except DownloadAddressExpired:
+                    from studiowright.flow.page import record_recovery
+                    record_recovery('refresh_original_download_address')
+                    async with flow.foreground_interaction():
+                        addresses = await flow.edit_view_urls(media_id)
+                    key='video' if default_suffix=='.mp4' else 'image'
+                    if not addresses.get(key):
+                        raise FlowError('original_media_download_address_missing')
+                    await flow.download(addresses[key],target)
                 real_suffix = suffix_for(target.read_bytes()[:12], default_suffix)
                 if real_suffix != default_suffix:
                     target = target.rename(target.with_suffix(real_suffix))
@@ -593,8 +604,9 @@ class Studio:
             await flow.page.goto(flow.url, wait_until="domcontentloaded")
         return files
 
-    async def _submit_guarded(self, call: Any) -> Any:
-        await self.governor.wait_turn()
+    async def _submit_guarded(self, call: Any, *, paced: bool = False) -> Any:
+        if not paced:
+            await self.governor.wait_turn()
         try:
             result = await call()
         except UnusualActivity:
@@ -606,6 +618,28 @@ class Studio:
         except Exception:
             pass
         return result
+
+    async def _generation_page(self, project_id: str):
+        """Reserve the shared desktop only for preparation and submission."""
+        import sys
+        state = Path.home() / '.local/state/creative-unified-workbench'
+        marker = state / 'foreground-input-enabled'
+        if not marker.is_file() or marker.is_symlink():
+            return None, await FlowPage.open(self.session, project_id)
+        # Account pacing must not occupy the shared desktop while waiting.
+        await self.governor.wait_turn()
+        shared = str(Path.home() / '.local/share/creative-unified-workbench')
+        if shared not in sys.path:
+            sys.path.insert(0, shared)
+        from foreground_lease import ForegroundLease
+        lease = ForegroundLease()
+        await lease.acquire()
+        try:
+            flow = await FlowPage.open_foreground(self.session, project_id, self.profile, lease)
+            return lease, flow
+        except BaseException:
+            await lease.release()
+            raise
 
     async def image(self, request: ImageRequest) -> dict[str, Any]:
         await self._locked()
@@ -630,9 +664,10 @@ class Studio:
         )
         started = time.time()
         self.store.update_job(job_id, status="running", started=started)
+        foreground_lease = None
         try:
             self._progress(job_id, "preparing", [])
-            flow = await FlowPage.open(self.session, project_id)
+            foreground_lease, flow = await self._generation_page(project_id)
             media_ids = await self._media_ids(flow, request.refs)
             await flow.reset()
             await flow.apply_image_options(request.options)
@@ -642,22 +677,20 @@ class Studio:
                 lambda: flow.generate_images(
                     request.prompt, request.options.count,
                     on_submit=lambda: self._progress(job_id, "submitting", []),
-                )
+                ), paced=foreground_lease is not None
             )
             self._progress(job_id, "generated", [r.media_id for r in results])
             stem = time.strftime("%Y%m%d-%H%M%S") + f"-image-{job_id[:6]}"
             notes: list[str] = []
             if any(r.recovered for r in results):
                 notes.append("recovered from the project grid (Flow's reply was not readable)")
-            files = await self._download_all(
-                flow,
-                [(r.media_id, r.url, r.workflow_id) for r in results],
-                self._out_dir(request.out_dir),
-                stem,
-                ".jpg",
-                request.size,
-                notes,
-            )
+            if request.size:
+                async with flow.foreground_interaction():
+                    files = await self._download_all(flow, [(r.media_id, r.url, r.workflow_id) for r in results],
+                        self._out_dir(request.out_dir), stem, ".jpg", request.size, notes)
+            else:
+                files = await self._download_all(flow, [(r.media_id, r.url, r.workflow_id) for r in results],
+                    self._out_dir(request.out_dir), stem, ".jpg", request.size, notes)
             result = {
                 "job_id": job_id,
                 "project_id": project_id,
@@ -675,7 +708,11 @@ class Studio:
             await self._fail(job_id, exc, FLOW_ROOT)
             raise
         finally:
-            self._lock.release()
+            try:
+                if foreground_lease is not None:
+                    await foreground_lease.release()
+            finally:
+                self._lock.release()
 
     async def video(self, request: VideoRequest) -> dict[str, Any]:
         await self._locked()
@@ -706,10 +743,11 @@ class Studio:
         )
         started = time.time()
         self.store.update_job(job_id, status="running", started=started)
+        foreground_lease = None
         try:
             if not request.dry_run:
                 self._progress(job_id, "preparing", [])
-            flow = await FlowPage.open(self.session, project_id)
+            foreground_lease, flow = await self._generation_page(project_id)
             # The price does not depend on the frames or references, so a dry run reads it
             # without uploading any of them into the project.
             frame_ids: list[str] = []
@@ -751,20 +789,18 @@ class Studio:
                 lambda: flow.generate_video(
                     request.prompt, on_ids=lambda ids: self._progress(job_id, "submitted", ids),
                     on_submit=lambda: self._progress(job_id, "submitting", []),
-                )
+                ), paced=foreground_lease is not None
             )
             self._progress(job_id, "generated", [c.media_id for c in clips])
             stem = time.strftime("%Y%m%d-%H%M%S") + f"-video-{job_id[:6]}"
             notes: list[str] = []
-            files = await self._download_all(
-                flow,
-                [(c.media_id, c.url, c.workflow_id) for c in clips],
-                self._out_dir(request.out_dir),
-                stem,
-                ".mp4",
-                request.size,
-                notes,
-            )
+            if request.size:
+                async with flow.foreground_interaction():
+                    files = await self._download_all(flow, [(c.media_id, c.url, c.workflow_id) for c in clips],
+                        self._out_dir(request.out_dir), stem, ".mp4", request.size, notes)
+            else:
+                files = await self._download_all(flow, [(c.media_id, c.url, c.workflow_id) for c in clips],
+                    self._out_dir(request.out_dir), stem, ".mp4", request.size, notes)
             result = {
                 "job_id": job_id,
                 "project_id": project_id,
@@ -791,7 +827,11 @@ class Studio:
             await self._fail(job_id, exc, FLOW_ROOT)
             raise
         finally:
-            self._lock.release()
+            try:
+                if foreground_lease is not None:
+                    await foreground_lease.release()
+            finally:
+                self._lock.release()
 
     # --- Flow Music -------------------------------------------------------------------
     async def _music_job(

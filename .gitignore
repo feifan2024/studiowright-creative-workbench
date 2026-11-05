@@ -29,3 +29,6 @@ client-payload/*.dll
 client-payload/*.exe
 *.nupkg
 python-*-embed-amd64.zip
+/packaging/windows/client-payload/runtime/
+/packaging/windows/client-payload/*.dll
+/packaging/windows/client-payload/*.exe

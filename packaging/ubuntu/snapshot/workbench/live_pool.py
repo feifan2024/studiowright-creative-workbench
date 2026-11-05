@@ -12,6 +12,7 @@ import signal
 import sqlite3
 import subprocess
 import threading
+from dispatch_limit import DispatchLimit, limited
 import time
 import uuid
 from urllib.parse import urlparse
@@ -85,6 +86,10 @@ class Conflict(ValueError):
     pass
 
 
+class ProjectNotStarted(Exception):
+    pass
+
+
 class RealPool:
     def __init__(self, state_dir, program_dir, execute=None, browser_inventory=None):
         self.monitor_heartbeat = {'last_completed': None, 'last_error': None}
@@ -105,7 +110,8 @@ class RealPool:
             except OSError:
                 os.close(self.lock_fd)
                 raise RuntimeError('已有工作台使用真实账号状态。') from None
-        self.execute = execute or self._execute
+        self.dispatch_limit = DispatchLimit(self.state_dir / 'dispatch')
+        self.execute = self.dispatch_limit.wrap(execute or self._execute)
         self.browser_inventory = browser_inventory if browser_inventory is not None else (self._browser_inventory if execute is None else None)
         self.upload_lock = threading.Lock()
         with self.connection() as db:
@@ -141,6 +147,9 @@ class RealPool:
                     request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, project_key TEXT NOT NULL,
                     profile TEXT NOT NULL, project TEXT NOT NULL, kind TEXT NOT NULL,
                     status TEXT NOT NULL, created REAL NOT NULL, finished REAL, task_id TEXT, note TEXT);
+                CREATE TABLE IF NOT EXISTS flow_auto_projects(
+                    profile TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, intent TEXT NOT NULL,
+                    status TEXT NOT NULL, project TEXT, updated REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS flow_recoveries(
                     task_id TEXT PRIMARY KEY, status TEXT NOT NULL, filename TEXT,
                     sha256 TEXT, size INTEGER, updated REAL NOT NULL);
@@ -178,6 +187,12 @@ class RealPool:
                 CREATE TABLE IF NOT EXISTS material_analyses(
                     request_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, status TEXT NOT NULL,
                     created REAL NOT NULL, finished REAL, note TEXT);
+                CREATE INDEX IF NOT EXISTS material_analyses_asset_recent ON material_analyses(asset_id,created DESC);
+                CREATE TABLE IF NOT EXISTS material_shot_notes(
+                    asset_id TEXT PRIMARY KEY, notes_json TEXT NOT NULL, source TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS material_shot_jobs(
+                    asset_id TEXT PRIMARY KEY, queue_id TEXT UNIQUE NOT NULL, request_id TEXT UNIQUE,
+                    status TEXT NOT NULL, created REAL NOT NULL, note TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS auto_material_settings(
                     id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1,
                     since REAL, paused_reason TEXT);
@@ -228,6 +243,8 @@ class RealPool:
         if os.name == 'posix':
             self.state_dir.chmod(0o700)
             self.path.chmod(0o600)
+        from official_pool import OfficialPool
+        self.official = OfficialPool(self)
 
     def connection(self):
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -235,6 +252,8 @@ class RealPool:
         return closing(db)
 
     def close(self):
+        if hasattr(self, 'official'):
+            self.official.close()
         if self.lock_fd is not None:
             os.close(self.lock_fd)
             self.lock_fd = None
@@ -307,6 +326,23 @@ class RealPool:
 
     def annotate(self, real_accounts):
         if not real_accounts.get('available'):
+            return
+        if self.official.ready:
+            from official_pool import OFFICIAL_REQUEST_SQL,busy_official
+            status = self.official.public_status()
+            for item in real_accounts.get('items', []):
+                account = item.get('key', '').removeprefix('flow-account-')
+                official = status['accounts'].get(account, {})
+                item.update(gemini='verified' if official.get('authorization') == 'saved_verified_identity' else 'unlinked',
+                            gemini_channel=status['channel'], gemini_auto_state='eligible' if official.get('dispatch_eligible') else official.get('restriction', 'authorization_not_ready'),
+                            gemini_model_options=[{'id':status['model'],'label':'Gemini 3.8 Flash · 官方调用'}],
+                            keepalive_state='not_required', keepalive_note='官方调用不使用网页保活；手动暂停和官方通道未确认限制保留。')
+                with self.connection() as db:
+                    pref=db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?',(account,)).fetchone()
+                    item['gemini_enabled']=not pref or pref[0] != 0
+                    item['gemini_unresolved']=db.execute("SELECT count(*) FROM requests r WHERE r.account_key=? AND r.status='unknown' AND "+OFFICIAL_REQUEST_SQL+" AND NOT EXISTS(SELECT 1 FROM account_unknown_release x WHERE x.request_id=r.request_id)",(account,)).fetchone()[0]
+                    item['gemini_busy']=busy_official(db,account)
+            real_accounts['official_dispatch']={k:v for k,v in status.items() if k!='accounts'}
             return
         browser_states = self._read_browser_inventory()
         with self.connection() as db:
@@ -423,9 +459,10 @@ class RealPool:
         """Only workbench requests, without message bodies or upstream credentials."""
         with self.connection() as db:
             rows = db.execute('''SELECT r.request_id,r.account_key,r.selection,r.status,r.created,r.finished,r.note,
-                                 CASE WHEN p.request_id IS NULL THEN 'legacy' ELSE 'pooldesk' END AS engine,
+                                 CASE WHEN j.request_id IS NOT NULL THEN 'official_antigravity_cli' WHEN p.request_id IS NULL THEN 'legacy' ELSE 'pooldesk' END AS engine,
                                  p.stage AS engine_stage,p.engine_version AS engine_version
                                  FROM requests r LEFT JOIN pooldesk_attempts p ON p.request_id=r.request_id
+                                 LEFT JOIN official_jobs j ON j.request_id=r.request_id
                                  ORDER BY r.created DESC LIMIT 100''').fetchall()
         return {'source': 'workbench', 'items': [dict(row) for row in rows]}
 
@@ -465,11 +502,10 @@ class RealPool:
     def _browser_inventory(self):
         flow_python = Path.home() / '.local/share/studiowright-evaluation/venv/bin/python'
         controller = self.program_dir / 'shared_session_controller.py'
-        sdk = self.program_dir / 'shared_session_sdk.py'
-        if not flow_python.is_file() or not controller.is_file() or controller.is_symlink() or not sdk.is_file() or sdk.is_symlink():
+        if not flow_python.is_file() or not controller.is_file() or controller.is_symlink():
             return None
         try:
-            result = subprocess.run([str(flow_python), '-B', str(controller), '--operation', 'inventory', '--sdk-path', str(sdk)],
+            result = subprocess.run([str(flow_python), '-B', str(controller), '--operation', 'inventory'],
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=True)
             if len(result.stdout) > 65536:
                 return None
@@ -479,34 +515,7 @@ class RealPool:
             return None
 
     def _execute(self, operation, account, prompt=None, files=None, conversation=None):
-        flow_python = Path.home() / '.local/share/studiowright-evaluation/venv/bin/python'
-        controller = self.program_dir / 'shared_session_controller.py'
-        sdk = self.program_dir / 'shared_session_sdk.py'
-        if (not flow_python.is_file() or not controller.is_file() or not sdk.is_file()
-                or controller.is_symlink() or sdk.is_symlink()):
-            return {'result': 'runtime_unavailable', 'submitted': False}
-        args = [str(flow_python), '-B', str(controller), '--operation', operation, '--sdk-path', str(sdk), '--account', account]
-        data = json.dumps({'prompt': prompt, 'files': [str(p) for p in (files or [])], 'conversation': conversation}, ensure_ascii=False).encode('utf-8') if operation == 'generate' else b''
-        try:
-            proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                    start_new_session=True)
-            try:
-                output, _ = proc.communicate(data, timeout=345 if operation == 'generate' else 230)
-            except subprocess.TimeoutExpired:
-                if os.name == 'posix':
-                    os.killpg(proc.pid, signal.SIGKILL)
-                else:
-                    proc.kill()
-                proc.communicate()
-                return {'result': 'outcome_unknown', 'submitted': 'unknown'}
-            if proc.returncode or len(output) > 1024 * 1024:
-                return {'result': 'outcome_unknown', 'submitted': 'unknown'}
-            result = json.loads(output)
-            if not isinstance(result, dict) or result.get('account_key') not in (None, account):
-                raise ValueError()
-            return result
-        except (OSError, ValueError, UnicodeError):
-            return {'result': 'outcome_unknown', 'submitted': 'unknown'}
+        return {'result':'legacy_transport_removed','submitted':False,'message':'已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'}
 
     def _reserve_account_check(self, account, items, owner_request_id=None):
         self.allowed(account, items)
@@ -530,171 +539,17 @@ class RealPool:
             db.execute('COMMIT')
             return True
 
+    @limited
     def check(self, account, items, operation='check', owner_request_id=None):
-        self.allowed(account, items)
-        if operation not in ('check', 'keepalive'):
-            raise ValueError('账号检查方式不正确。')
-        if operation == 'check':
-            if not self._reserve_account_check(account, items, owner_request_id):
-                return {'verified': False, 'reason': 'account_busy', 'message': '账号正在执行或检查，请稍后再核对。'}
-        try:
-            result = self.execute(operation, account)
-        except Exception as exc:
-            result = {'result': 'check_failed', 'submitted': False, 'error_type': type(exc).__name__}
-        if not isinstance(result, dict):
-            result = {'result': 'check_failed', 'submitted': False}
-        identity = result.get('identity') if isinstance(result.get('identity'), dict) else {}
-        valid = (result.get('result') == 'checked' and isinstance(identity, dict)
-                 and identity.get('identity_confirmed') is True and result.get('account_available') is True
-                 and type(result.get('available_models')) is int and result['available_models'] > 0
-                 and result.get('keepalive_status') != 'denied')
-        status = 'verified' if valid else 'unknown'
-        usage = clean_usage(result.get('usage')) if valid else None
-        checked = time.time()
-        error_type = result.get('error_type')
-        transient = result.get('result') == 'check_failed' and error_type in NETWORK_ERRORS
-        browser_unavailable = result.get('result') == 'no_confirmed_running_account'
-        if result.get('result') != 'account_busy' and not transient and not browser_unavailable:
-            with self.connection() as db:
-                db.execute('''INSERT INTO account_status(account_key,gemini_status,checked,available_models,last_note,quota_json,quota_checked)
-                              VALUES(?,?,?,?,?,?,?) ON CONFLICT(account_key) DO UPDATE SET
-                              gemini_status=excluded.gemini_status,checked=excluded.checked,
-                              available_models=excluded.available_models,last_note=excluded.last_note,
-                              quota_json=excluded.quota_json,quota_checked=excluded.quota_checked''',
-                           (account, status, checked, result.get('available_models') if valid else None,
-                            None if valid else '本次未确认', json.dumps(usage) if usage else None, checked if usage else None))
-                if valid and isinstance(result.get('models'), list):
-                    db.execute('UPDATE account_status SET models_json=? WHERE account_key=?',
-                               (json.dumps(clean_model_choices(result['models']), ensure_ascii=False), account))
-        reason = ('browser_unavailable' if browser_unavailable else
-                  'tls_error' if transient and error_type == 'SSLError' else 'connection_error' if transient
-                  else result.get('result') if result.get('result') in ('account_busy', 'checked') else 'check_failed')
-        keepalive = result.get('keepalive_status') if result.get('keepalive_status') in ('renewed', 'accepted', 'denied', 'unavailable') else None
-        keepalive_reason = result.get('keepalive_reason') if result.get('keepalive_reason') in ('timeout', 'tls_error', 'connection_error', 'unexpected_redirect', 'unexpected_response', 'cookie_unconfirmed', 'unavailable', 'rejected') else None
-        keepalive_phase = result.get('keepalive_phase') if result.get('keepalive_phase') in ('opening_browser', 'opening_google', 'renewing', 'checking_cookie') else None
-        diagnosis = ('browser_unavailable' if browser_unavailable else
-                     'browser_identity_unconfirmed' if result.get('result') == 'flow_identity_unavailable' else
-                     'session_missing' if result.get('result') == 'gemini_session_unavailable' else
-                     'identity_unconfirmed' if result.get('result') == 'checked' and identity.get('identity_confirmed') is not True else
-                     'account_unavailable' if result.get('result') == 'checked' and result.get('account_available') is not True else
-                     'models_unavailable' if result.get('result') == 'checked' and not result.get('available_models') else
-                     'renewal_rate_limited' if keepalive == 'denied' and error_type == 'KeepaliveHttp429' else
-                     'renewal_unauthorized' if keepalive == 'denied' and error_type == 'KeepaliveHttp401' else
-                     'renewal_forbidden' if keepalive == 'denied' and error_type == 'KeepaliveHttp403' else
-                     'renewal_rejected' if keepalive == 'denied' else
-                     'authentication_unavailable' if result.get('error_code') == 'authentication_unavailable' else
-                     'quota_unavailable' if valid and not usage else
-                     reason)
-        diagnoses = {'browser_unavailable':'账号浏览器未确认运行，请先恢复该账号浏览器',
-                     'browser_identity_unconfirmed':'浏览器中的账号身份未确认，请在原账号窗口检查登录',
-                     'session_missing':'原账号缺少 Gemini 登录信息，请在该账号浏览器登录 Gemini',
-                     'identity_unconfirmed':'Gemini 返回的账号身份未确认，请核对原账号登录',
-                     'account_unavailable':'Gemini 未确认账号可用，请在原账号页面检查限制',
-                     'models_unavailable':'Gemini 暂未返回可用模型',
-                     'authentication_unavailable':'Gemini 登录页面未返回有效会话，请核对原账号登录',
-                     'renewal_rate_limited':'Gemini 暂时限制了续期请求，已停止，不会自动重试',
-                     'renewal_unauthorized':'Gemini 未接受本次续期的登录信息，已停止，不会自动重试',
-                     'renewal_forbidden':'Gemini 拒绝了本次续期请求，具体原因未确认，已停止，不会自动重试',
-                     'renewal_rejected':'Gemini 拒绝本次续期，具体原因未记录，已停止，不会自动重试',
-                     'tls_error':'安全连接失败，原账号状态保留，请检查代理后手动恢复',
-                     'connection_error':'连接未完成，原账号状态保留，请检查连接后手动恢复',
-                     'account_busy':'账号正在使用，本次未执行检查',
-                     'checked':'登录和额度已核对' if usage else '登录已核对，额度读取未完成',
-                     'quota_unavailable': '登录已核对；Gemini 未返回额度数据' if result.get('quota_read') == 'not_returned' else '登录已核对；额度读取未完成，不能自动调度',
-                     'check_failed':'本次检查未完成，已停止，不会自动重试'}
-        diagnostic_note = diagnoses.get(diagnosis, '本次检查未完成，已停止，请核对原账号')
-        phase = result.get('phase') if result.get('phase') in ('initializing','opening_google','loading_account','loading_usage','renewing','checking_cookie') else keepalive_phase
-        error_name = error_type or result.get('quota_error')
-        safe_error = error_name if isinstance(error_name, str) and re.fullmatch('[A-Za-z_][A-Za-z_0-9]{0,63}', error_name) else None
-        quota_state = 'available' if usage else 'read_failed' if valid else 'login_unconfirmed'
-        with self.connection() as db:
-            db.execute('INSERT INTO account_checks VALUES(?,?,?,?,?,?,?,?,?,?)',
-                       (str(uuid.uuid4()), account, operation, 'verified' if valid else 'unconfirmed',
-                        diagnosis, phase, safe_error, quota_state, checked, diagnostic_note))
-            if operation == 'keepalive':
-                def safe_expiry(value):
-                    return value if type(value) in (int,float) and math.isfinite(value) else None
-                returned, changed = result.get('keepalive_cookie_returned'),result.get('keepalive_value_changed')
-                db.execute('INSERT INTO keepalive_evidence VALUES(?,?,?,?,?,?,?,?)',
-                           (str(uuid.uuid4()),account,checked,keepalive,int(returned) if type(returned) is bool else None,
-                            safe_expiry(result.get('keepalive_expiry_before')),safe_expiry(result.get('keepalive_expiry_after')),
-                            int(changed) if type(changed) is bool else None))
-        if operation == 'check':
-            note = (('登录和额度已核对' if usage else '登录已核对，额度暂未知') if valid else
-                    '账号正在使用，稍后再检查' if reason == 'account_busy' else
-                    '账号浏览器未确认运行，登录状态未改变；请先检查账号' if reason == 'browser_unavailable' else
-                    '安全连接失败，账号状态未改变' if reason == 'tls_error' else
-                    '连接失败，账号状态未改变' if reason == 'connection_error' else diagnostic_note)
-            with self.connection() as db:
-                monitor_status = 'ready' if valid or reason == 'account_busy' else 'paused'
-                due = checked + (3600 if valid else 300 if reason == 'account_busy' else 900) if monitor_status != 'paused' else None
-                if transient:
-                    note += '；请手动核对'
-                db.execute("UPDATE account_monitor SET status=?,next_due=?,last_note=? WHERE account_key=? AND status='dispatching'",
-                           (monitor_status, due, note, account))
-        return {'verified': valid, 'reason': reason, 'keepalive': keepalive, 'keepalive_reason': keepalive_reason,
-                'keepalive_phase': keepalive_phase, 'quota_available': bool(usage), 'diagnosis': diagnosis,
-                'phase': phase, 'error_type': safe_error,
-                'message': ('Gemini 登录、模型和额度已核对。' if valid and usage else
-                            'Gemini 登录及模型已核对；额度读取未完成，不能自动调度。' if valid else
-                            '账号正在使用，请稍后再核对。' if reason == 'account_busy' else
-                            '账号浏览器未确认运行，请先在 Flow 后台检查登录。' if reason == 'browser_unavailable' else
-                            'Gemini 安全连接失败，本次未发送问题。' if reason == 'tls_error' else
-                            'Gemini 连接失败，本次未发送问题。' if reason == 'connection_error' else
-                            diagnostic_note + '。')}
+        return {'verified':False,'reason':'legacy_transport_removed','submitted':False,'message':'已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'}
 
+    @limited
     def recover_account(self, account, items):
-        """One user-requested login/usage/renewal check; never retry or change identity."""
-        if not self._reserve_account_check(account, items):
-            return {'verified':False,'recovered':False,'reason':'account_busy','message':'账号正在执行或检查，本次未恢复。'}
-        try:
-            result = self.check(account, items, operation='keepalive')
-        except Exception:
-            result = {'verified':False,'reason':'check_failed','message':'本次恢复未完成，已暂停，不会自动重试。'}
-        self._finish_keepalive(account, result, time.time())
-        recovered = result.get('verified') and result.get('keepalive') in ('renewed','accepted')
-        result['recovered'] = bool(recovered)
-        result['message'] = ('登录、额度和保活已恢复。' if recovered and result.get('quota_available') else
-                             '登录及保活已恢复；额度读取未完成，不能自动调度。' if recovered else
-                             '登录已核对，但续期未确认，保活已暂停；不会自动重试。' if result.get('verified') else result['message'])
-        return result
+        return {'verified':False,'recovered':False,'reason':'legacy_transport_removed','submitted':False,'message':'已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'}
 
+    @limited
     def monitor_once(self, items, now=None):
-        """One account at a time; stop automatically after an authentication rejection."""
-        now = time.time() if now is None else now
-        permitted = {item.get('key', '').removeprefix('flow-account-') for item in items if isinstance(item, dict)
-                     and isinstance(item.get('key'), str) and item['key'].startswith('flow-account-')}
-        with self.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
-            if self.maintenance():
-                db.execute('ROLLBACK')
-                return None
-            accounts = [row['account_key'] for row in db.execute("""SELECT a.account_key FROM account_status a
-                         LEFT JOIN account_preferences p ON p.account_key=a.account_key
-                         WHERE a.gemini_status='verified' AND COALESCE(p.gemini_enabled,1)=1
-                         AND COALESCE(p.keepalive_enabled,1)=1 ORDER BY a.account_key""")
-                        if row['account_key'] in permitted and ACCOUNT.fullmatch(row['account_key'])]
-            for index, account in enumerate(accounts):
-                db.execute("INSERT OR IGNORE INTO account_monitor(account_key,status,next_due) VALUES(?,'ready',?)", (account, now + index * 300))
-            row = db.execute('''SELECT m.account_key FROM account_monitor m JOIN account_status a ON a.account_key=m.account_key
-                                WHERE m.status='ready' AND m.next_due<=? AND a.gemini_status='verified'
-                                  AND NOT EXISTS(SELECT 1 FROM account_preferences p WHERE p.account_key=m.account_key AND p.gemini_enabled=0)
-                                  AND NOT EXISTS(SELECT 1 FROM account_preferences p WHERE p.account_key=m.account_key AND p.keepalive_enabled=0)
-                                  AND NOT EXISTS(SELECT 1 FROM requests r WHERE r.account_key=m.account_key AND (r.status='dispatching' OR
-                                      (r.status='unknown' AND NOT EXISTS(SELECT 1 FROM account_unknown_release x WHERE x.request_id=r.request_id))))
-                                ORDER BY m.next_due,m.account_key''', (now,)).fetchall()
-            account = next((r['account_key'] for r in row if r['account_key'] in permitted), None)
-            if not account:
-                db.execute('COMMIT')
-                return None
-            db.execute("UPDATE account_monitor SET status='dispatching',last_attempt=? WHERE account_key=?", (now, account))
-            db.execute('COMMIT')
-        try:
-            result = self.check(account, items, operation='keepalive')
-        except Exception:
-            result = {'verified': False, 'reason': 'check_failed'}
-        self._finish_keepalive(account, result, now)
-        return {'checked': True, 'verified': bool(result.get('verified')), 'keepalive': result.get('keepalive')}
+        return None  # Browser cookie renewal was removed; never contact Google here.
 
     def _finish_keepalive(self, account, result, now):
         reason, keepalive = result.get('reason'), result.get('keepalive')
@@ -729,6 +584,12 @@ class RealPool:
             return None
         result = dict(row)
         result['diagnostic'] = dict(diagnostic) if diagnostic else None
+        with self.connection() as db:
+            official=db.execute('SELECT conversation_id,queue_wait_ms,model FROM official_jobs WHERE request_id=?',(request_id,)).fetchone()
+            metric=db.execute('SELECT first_text_ms,total_ms,token_count FROM request_metrics WHERE request_id=?',(request_id,)).fetchone()
+        if official:
+            result.update(dict(official));result['channel']='official_antigravity_cli'
+        if metric:result.update(dict(metric))
         result['images'] = ['/api/gemini-images/'+request_id+'/'+str(image['position']) for image in images]
         result['image_status'] = dict(image_status) if image_status else None
         return result
@@ -773,10 +634,11 @@ class RealPool:
             row = db.execute('SELECT id,title,created,updated,account_key,blocked,hidden,native_json FROM conversations WHERE id=?', (ident,)).fetchone()
             if not row:
                 return None
-            turns = db.execute('''SELECT t.request_id,t.prompt,t.attachments,r.status,r.response,r.note,r.created,m.first_text_ms,am.model AS selected_model,
+            turns = db.execute('''SELECT t.request_id,t.prompt,t.attachments,r.account_key,r.status,r.response,r.note,r.created,m.first_text_ms,m.token_count,j.queue_wait_ms,am.model AS selected_model,
                                   COALESCE(m.total_ms,CASE WHEN r.status='completed' AND r.finished>=r.created THEN (r.finished-r.created)*1000 END) AS total_ms
                                   FROM conversation_turns t JOIN requests r ON r.request_id=t.request_id
                                   LEFT JOIN request_metrics m ON m.request_id=r.request_id
+                                  LEFT JOIN official_jobs j ON j.request_id=r.request_id
                                   LEFT JOIN conversation_attempt_models am ON am.request_id=t.request_id
                                   WHERE t.conversation_id=? ORDER BY r.created,r.request_id''', (ident,)).fetchall()
             attempted = db.execute('''SELECT m.model FROM conversation_turns t
@@ -792,6 +654,7 @@ class RealPool:
         native = result.pop('native_json')
         try:
             native = json.loads(native) if native else {}
+            result['channel'] = native.get('channel') if isinstance(native, dict) else None
             result['model'] = native.get('model') if isinstance(native, dict) and isinstance(native.get('model'), str) else None
         except (TypeError, ValueError):
             result['model'] = None
@@ -855,18 +718,85 @@ class RealPool:
         with self.connection() as db:
             row = db.execute('SELECT manual_json,suggested_json FROM material_extra WHERE asset_id=?', (ident,)).fetchone()
             latest = db.execute('SELECT status,note,created FROM material_analyses WHERE asset_id=? ORDER BY created DESC LIMIT 1', (ident,)).fetchone()
+            shot = db.execute('SELECT notes_json,source FROM material_shot_notes WHERE asset_id=?', (ident,)).fetchone()
+            shot_job = db.execute('SELECT request_id,status,note FROM material_shot_jobs WHERE asset_id=?', (ident,)).fetchone()
             automatic = db.execute('SELECT status,note,updated FROM auto_material_jobs WHERE asset_id=?', (ident,)).fetchone()
+            if not automatic and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='material_backfill_jobs'").fetchone():
+                automatic = db.execute('SELECT status,note,updated FROM material_backfill_jobs WHERE asset_id=?', (ident,)).fetchone()
         return {'manual': json.loads(row['manual_json']) if row else {},
                 'suggested': json.loads(row['suggested_json']) if row else {},
+                'shot_notes': json.loads(shot['notes_json']) if shot else {},
+                'shot_notes_source': shot['source'] if shot else None,
+                'shot_job': dict(shot_job) if shot_job else None,
                 'analysis': dict(latest) if latest else None,
                 'automatic': dict(automatic) if automatic else None}
+
+    def material_card_fields(self, ids):
+        ids = list(dict.fromkeys(self.material_id(ident) for ident in ids))
+        if not ids or len(ids) > 100:
+            return {}
+        fields = ('viewpoint', 'composition', 'movement', 'shot_size')
+        with self.connection() as db:
+            rows = db.execute('''SELECT e.asset_id,e.manual_json,e.suggested_json,
+                (SELECT a.status FROM material_analyses a WHERE a.asset_id=e.asset_id ORDER BY a.created DESC LIMIT 1) AS status
+                FROM material_extra e WHERE e.asset_id IN (''' + ','.join('?' for _ in ids) + ')', ids).fetchall()
+        result = {}
+        for row in rows:
+            try:
+                manual = json.loads(row['manual_json']); suggested = json.loads(row['suggested_json']) if row['status']=='completed' else {}
+                result[row['asset_id']] = {k: manual.get(k) or suggested.get(k) for k in fields if manual.get(k) or suggested.get(k)}
+            except (ValueError, TypeError, AttributeError):
+                continue
+        return result
+
+    def material_analysis_history(self, page=1, limit=20, ident=None):
+        """Read saved analysis attempts and their original request identities."""
+        if type(page) is not int or page < 1 or type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError('分析记录页码不正确。')
+        if ident is not None:
+            self.material_id(ident)
+        where = 'WHERE a.asset_id=?' if ident else ''
+        params = (ident,) if ident else ()
+        with self.connection() as db:
+            total = db.execute('SELECT count(*) FROM material_analyses a ' + where, params).fetchone()[0]
+            rows = db.execute('''SELECT a.request_id,a.asset_id,a.status,a.note,a.created,a.finished,
+                                r.account_key,r.status AS request_status,r.selection,r.response,
+                                CASE WHEN b.request_id IS NOT NULL THEN 'backfill'
+                                     WHEN j.request_id IS NOT NULL THEN 'automatic' ELSE 'manual' END AS origin
+                                FROM material_analyses a
+                                LEFT JOIN requests r ON r.request_id=a.request_id
+                                LEFT JOIN material_backfill_jobs b ON b.request_id=a.request_id
+                                LEFT JOIN auto_material_jobs j ON j.request_id=a.request_id ''' + where +
+                              ' ORDER BY a.created DESC,a.request_id DESC LIMIT ? OFFSET ?',
+                              params + (limit, (page-1)*limit)).fetchall()
+        allowed = {'subject','scene','action','style','camera','color','keywords','shot_size','viewpoint','composition','movement'}
+        items = []
+        for row in rows:
+            entry = dict(row)
+            text = entry.pop('response') or ''
+            entry['result_tags'] = None
+            if entry['request_status'] == 'completed' and isinstance(text, str):
+                text = text.strip()
+                blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)```', text, flags=re.I)
+                if len(blocks) == 1:
+                    text = blocks[0].strip()
+                try:
+                    value = json.loads(text)
+                    if (isinstance(value, dict) and value and not (set(value)-allowed)
+                            and all(isinstance(v, list) and len(v) <= 30 and all(isinstance(x, str) and x.strip() and len(x.strip()) <= 100 for x in v) for v in value.values())):
+                        entry['result_tags'] = {k:list(dict.fromkeys(x.strip() for x in v)) for k,v in value.items()}
+                except (ValueError, TypeError):
+                    pass
+            items.append(entry)
+        return {'items': items, 'page': page, 'pages': max(1, (total+limit-1)//limit), 'total': total}
 
     def auto_material_state(self):
         with self.connection() as db:
             settings = db.execute('SELECT enabled,since,paused_reason FROM auto_material_settings WHERE id=1').fetchone()
             counts = {row['status']: row['n'] for row in db.execute('SELECT status,count(*) AS n FROM auto_material_jobs GROUP BY status')}
         return {'enabled': bool(settings['enabled']), 'since': settings['since'],
-                'paused_reason': settings['paused_reason'], 'counts': counts}
+                'paused_reason': settings['paused_reason'] or ('官方分析账号未就绪；已入库素材保留。' if not self.official.ready else None),
+                'counts': counts}
 
     def set_auto_material_enabled(self, enabled):
         if type(enabled) is not bool:
@@ -886,6 +816,7 @@ class RealPool:
         return self.auto_material_state()
 
     def discover_auto_materials(self, items):
+        from material_backfill import has_labels
         if not isinstance(items, list):
             raise ValueError('素材列表格式不正确。')
         supported = {'image/jpeg','image/png','image/webp','video/mp4','video/webm'}
@@ -906,49 +837,16 @@ class RealPool:
                 valid = (type(size) is int and 0 < size <= UPLOAD_LIMIT and mime in supported
                          and ((kind == 'image' and mime.startswith('image/')) or (kind == 'video' and mime.startswith('video/'))))
                 previous = db.execute('SELECT 1 FROM material_analyses WHERE asset_id=? LIMIT 1', (ident,)).fetchone()
-                state = 'waiting' if valid and not previous else 'skipped'
-                note = '等待自动分析' if state == 'waiting' else '已有分析记录或素材格式、大小不支持'
+                backfilled = db.execute('SELECT 1 FROM material_backfill_jobs WHERE asset_id=? LIMIT 1', (ident,)).fetchone()
+                tagged = has_labels(item.get('tags')) or has_labels(item.get('structured_tags'))
+                state = 'waiting' if valid and not previous and not backfilled and not tagged else 'skipped'
+                note = '等待自动分析' if state == 'waiting' else '已有标签或分析记录，或素材格式、大小不支持'
                 db.execute('INSERT OR IGNORE INTO auto_material_jobs(asset_id,status,added,updated,note) VALUES(?,?,?,?,?)',
                            (ident, state, added, time.time(), note))
             db.execute('COMMIT')
 
     def claim_auto_material(self, items):
-        with self.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
-            settings = db.execute('SELECT enabled,paused_reason FROM auto_material_settings WHERE id=1').fetchone()
-            if self.maintenance() or not settings['enabled'] or settings['paused_reason']:
-                db.execute('COMMIT')
-                return None
-            if db.execute("SELECT 1 FROM auto_material_jobs WHERE status='running' LIMIT 1").fetchone():
-                db.execute("UPDATE auto_material_settings SET paused_reason='有分析状态未确认，请核对后再继续；不会自动重试' WHERE id=1")
-                db.execute('COMMIT')
-                return None
-            # Share one analysis lane with manually started historical backfills.
-            if db.execute("SELECT 1 FROM material_analyses WHERE status IN ('preparing','saving') LIMIT 1").fetchone():
-                db.execute('COMMIT')
-                return None
-            try:
-                try:
-                    self.choose_account(db, items, time.time())
-                except Conflict:
-                    self.choose_account(db, items, time.time(), stale=True)
-            except Conflict:
-                db.execute('COMMIT')
-                return None
-            row = db.execute("SELECT asset_id FROM auto_material_jobs WHERE status='waiting' ORDER BY added,asset_id LIMIT 1").fetchone()
-            if not row:
-                db.execute('COMMIT')
-                return None
-            ident = row['asset_id']
-            if db.execute('SELECT 1 FROM material_analyses WHERE asset_id=? LIMIT 1', (ident,)).fetchone():
-                db.execute("UPDATE auto_material_jobs SET status='skipped',updated=?,note='已有分析记录，未重复提交' WHERE asset_id=?", (time.time(), ident))
-                db.execute('COMMIT')
-                return None
-            request = str(uuid.uuid4())
-            db.execute("INSERT INTO material_analyses(request_id,asset_id,status,created) VALUES(?,?,'preparing',?)", (request, ident, time.time()))
-            db.execute("UPDATE auto_material_jobs SET status='running',request_id=?,updated=?,note='正在分析' WHERE asset_id=? AND status='waiting'", (request, time.time(), ident))
-            db.execute('COMMIT')
-            return {'asset_id': ident, 'request_id': request}
+        return None  # No retired provider may claim a new analysis job.
 
     def finish_auto_material(self, request):
         self.conversation_id(request)
@@ -1005,15 +903,23 @@ class RealPool:
             db.execute('COMMIT')
 
     def finish_material_analysis(self, ident, request_id):
+        from material_vision import clean_shot_notes
         self.material_id(ident)
         record = self.get(request_id)
-        status, note, suggested = 'failed', '分析未提交，请检查附件和账号状态。', None
+        status, note, suggested, shot_notes = 'failed', '分析未提交，请检查附件和账号状态。', None, {}
         if record and record['status'] == 'completed':
             note, status = '已收到 Gemini 分析。', 'completed'
             text = record.get('response') or ''
-            text = re.sub(r'^\s*```(?:json)?\s*|\s*```\s*$', '', text.strip(), flags=re.I)
+            text = text.strip()
+            # Gemini sometimes adds an explanation after a fenced JSON answer.
+            # Accept one complete fenced block; do not guess between multiple blocks.
+            blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)```', text, flags=re.I)
+            if len(blocks) == 1:
+                text = blocks[0].strip()
             try:
                 value = json.loads(text)
+                notes = value.pop('shot_notes', None) if isinstance(value, dict) else None
+                shot_notes = clean_shot_notes(notes)
                 allowed = {'subject','scene','action','style','camera','color','keywords','shot_size','viewpoint','composition','movement'}
                 if (not isinstance(value, dict) or set(value) - allowed or not value
                         or any(not isinstance(v, list) or len(v) > 30 or any(not isinstance(x, str) or not x.strip() or len(x.strip()) > 100 for x in v) for v in value.values())):
@@ -1028,12 +934,15 @@ class RealPool:
             note = record['note']
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            db.execute('UPDATE material_analyses SET status=?,finished=?,note=? WHERE request_id=? AND asset_id=? AND status=?',
-                       (status, time.time(), note, request_id, ident, 'preparing'))
-            if suggested is not None:
+            changed = db.execute('UPDATE material_analyses SET status=?,finished=?,note=? WHERE request_id=? AND asset_id=? AND status=?',
+                                 (status, time.time(), note, request_id, ident, 'preparing')).rowcount
+            if changed and suggested is not None:
                 db.execute("""INSERT INTO material_extra(asset_id,suggested_json,updated) VALUES(?,?,?)
                            ON CONFLICT(asset_id) DO UPDATE SET suggested_json=excluded.suggested_json,updated=excluded.updated""",
                            (ident, json.dumps(suggested, ensure_ascii=False), time.time()))
+                if shot_notes:
+                    db.execute("INSERT OR IGNORE INTO material_shot_notes(asset_id,notes_json,source) VALUES(?,?,'gemini')",
+                               (ident, json.dumps(shot_notes, ensure_ascii=False)))
             db.execute('COMMIT')
         return self.material_extra(ident)
 
@@ -1046,7 +955,7 @@ class RealPool:
 
     def get_flow(self, request_id):
         with self.connection() as db:
-            row = db.execute('SELECT request_id,project_key,kind,status,created,finished,task_id,note FROM flow_requests WHERE request_id=?', (request_id,)).fetchone()
+            row = db.execute('SELECT request_id,project_key,profile,project,kind,status,created,finished,task_id,note FROM flow_requests WHERE request_id=?', (request_id,)).fetchone()
         return dict(row) if row else None
 
     def upload(self, request_id, index, extension, stream, length):
@@ -1313,22 +1222,134 @@ class RealPool:
             raise ValueError('response too large')
         return json.loads(raw)
 
+    @staticmethod
+    def flow_project_key(profile, project):
+        encoded = json.dumps(['flow', profile, project], ensure_ascii=False, separators=(',', ':')).encode()
+        return 'flow-project-' + hashlib.sha256(encoded).hexdigest()
+
+    def _create_flow_project(self, profile):
+        pid = subprocess.check_output(['systemctl', '--user', 'show', 'studiowright-console.service',
+                                       '--property=MainPID', '--value'], text=True, timeout=5).strip()
+        if not pid.isdigit() or pid == '0':
+            raise RuntimeError('Flow 后台不可用。')
+        python = os.fsdecode(Path('/proc', pid, 'cmdline').read_bytes().split(b'\0')[0])
+        process = subprocess.run([python, '-B', str(self.program_dir / 'create_flow_project.py')],
+                                 input=json.dumps({'profile': profile}).encode(), capture_output=True, timeout=100)
+        if process.returncode or len(process.stdout) > 4096:
+            raise RuntimeError('创建项目的结果未确认。')
+        result = json.loads(process.stdout)
+        if isinstance(result, dict) and result.get('result') == 'not_started':
+            raise ProjectNotStarted()
+        project = result.get('project') if isinstance(result, dict) else None
+        if not isinstance(project, str) or str(uuid.UUID(project)) != project:
+            raise RuntimeError('创建项目的结果未确认。')
+        return project
+
+    def _register_flow_project(self, profile, project, email):
+        class NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+        if not isinstance(email, str) or email.count('@') != 1 or not all(email.strip().split('@')):
+            raise RuntimeError('项目所属账号的邮箱未确认。')
+        title = 'FLOW+' + email.strip().lower().split('@', 1)[0]
+        body = json.dumps({'profile': profile, 'id': project, 'title': title}).encode()
+        request = Request('http://127.0.0.1:18888/api/projects', data=body, method='POST',
+                          headers={'Content-Type': 'application/json', 'X-Console-Request': '1',
+                                   'Origin': 'http://127.0.0.1:18888'})
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=8) as response:
+            result = json.loads(response.read(8193))
+        if not isinstance(result, dict) or result.get('ok') is not True:
+            raise RuntimeError('项目登记未确认。')
+
+    def _auto_flow_project(self, snapshot, request_id, intent):
+        if not snapshot.get('flow_state', {}).get('available') or not snapshot.get('real_accounts', {}).get('available'):
+            raise Conflict('Flow 账号或项目列表暂不可用，无法自动安排。')
+        accounts = [a for a in snapshot['real_accounts'].get('items', []) if isinstance(a, dict)
+                    and isinstance(a.get('profile'), str) and a.get('flow_login') == 'verified'
+                    and a.get('flow_health') == 'ready' and a.get('flow_risk_known') is True
+                    and a.get('flow_risk_paused') is False and a.get('flow_pacing_known') is True
+                    and a.get('flow_cooling') is False]
+        unique = {a['profile']: a for a in accounts}
+        if not unique:
+            raise Conflict('当前没有可自动派发的 Flow 账号。')
+        with self.connection() as db:
+            reservation = db.execute('SELECT * FROM flow_auto_projects WHERE request_id=?', (request_id,)).fetchone()
+            last = {r['profile']: r['used'] for r in db.execute('SELECT profile,MAX(created) AS used FROM flow_requests GROUP BY profile')}
+        if reservation:
+            if reservation['intent'] != intent:
+                raise Conflict('该请求编号已用于其他任务。')
+            profile = reservation['profile']
+            if reservation['status'] != 'created' or profile not in unique:
+                raise Conflict('项目创建结果待核对，未再次创建或提交任务。')
+            project_id = reservation['project']
+            try:
+                self._register_flow_project(profile, project_id, unique[profile].get('email'))
+            except Exception:
+                raise Conflict('项目已创建，但登记结果待核对；不会重复创建。') from None
+            return {'key': self.flow_project_key(profile, project_id), 'source_profile': profile, 'source_id': project_id}
+        pending = {profile: sum(1 for t in snapshot.get('tasks', []) if t.get('source_profile') == profile
+                                and t.get('status') in ('queued', 'running')) for profile in unique}
+        order = sorted(unique, key=lambda p: (pending[p], last.get(p) or 0, p))
+        projects = snapshot.get('projects', [])
+        # Choose the account first; lack of a project must not skip its turn.
+        profile = order[0]
+        rows = [p for p in projects if p.get('source_profile') == profile and isinstance(p.get('key'), str)
+                and isinstance(p.get('source_id'), str)
+                and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', p['source_id'])
+                and sum(q.get('key') == p['key'] for q in projects) == 1]
+        if rows:
+            preferred = snapshot.get('retry_projects', {}).get(profile)
+            project_load = {p['key']: sum(1 for t in snapshot.get('tasks', [])
+                              if t.get('project_key') == p['key'] and t.get('status') in ('queued', 'running'))
+                            for p in rows}
+            rows.sort(key=lambda p: (project_load[p['key']], p['key'] != preferred,
+                                     -(p.get('checked') or 0), p['source_id']))
+            return rows[0]
+        if any(p.get('source_profile') == profile for p in projects):
+            raise Conflict('此账号现有项目的归属或编号无法确认，暂不新建或改用其他账号。')
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if self.maintenance():
+                db.execute('ROLLBACK')
+                raise Conflict('工作台正在更新。')
+            existing = db.execute('SELECT * FROM flow_auto_projects WHERE profile=? OR request_id=?', (profile, request_id)).fetchone()
+            if existing:
+                db.execute('ROLLBACK')
+                raise Conflict('该账号已有项目创建记录待核对，未重复创建。')
+            db.execute("INSERT INTO flow_auto_projects(profile,request_id,intent,status,updated) VALUES(?,?,?,'creating',?)",
+                       (profile, request_id, intent, time.time()))
+            db.execute('COMMIT')
+        try:
+            project_id = self._create_flow_project(profile)
+        except ProjectNotStarted:
+            with self.connection() as db:
+                db.execute("DELETE FROM flow_auto_projects WHERE request_id=? AND status='creating'", (request_id,))
+            raise Conflict('账号窗口暂不可用，未创建项目；可以稍后再提交。') from None
+        except Exception:
+            with self.connection() as db:
+                db.execute("UPDATE flow_auto_projects SET status='unknown',updated=? WHERE request_id=?", (time.time(), request_id))
+            raise Conflict('项目创建结果待核对，未再次创建或提交任务。') from None
+        with self.connection() as db:
+            db.execute("UPDATE flow_auto_projects SET status='created',project=?,updated=? WHERE request_id=?",
+                       (project_id, time.time(), request_id))
+        try:
+            self._register_flow_project(profile, project_id, unique[profile].get('email'))
+        except Exception:
+            raise Conflict('项目已创建，但登记结果待核对；不会重复创建。') from None
+        return {'key': self.flow_project_key(profile, project_id), 'source_profile': profile, 'source_id': project_id}
+
     def submit_flow(self, data, request_id, snapshot, send=None):
         try:
             if not isinstance(request_id, str) or str(uuid.UUID(request_id)) != request_id:
                 raise ValueError()
         except (ValueError, AttributeError):
             raise ValueError('请求标识不正确。') from None
-        if not isinstance(data, dict) or set(data) != {'project_key', 'kind', 'params', 'confirm'} or data['confirm'] is not True:
+        if (not isinstance(data, dict) or set(data) - {'project_key', 'kind', 'params', 'confirm', 'auto_retry'}
+                or not {'kind', 'params', 'confirm'} <= set(data) or data['confirm'] is not True):
             raise ValueError('请确认任务和可能使用的积分。')
-        projects = [p for p in snapshot.get('projects', []) if p.get('key') == data['project_key']]
-        if len(projects) != 1:
-            raise Conflict('项目无法唯一匹配，请刷新项目列表。')
-        project = projects[0]
-        profile, project_id = project['source_profile'], project['source_id']
-        accounts = [a for a in snapshot.get('real_accounts', {}).get('items', []) if a.get('profile') == profile]
-        if len(accounts) != 1 or accounts[0].get('flow_login') != 'verified':
-            raise Conflict('该项目所属账号的 Flow 登录未确认。')
+        auto_retry = data.get('auto_retry', False)
+        if type(auto_retry) is not bool:
+            raise ValueError('自动重试设置不正确。')
         kind, params = data['kind'], data['params']
         if kind not in ('image', 'video') or not isinstance(params, dict):
             raise ValueError('任务类型不正确。')
@@ -1350,8 +1371,39 @@ class RealPool:
         flow_params = dict(params)
         if kind == 'image':
             flow_params.pop('max_credits')
+        # Reject an oversized payload before the optional project-creation side effect.
+        estimate = {'profile': 'x' * 64, 'project': '0' * 36, 'kind': kind, 'params': flow_params,
+                    'confirm_generation': True, 'request_key': request_id, 'auto_retry': auto_retry}
+        if len(json.dumps(estimate, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > 32768:
+            raise ValueError('提示词过长，请缩短后提交。')
+        project_key = data.get('project_key')
+        if project_key is not None and not isinstance(project_key, str):
+            raise ValueError('项目标识不正确。')
+        auto = project_key in (None, '', 'auto')
+        with self.connection() as db:
+            prior = db.execute('SELECT * FROM flow_requests WHERE request_id=?', (request_id,)).fetchone()
+        if prior:
+            if not auto and project_key != prior['project_key']:
+                raise Conflict('该请求编号已用于其他任务。')
+            profile, project_id, project_key = prior['profile'], prior['project'], prior['project_key']
+        elif auto:
+            if self.maintenance():
+                raise Conflict('工作台正在更新。')
+            intent = hashlib.sha256(json.dumps({'kind': kind, 'params': params}, ensure_ascii=False,
+                                               sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            project = self._auto_flow_project(snapshot, request_id, intent)
+            profile, project_id, project_key = project['source_profile'], project['source_id'], project['key']
+        else:
+            projects = [p for p in snapshot.get('projects', []) if p.get('key') == project_key]
+            if len(projects) != 1:
+                raise Conflict('项目无法唯一匹配，请刷新项目列表。')
+            project = projects[0]
+            profile, project_id = project['source_profile'], project['source_id']
+            accounts = [a for a in snapshot.get('real_accounts', {}).get('items', []) if a.get('profile') == profile]
+            if len(accounts) != 1 or accounts[0].get('flow_login') != 'verified':
+                raise Conflict('该项目所属账号的 Flow 登录未确认。')
         body = {'profile': profile, 'project': project_id, 'kind': kind, 'params': flow_params,
-                'confirm_generation': True, 'request_key': request_id, 'auto_retry': True}
+                'confirm_generation': True, 'request_key': request_id, 'auto_retry': auto_retry}
         if len(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > 32768:
             raise ValueError('提示词过长，请缩短后提交。')
         digest = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -1368,7 +1420,7 @@ class RealPool:
                 db.execute('ROLLBACK')
                 raise Conflict('工作台正在更新。')
             db.execute("INSERT INTO flow_requests(request_id,digest,project_key,profile,project,kind,status,created) VALUES(?,?,?,?,?,?,'dispatching',?)",
-                       (request_id, digest, data['project_key'], profile, project_id, kind, time.time()))
+                       (request_id, digest, project_key, profile, project_id, kind, time.time()))
             db.execute('COMMIT')
         status, task_id, note = 'unknown', None, '提交结果未确认，请先在原后台核对任务。'
         try:
@@ -1422,6 +1474,4 @@ class RealPool:
         return min(candidates)[2]
 
     def generate(self, account, prompt, request_id, items, attachments=None, conversation_id=None, model=None):
-        # All new workbench Gemini requests enter the adapted PoolDesk processor.
-        from pooldesk_shared import SharedPoolDesk
-        return SharedPoolDesk(self).complete(account, prompt, request_id, items, attachments, conversation_id, model)
+        return self.official.generate(account,prompt,request_id,items,attachments,conversation_id,model)

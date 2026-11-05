@@ -13,6 +13,7 @@ import sqlite3
 import struct
 import subprocess
 import threading
+from dispatch_limit import DispatchBusy
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -62,34 +63,6 @@ def clean_text(value, limit=300):
     return re.sub(r"[\x00-\x1f\x7f]", " ", value).strip()[:limit]
 
 
-def perform_material_analysis(sources, real_pool, ident, request_id, account_data):
-    """Run one already registered analysis; its request is never resent here."""
-    try:
-        with sources.library('GET', '/api/library/' + ident + '/file') as upstream:
-            extensions = {'image/jpeg':'jpg', 'image/png':'png', 'image/webp':'webp', 'video/mp4':'mp4', 'video/webm':'webm'}
-            ext = extensions.get(upstream.headers.get_content_type())
-            length = upstream.headers.get('Content-Length', '')
-            if upstream.status != 200 or not ext or not length.isdigit() or not 0 < int(length) <= 100 * 1024 * 1024:
-                raise ValueError('素材格式或大小不支持分析。')
-            attachment = real_pool.upload(request_id, 0, ext, upstream, int(length))
-        prompt = ('请直接观察所附图片或视频，为素材填写以下标签。仅输出 JSON 对象，'
-                  '键为 subject,scene,action,style,camera,color,keywords,shot_size,viewpoint,composition,movement，'
-                  '每项都是简洁中文字符串数组；不确定或不适用时返回空数组，不要编造。'
-                  '视频的运镜只描述实际观察到的运动。不要猜测时长或分辨率。')
-        real_pool.generate('auto', prompt, request_id, account_data['items'], [attachment])
-    except Exception:
-        pass  # The durable request record decides whether anything was submitted.
-    result = real_pool.finish_material_analysis(ident, request_id)
-    if (result.get('analysis') or {}).get('status') == 'saving' and result.get('suggested'):
-        try:
-            sources.apply_gemini_tags(ident, result['suggested'])
-            real_pool.material_analysis_note(request_id, 'Gemini 分析完成，原素材库空白标签已登记，已有标签保留。')
-        except Exception:
-            real_pool.material_analysis_note(request_id, 'Gemini 分析完成；原素材库标签保存状态未确认，请核对后再保存。', status='unknown')
-        result = real_pool.material_extra(ident)
-    return result
-
-
 def discover_new_materials(sources, real_pool, since):
     """Scan recent library pages, retaining only items added after activation."""
     for page in range(1, 101):
@@ -110,22 +83,13 @@ def discover_new_materials(sources, real_pool, since):
 
 
 def run_auto_material_once(sources, real_pool):
+    from material_dispatch import run_once
     state = real_pool.auto_material_state()
-    if not state['enabled'] or state['since'] is None:
+    if real_pool.maintenance() or not state['enabled'] or state['paused_reason'] or state['since'] is None:
         return
     discover_new_materials(sources, real_pool, state['since'])
-    if state['paused_reason']:
-        return
-    accounts = sources.snapshot().get('real_accounts', {})
-    if not accounts.get('available') or not isinstance(accounts.get('items'), list):
-        return
-    job = real_pool.claim_auto_material(accounts['items'])
-    if not job:
-        return
-    try:
-        perform_material_analysis(sources, real_pool, job['asset_id'], job['request_id'], accounts)
-    finally:
-        real_pool.finish_auto_material(job['request_id'])
+    if state['counts'].get('waiting') or real_pool.auto_material_state()['counts'].get('waiting'):
+        run_once(sources, real_pool)
 
 
 def read_all_materials(sources):
@@ -167,16 +131,8 @@ def read_all_materials(sources):
 
 
 def run_backfill_once(sources, real_pool, backfill):
-    accounts = sources.snapshot().get('real_accounts', {})
-    if not accounts.get('available') or not isinstance(accounts.get('items'), list):
-        return
-    job = backfill.claim(accounts['items'])
-    if not job:
-        return
-    try:
-        perform_material_analysis(sources, real_pool, job['asset_id'], job['request_id'], accounts)
-    finally:
-        backfill.finish(job['request_id'])
+    from material_dispatch import run_once
+    run_once(sources, real_pool, backfill)
 
 
 def identity_text(value):
@@ -271,6 +227,50 @@ def model_rows(state):
     return result
 
 
+def task_failure_reason(row):
+    """Display a stored failure without inspecting the browser or running a task."""
+    if row.get('status') != 'failed':
+        return ''
+    error = clean_text(row.get('error'), 4000)
+    if not error:
+        return '后台未提供具体失败原因。'
+    known = {
+        'desktop_binding_unconfirmed': '无法确认账号对应的浏览器窗口，任务在发送前停止。',
+        'desktop_focus_unconfirmed': '未能确认浏览器窗口已激活，任务在发送前停止。',
+        'input_focus_unconfirmed': '未能确认输入框已获得焦点，任务在发送前停止。',
+        'flow_window_registration_stale': '浏览器窗口登记信息已变化，任务在发送前停止。',
+        'task_window_process_unconfirmed': '无法确认账号浏览器进程，未输入或发送任务。',
+        'task_window_process_changed': '账号浏览器已重新启动，需要重新核对窗口绑定。',
+        'task_window_account_mismatch': '任务窗口与目标账号不一致，未输入或发送任务。',
+        'task_window_project_unconfirmed': '任务网页与指定项目不一致，未输入或发送任务。',
+        'task_window_identity_unconfirmed': '窗口绑定信息不完整，未输入或发送任务。',
+        'task_window_identity_changed': '核对期间窗口或网页发生变化，未输入或发送任务。',
+        'task_window_binding_conflict': '任务窗口绑定冲突，已保留所有窗口和草稿，未发送任务。',
+        'task_window_registry_unavailable': '窗口绑定记录暂不可读取，未发送任务。',
+        'existing_flow_draft': '网页中有未发送的草稿，已保留草稿并停止本次输入。',
+        'existing_flow_attachments': '网页中已有参考素材，已保留并停止本次输入。',
+        'pointer_not_over_input': '未能确认鼠标位于输入框，任务在发送前停止。',
+        'input_moved_after_scroll': '滚动后输入框位置发生变化，任务在发送前停止。',
+        'flow_insufficient_credits': 'Flow 提示当前账号的可用积分不足。',
+        'previous_task_result_unconfirmed': '该账号上次任务的结果仍待核对，未开始新生成。',
+        'multiple_account_task_windows': '发现多个标记为任务用途的窗口，已保留现场，未猜测或关闭窗口。',
+        'task_window_requires_login': '任务窗口需要完成登录或验证，已保留窗口，未重新生成或换号。',
+        'submission_outcome_unknown': '发送结果尚未确认，已保留原窗口和任务，禁止重复生成。',
+        'window_activation_unconfirmed': '自动恢复窗口焦点后仍未确认激活，未发送生成请求。',
+        'composer_not_empty': '输入框已有内容，已保留草稿，未重复粘贴。',
+    }
+    if error in known:
+        return known[error]
+    if error.startswith('pre_submit_failed:'):
+        reason=error.split(':',1)[1]
+        return '输入准备自救后仍未完成：' + known.get(reason, reason) + '；本次未重新生成。'
+    # Keep unfamiliar errors useful while concealing addresses and credential values.
+    error = re.sub(r'https?://[^\s<>"\)]+', '[服务地址已省略]', error)
+    error = re.sub(r'(?i)\b(?:bearer)\s+\S+', 'Bearer [已隐藏]', error)
+    error = re.sub(r"""(?ix)(["']?(?:cookie|csrf|authorization|token|access_token|refresh_token|sapisid|sid|api_key)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)""", r'\1[已隐藏]', error)
+    return error[:600]
+
+
 def task_rows(state, projects):
     titles = {row["key"]: row["title"] for row in projects}
     rows = []
@@ -330,7 +330,13 @@ def task_rows(state, projects):
             "created": numeric_time(row.get("created")),
             "finished": numeric_time(row.get("finished")),
             "downloads": downloads,
+            "self_recovery": [
+                {"action": clean_text(e.get('action'),80), "created": numeric_time(e.get('created'))}
+                for e in (result.get('self_recovery',[]) if isinstance(result,dict) and isinstance(result.get('self_recovery'),list) else [])[-40:]
+                if isinstance(e,dict)
+            ],
             "note": note,
+            "failure_reason": task_failure_reason(row),
             "recoverable": recoverable,
             "retry": retry,
         })
@@ -550,6 +556,8 @@ class Sources:
         self.opener = build_opener(ProxyHandler({}), NoRedirect(), HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def read(self, service, path):
+        if service == "gemini":
+            return None, '已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'
         if service not in self.PATHS or path not in self.PATHS[service]:
             raise ValueError("路径不在只读清单内")
         url = f"http://127.0.0.1:{self.ports[service]}{path}"
@@ -630,6 +638,26 @@ class Sources:
         with self.opener.open(request, timeout=self.timeout) as response:
             result = json.loads(response.read(8193))
         return isinstance(result, dict) and (result.get('queued') is True or result.get('refreshing') is True)
+
+    def flow_activation_check(self, profile, request_key):
+        """Reuse the existing idempotent, non-generation Flow sync task."""
+        if not isinstance(profile, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', profile):
+            raise ValueError('账号标识不正确')
+        if not isinstance(request_key, str) or not re.fullmatch(r'activate-[0-9a-f]{32}-[0-9a-f]{32}', request_key):
+            raise ValueError('检查编号不正确')
+        port = self.ports['flow']
+        body = json.dumps({'profile': profile, 'kind': 'sync', 'request_key': request_key, 'auto_retry': False}).encode()
+        request = Request(f'http://127.0.0.1:{port}/api/tasks', data=body, method='POST',
+                          headers={'Content-Type':'application/json', 'X-Console-Request':'1', 'Origin':f'http://127.0.0.1:{port}'})
+        with self.opener.open(request, timeout=self.timeout) as response:
+            raw = response.read(65537)
+        if len(raw) > 65536:
+            raise ValueError('检查提交结果待核对')
+        result = json.loads(raw)
+        ident = result.get('id') if isinstance(result, dict) else None
+        if not isinstance(ident, str) or not re.fullmatch(r'[0-9a-f]{16}', ident):
+            raise ValueError('检查任务编号待核对')
+        return ident
 
     def flow_retry_project(self, profile, project):
         if not isinstance(profile, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', profile):
@@ -713,8 +741,8 @@ class Sources:
     def status(self):
         flow, flow_error = self.read("flow", "/health")
         gemini, gemini_error = self.read("gemini", "/health")
-        gemini_name = "Gemini（Ubuntu 试验）" if self.gemini_source == "ubuntu-trial" else "Gemini PoolDesk（本机）"
-        gemini_description = "Ubuntu 试验服务可响应；本机 PoolDesk 是独立后台" if self.gemini_source == "ubuntu-trial" else "本机 PoolDesk 后台可响应"
+        gemini_name = "Gemini CLI（独立运行）"
+        gemini_description = '已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'
         return {
             "checked_at": time.time(),
             "flow": {"connected": bool(flow and flow.get("ok") is True), "message": flow_error},
@@ -757,6 +785,7 @@ class Sources:
             "retry_projects": retry_projects,
             "tasks": tasks,
             "flow_insights": flow_insights_summary(state) if state is not None else None,
+            "flow_coordination": state.get('coordination') if isinstance(state,dict) else None,
             "flow_models": model_rows(state) if state is not None else {'image': [], 'video': []},
             "real_accounts": {"available": accounts is not None, "items": accounts or [],
                               "message": state_error if state is None else
@@ -813,7 +842,7 @@ class Coordinator:
             return 502, {"error": "工作台任务组件返回的数据不正确。"}
 
 
-def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None):
+def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
     coordinator = coordinator or Coordinator()
     class Handler(BaseHTTPRequestHandler):
         server_version = "LocalWorkbench/1"
@@ -850,6 +879,20 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
         def do_GET(self):
             if not self.valid():
                 return self.respond(403, b"Forbidden", "text/plain; charset=utf-8")
+            if self.path == '/api/official-quota':
+                from official_quota import snapshot
+                return self.json_response(200, snapshot(real_pool.official.runtime) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
+            if self.path == '/api/channel-status':
+                from channel_status import read_status
+                data = read_status(real_pool.path, real_pool.official.public_status()) if real_pool else {'schema_version': 1, 'available': False}
+                return self.json_response(200 if data.get('available') else 503, data)
+            if project_actions and self.path == '/api/project-actions':
+                return self.json_response(200, project_actions.status())
+            if self.path == '/api/dispatch/concurrency':
+                if not real_pool:
+                    return self.json_response(503, {'error': '并发设置尚未接入。'})
+                result = real_pool.dispatch_limit.public_status()
+                return self.json_response(200 if result['available'] else 503, result)
             if api_keys and self.path == '/api/access-keys':
                 try:
                     return self.json_response(200, {'items': api_keys.list()})
@@ -861,6 +904,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 return self.json_response(200, activation.poll_status())
             if activation and self.path == '/api/account-activation':
                 return self.json_response(200, activation.status())
+            if activation and re.fullmatch(r'/api/account-activation\?service=(flow|gemini)', self.path):
+                return self.json_response(200, activation.status(self.path.split('=', 1)[1]))
             if self.path in ALLOWED_STATIC:
                 name, content_type = ALLOWED_STATIC[self.path]
                 return self.respond(200, (ROOT / name).read_bytes(), content_type)
@@ -910,6 +955,21 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         body = upstream.read(MAX_RESPONSE + 1)
                         if len(body) > MAX_RESPONSE:
                             return self.json_response(502, {'error': '素材库返回的数据过大。'})
+                        path = urlsplit(self.path).path
+                        if real_pool and status == 200 and kind == 'application/json' and re.fullmatch(r'/api/library(?:/[0-9a-f]{64})?', path):
+                            try:
+                                payload = json.loads(body)
+                                rows = payload.get('items', []) if path == '/api/library' else [payload]
+                                items = [row for row in rows if isinstance(row, dict)
+                                         and re.fullmatch(r'[0-9a-f]{64}', str(row.get('id', '')))]
+                                fields = real_pool.material_card_fields(row['id'] for row in items)
+                                if fields:
+                                    for row in items:
+                                        if fields.get(row['id']):
+                                            row['shot_tags'] = fields[row['id']]
+                                    return self.json_response(status, payload)
+                            except (ValueError, TypeError, AttributeError, sqlite3.Error):
+                                pass  # The original library remains readable without analysis data.
                         return self.respond(status, body, 'application/json; charset=utf-8')
                 except (ValueError, OSError, URLError):
                     return self.json_response(503, {'error': '素材库暂时不可读取。'})
@@ -949,6 +1009,15 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(200 if item else 404, item or {'error': '对话不存在。'})
                 except ValueError:
                     return self.json_response(400, {'error': '对话编号不正确。'})
+            if real_pool and urlsplit(self.path).path == '/api/material-analysis-history':
+                try:
+                    query = parse_qsl(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=3)
+                    if len(query) != len(dict(query)) or set(dict(query)) - {'page', 'limit', 'asset_id'}:
+                        raise ValueError()
+                    fields = dict(query)
+                    return self.json_response(200, real_pool.material_analysis_history(int(fields.get('page', '1')), int(fields.get('limit', '20')), fields.get('asset_id')))
+                except (ValueError, TypeError):
+                    return self.json_response(400, {'error': '分析记录查询条件不正确。'})
             if real_pool and re.fullmatch(r'/api/material-extras/[0-9a-f]{64}', self.path):
                 ident = self.path.rsplit('/', 1)[-1]
                 try:
@@ -992,6 +1061,56 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             return self.json_response(200, result)
 
         def do_POST(self):
+            if self.path == '/api/official-quota/refresh':
+                if not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台刷新额度。'})
+                if self.headers.get('Transfer-Encoding') or self.headers.get_all('Content-Length',[]) != ['2'] or self.rfile.read(2) != b'{}':
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                from official_quota import snapshot
+                return self.json_response(200, snapshot(real_pool.official.runtime, force=True) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
+            if self.path in {'/api/real-pool/recover-account', '/api/real-pool/check'}:
+                return self.json_response(410, {"error":'旧 Gemini 网页功能已停用。当前官方通道提供文字对话；这项旧操作未执行。',"code":"legacy_gemini_removed"})
+            if self.path == '/api/channel-status':
+                from channel_status import read_status
+                data = read_status(real_pool.path) if real_pool else {'schema_version': 1, 'available': False}
+                return self.json_response(200 if data.get('available') else 503, data)
+            if project_actions and self.path == '/api/project-actions':
+                if not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台发起操作。'})
+                length=self.headers.get('Content-Length','')
+                if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length',[]))!=1
+                        or not length.isdigit() or not 0<int(length)<=1024):
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                try:
+                    data=json.loads(self.rfile.read(int(length)).decode('utf8'))
+                    if not isinstance(data,dict) or set(data)!={'project_key','kind'}:raise ValueError('请求格式不正确。')
+                    result=project_actions.start(self.headers.get('Idempotency-Key',''),data['project_key'],data['kind'])
+                    return self.json_response(202,result)
+                except (ValueError,UnicodeError) as exc:
+                    return self.json_response(409,{'error':str(exc) or '操作未开始。'})
+                except (OSError,sqlite3.Error):
+                    return self.json_response(503,{'error':'项目操作暂不可用。'})
+            if self.path == '/api/dispatch/concurrency':
+                if not real_pool:
+                    return self.json_response(503, {'error': '并发设置尚未接入。'})
+                if not self.valid(mutation=True):
+                    return self.json_response(403, {'error': '请从工作台设置并发。'})
+                length = self.headers.get('Content-Length', '')
+                if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1
+                        or not length.isdigit() or not 0 < int(length) <= 1024):
+                    return self.json_response(400, {'error': '并发设置格式不正确。'})
+                try:
+                    data = json.loads(self.rfile.read(int(length)).decode('utf-8'))
+                    if not isinstance(data, dict) or set(data) != {'maximum'}:
+                        raise ValueError('并发设置格式不正确。')
+                    result = real_pool.dispatch_limit.set_limit(data['maximum'])
+                    return self.json_response(200, result)
+                except DispatchBusy as exc:
+                    return self.json_response(409, {'error': str(exc)})
+                except (ValueError, UnicodeError) as exc:
+                    return self.json_response(400, {'error': str(exc) or '并发设置格式不正确。'})
+                except OSError:
+                    return self.json_response(503, {'error': '并发设置未能保存，请稍后操作。'})
             if api_keys and (self.path == '/api/access-keys' or re.fullmatch(r'/api/access-keys/[0-9a-f]{32}/(?:revoke|copy)', self.path)):
                 if not self.valid(mutation=True):
                     return self.json_response(403, {'error': '请从工作台发起操作。'})
@@ -1050,10 +1169,17 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             if activation and self.path == '/api/account-activation':
                 if not self.valid(mutation=True):
                     return self.json_response(403, {'error': '请从工作台发起操作。'})
-                if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length') != '2' or self.rfile.read(2) != b'{}':
+                length = self.headers.get('Content-Length', '')
+                if self.headers.get('Transfer-Encoding') or not length.isdigit() or not 2 <= int(length) <= 80:
                     return self.json_response(400, {'error': '请求内容格式不正确。'})
                 try:
-                    return self.json_response(202, activation.start())
+                    data = json.loads(self.rfile.read(int(length)).decode('utf-8'))
+                    if not isinstance(data, dict) or (data and (set(data) != {'service'} or data['service'] not in ('flow','gemini'))):
+                        raise ValueError()
+                except (ValueError, UnicodeError, TypeError):
+                    return self.json_response(400, {'error': '请选择 Flow 或 Gemini 激活。'})
+                try:
+                    return self.json_response(202, activation.start(service=data['service']) if data else activation.start())
                 except ValueError as exc:
                     return self.json_response(409, {'error': str(exc)})
                 except Exception:
@@ -1110,21 +1236,33 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(400, {'error': str(exc) or '路径格式不正确。'})
                 except (OSError, subprocess.SubprocessError, URLError):
                     return self.json_response(503, {'error': '暂时无法检查该位置。'})
-            if real_pool and re.fullmatch(r'/api/material-analysis/[0-9a-f]{64}', self.path):
+            if real_pool and backfill and re.fullmatch(r'/api/(?:material-analysis|material-shot-notes)/[0-9a-f]{64}', self.path):
                 if not self.valid(mutation=True):
                     return self.json_response(403, {'error': '请从工作台发起操作。'})
                 if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length') != '2' or self.rfile.read(2) != b'{}':
                     return self.json_response(400, {'error': '请求内容格式不正确。'})
                 ident, request_id = self.path.rsplit('/', 1)[-1], self.headers.get('Idempotency-Key', '')
                 try:
-                    account_data = sources.snapshot().get('real_accounts', {})
-                    if not account_data.get('available'):
-                        return self.json_response(503, {'error': '现有账号池暂不可读取。'})
-                    real_pool.begin_material_analysis(ident, request_id)
+                    if not real_pool.official.ready:
+                        return self.json_response(503, {'error': '官方分析账号尚未就绪，未提交。'})
+                    with sources.library('GET', '/api/library/' + ident) as response:
+                        item = json.load(response)
+                    if item.get('id') != ident:
+                        raise ValueError('素材暂不可读取。')
+                    if self.path.startswith('/api/material-shot-notes/'):
+                        from material_backfill import SUPPORTED
+                        from material_dispatch import enqueue_shot_notes
+                        if item.get('mime') not in SUPPORTED or item.get('media_type') not in ('image','video'):
+                            raise ValueError('该文件类型暂不支持镜头分析。')
+                        enqueue_shot_notes(real_pool, ident, request_id)
+                        backfill.wake.set()
+                    else:
+                        backfill.enqueue_project_assets(request_id, [item])
                 except ValueError as exc:
                     return self.json_response(400, {'error': str(exc)})
-                result = perform_material_analysis(sources, real_pool, ident, request_id, account_data)
-                return self.json_response(200, result)
+                except (OSError, URLError):
+                    return self.json_response(503, {'error': '素材库暂不可读取，未提交。'})
+                return self.json_response(202, real_pool.material_extra(ident))
             if real_pool and re.fullmatch(r'/api/material-extras/[0-9a-f]{64}', self.path):
                 if not self.valid(mutation=True):
                     return self.json_response(403, {'error': '请从工作台发起操作。'})
@@ -1239,6 +1377,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                             raise ValueError('请求内容格式不正确。')
                         return self.json_response(200, real_pool.set_dispatch_policy(data['five_hour_limit'], data['weekly_limit']))
                     if self.path.endswith('/flow'):
+                        if data.get('auto_retry') is True:
+                            raise ValueError('自动重新生成和自动换号尚未启用。')
                         record, created = real_pool.submit_flow(data, self.headers.get('Idempotency-Key', ''), snapshot)
                         return self.json_response(201 if created else 200, record)
                     if self.path.endswith('/check'):
@@ -1270,6 +1410,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     else:
                         record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'])
                     return self.json_response(201 if created else 200, record)
+                except DispatchBusy as exc:
+                    return self.json_response(409, {'error': str(exc)})
                 except (ValueError, UnicodeError) as exc:
                     return self.json_response(400, {"error": str(exc) or "请求内容格式不正确。"})
                 except Exception:
@@ -1358,6 +1500,8 @@ def main():
         real_pool = RealPool(Path.home() / '.local/state/creative-unified-workbench', ROOT)
         from material_backfill import MaterialBackfill
         backfill = MaterialBackfill(real_pool)
+        from material_dispatch import initialize as initialize_material_analysis
+        initialize_material_analysis(real_pool)
         api_keys = UnifiedKeys(Path.home() / '.local/state/creative-unified-workbench/api-keys.sqlite3')
     sources = Sources(args.flow_port, args.gemini_port, gemini_source="ubuntu-trial" if args.deployment == "ubuntu" else "pooldesk")
     activation = None
@@ -1365,8 +1509,11 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(sources, args.deployment, coordinator, real_pool, api_keys=api_keys))
     if real_pool:
         from activation import Activation
+        real_pool.official.start()
         activation = Activation(Path.home() / '.local/state/creative-unified-workbench', ROOT, sources, real_pool)
-        server.RequestHandlerClass = make_handler(sources, args.deployment, coordinator, real_pool, activation, api_keys, backfill)
+        from project_actions import ProjectActions
+        project_actions = ProjectActions(real_pool,sources,backfill,ROOT,project_rows,read_all_materials)
+        server.RequestHandlerClass = make_handler(sources, args.deployment, coordinator, real_pool, activation, api_keys, backfill, project_actions)
     stop_monitor = threading.Event()
     if real_pool:
         def monitor():
@@ -1398,22 +1545,27 @@ def main():
                 stop_monitor.wait(60)
         threading.Thread(target=recover_new_images, name='flow-recovery', daemon=True).start()
         def analyze_new_materials():
-            if stop_monitor.wait(120):
+            if stop_monitor.wait(15):
                 return
             while not stop_monitor.is_set():
+                delay = 30
                 try:
                     run_auto_material_once(sources, real_pool)
+                    if real_pool.auto_material_state()['counts'].get('waiting'):
+                        delay = 4
                 except Exception:
                     pass  # Keep source material and the persisted job state intact.
-                stop_monitor.wait(60)
+                stop_monitor.wait(delay)
         threading.Thread(target=analyze_new_materials, name='material-auto-analysis', daemon=True).start()
         def analyze_backfill():
             # Only a persisted task explicitly started by the user can be claimed.
-            backfill.wake.wait(120)
+            from material_dispatch import shot_pending
+            if not (backfill.has_pending() or shot_pending(real_pool)):
+                backfill.wake.wait(120)
             while not stop_monitor.is_set():
                 backfill.wake.clear()
                 try:
-                    if not real_pool.maintenance() and backfill.has_pending():
+                    if not real_pool.maintenance() and (backfill.has_pending() or shot_pending(real_pool)):
                         run_backfill_once(sources, real_pool, backfill)
                 except Exception:
                     pass

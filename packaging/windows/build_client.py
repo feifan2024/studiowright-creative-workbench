@@ -19,6 +19,18 @@ def main():
     payload_zip = BASE / 'client-payload.zip'
     if payload_zip.exists():
         raise SystemExit('客户端压缩包已存在，已停止以避免覆盖。')
+    if not (PAYLOAD / 'runtime/python.exe').is_file():
+        raise SystemExit('请先准备 Python 嵌入式运行环境。')
+    sdk = ['Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll', 'WebView2Loader.dll']
+    if not all((PAYLOAD / name).is_file() for name in sdk):
+        raise SystemExit('请先准备 WebView2 SDK。')
+    desktop = PAYLOAD / 'StudioWright.exe'
+    compile_desktop = [str(CSC), '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/codepage:65001',
+                       '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll',
+                       *['/r:' + str(PAYLOAD / name) for name in sdk[:2]],
+                       '/win32icon:' + str(BASE / 'studiowright.ico'), '/out:' + str(desktop),
+                       str(BASE / 'client/Desktop.cs')]
+    subprocess.run(compile_desktop, check=True)
     count = 0
     with zipfile.ZipFile(payload_zip, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=5) as zipf:
         for path in sorted(PAYLOAD.rglob('*')):
@@ -26,7 +38,7 @@ def main():
                 zipf.write(path, path.relative_to(PAYLOAD).as_posix())
                 count += 1
     DIST.mkdir(exist_ok=True)
-    output = DIST / 'StudioWright-Windows-Setup.exe'
+    output = DIST / 'StudioWright-Windows-Desktop-Setup.exe'
     if output.exists():
         raise SystemExit('客户端安装包已存在，已停止以避免覆盖。')
     cmd = [str(CSC), '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/codepage:65001',

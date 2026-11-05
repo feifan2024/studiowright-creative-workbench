@@ -23,6 +23,7 @@ from adapter import PreSubmissionTransient
 from api_keys import APIKeys
 from account_insights import Insights
 from console_store import Store
+from dispatch_limit import DispatchLimit, MAX_CONCURRENCY
 from web_auth import WebAuth
 from login_sessions import Vault, normalize_bundle
 from material_library import Library
@@ -59,11 +60,26 @@ class Console:
             "CREATE TABLE IF NOT EXISTS bridge_devices(hash TEXT PRIMARY KEY,created REAL)"
         )
         self.busy = set()
+        self.generation_busy = {}
+        self.generation_projects = set()
         self.running = set()
+        dispatch_state = (self.root / 'console-data') if test else (Path.home() / '.local/state/creative-unified-workbench')
+        self.dispatch_limit = DispatchLimit(dispatch_state / 'dispatch')
         self.worker = None
         for profile in adapter.discover():
             if not self.store.account(profile):
                 self.store.add_account(profile, profile)
+
+    def release_profile(self, task):
+        profile = task['profile']
+        if task['kind'] in ('image', 'video') and self.generation_busy.get(profile, 0):
+            self.generation_projects.discard((profile, task['project']))
+            remaining = self.generation_busy[profile] - 1
+            if remaining:
+                self.generation_busy[profile] = remaining
+                return
+            del self.generation_busy[profile]
+        self.busy.discard(profile)
 
     async def execute(self, task):
         # This second check is before the adapter is called, so a racing restriction
@@ -79,11 +95,11 @@ class Console:
                         or (switched and (task['profile'] not in self.switch_ready_profiles()
                                           or (task['profile'], task['project']) not in mapped))):
                     self.store.release_unsubmitted(task['id'])
-                    self.busy.discard(task['profile'])
+                    self.release_profile(task)
                     return
         except Exception:
             # Do not turn a failure to release the claim into a provider failure.
-            self.busy.discard(task['profile'])
+            self.release_profile(task)
             raise
         before = []
         try:
@@ -91,8 +107,14 @@ class Console:
             result = await self.adapter.run(task, self.store.account(task["profile"]))
             if task["kind"] in {"sync", "session_import"}:
                 self.store.update_account(task["profile"], result["email"], "verified")
+                if not self.test:
+                    from task_coordinator import Coordinator
+                    Coordinator().release_verified(task['profile'])
                 for project in result["projects"]:
                     self.store.project(task["profile"], project["id"], project["title"])
+            if task['kind'] in ('image','video'):
+                from task_coordinator import Coordinator
+                result['self_recovery'] = Coordinator().events(task['id'])
             self.store.finish(task["id"], result)
         except asyncio.CancelledError:
             # Leave running state for recovery. Never imply generation was cancelled.
@@ -102,8 +124,8 @@ class Console:
             retry_evidence = None
             with contextlib.suppress(Exception):
                 exact = getattr(self.adapter, 'source_jobs_for_task', None)
-                linked = list(exact(task['profile'], task['id'])) if exact and self.store.retry_detail(task['id']) else []
-                rows = linked if linked else self.adapter.source_jobs(task["profile"])
+                linked = list(exact(task['profile'], task['id'])) if exact and task['kind'] in ('image', 'video') else []
+                rows = linked if task['kind'] in ('image', 'video') else self.adapter.source_jobs(task["profile"])
                 for r in rows:
                     r = dict(r)
                     if linked or r["id"] not in before:
@@ -137,12 +159,22 @@ class Console:
                 self.store.update_account(
                     task["profile"], account["email"], "attention", safe_error(exc)
                 )
-            self.store.finish(task["id"], {"source_jobs": provenance}, safe_error(exc) or type(exc).__name__, retry_evidence)
+            result = {"source_jobs": provenance}
+            if task['kind'] in ('image','video'):
+                from task_coordinator import Coordinator
+                result['self_recovery'] = Coordinator().events(task['id'])
+            self.store.finish(task["id"], result, safe_error(exc) or type(exc).__name__, retry_evidence)
         finally:
             if task["kind"] == "session_import":
                 with contextlib.suppress(Exception):
                     self.vault.remove(task["params"]["bundle_id"])
-            self.busy.discard(task["profile"])
+            self.release_profile(task)
+
+    async def execute_with_slot(self, task, slot):
+        try:
+            await self.execute(task)
+        finally:
+            slot.close()
 
     async def scheduler(self):
         next_switch_check = 0.0
@@ -152,27 +184,58 @@ class Console:
                     await asyncio.to_thread(self.remote.close, ident)
                     self.busy.discard(s["profile"])
             self.running = {t for t in self.running if not t.done()}
-            if time.monotonic() >= next_switch_check:
+            if (not (self.dispatch_limit.root/'flow-stress-once.json').exists()
+                    and time.monotonic() >= next_switch_check):
                 # Missing projects, stale balance, or uncertain account state all wait.
                 with contextlib.suppress(Exception):
                     self.schedule_pending_switches()
                 next_switch_check = time.monotonic() + 1.0
-            while len(self.running) < 2:
-                database = self.root / 'data/studiowright.db'
-                accounts = self.store.accounts()
-                states = account_status(accounts, database)
-                allowed = {a['profile'] for a in states if a['generation_state'] == 'not_cooling_down'
-                           and a['risk_paused'] is False}
-                if self.test and not database.exists():
-                    allowed = {a['profile'] for a in accounts}  # FakeAdapter fixture only.
-                task = self.store.claim(self.busy, allowed, self.switch_ready_profiles())
-                if not task:
+            from flow_stress_scope import read_scope, acquire_scope_slot, validate_task
+            scope = read_scope(self.dispatch_limit.root)
+            ceiling = 9 if scope and scope.get('ready') else MAX_CONCURRENCY
+            while len(self.running) < ceiling:
+                slot = (acquire_scope_slot(self.dispatch_limit, scope) if scope
+                        else self.dispatch_limit.try_acquire())
+                if slot is None:
                     break
-                self.busy.add(task["profile"])
-                self.running.add(asyncio.create_task(self.execute(task)))
+                try:
+                    database = self.root / 'data/studiowright.db'
+                    accounts = self.store.accounts()
+                    states = account_status(accounts, database)
+                    allowed = {a['profile'] for a in states if a['generation_state'] == 'not_cooling_down'
+                               and a['risk_paused'] is False}
+                    if not self.test:
+                        from task_coordinator import Coordinator
+                        held = {w['profile'] for w in Coordinator().status()['windows']
+                                if w['state'] in ('submitting','submitted','generated','result_unknown','needs_verification')}
+                        allowed -= held - self.busy
+                    if self.test and not database.exists():
+                        allowed = {a['profile'] for a in accounts}  # FakeAdapter fixture only.
+                    task = self.store.claim(self.busy, allowed, self.switch_ready_profiles(),
+                                            set(), self.generation_projects,
+                                            request_keys=set(scope['requests']) if scope else None)
+                    if not task:
+                        slot.close()
+                        break
+                    if scope and not validate_task(task, scope, self.store):
+                        self.store.release_unsubmitted(task['id'])
+                        slot.close()
+                        break
+                    self.busy.add(task["profile"])
+                    if task['kind'] in ('image', 'video'):
+                        self.generation_busy[task['profile']] = self.generation_busy.get(task['profile'], 0) + 1
+                        self.generation_projects.add((task['profile'], task['project']))
+                    self.running.add(asyncio.create_task(self.execute_with_slot(task, slot)))
+                except BaseException:
+                    slot.close()
+                    raise
             await asyncio.sleep(0.2)
 
     def schedule_pending_switches(self):
+        # Explicit deployment policy: no regeneration and no automatic account switch.
+        from task_coordinator import AUTO_SWITCH_ACCOUNT
+        if not AUTO_SWITCH_ACCOUNT:
+            return
         roots = self.store.pending_retry_roots()
         if not roots:
             return
@@ -216,6 +279,13 @@ class Console:
         from balance_reader import read_balance
         from playwright.async_api import async_playwright
         while True:
+            if self.dispatch_limit.paused():
+                try:
+                    await asyncio.wait_for(self.balance_wake.wait(), timeout=300)
+                except asyncio.TimeoutError:
+                    pass
+                self.balance_wake.clear()
+                continue
             self.balance_wake.clear()
             self.balance_refreshing = True
             try:
@@ -224,12 +294,17 @@ class Console:
                         profile = account["profile"]
                         if profile in self.busy or self.remote.for_profile(profile):
                             continue
+                        slot = self.dispatch_limit.try_acquire()
+                        if slot is None:
+                            continue
                         try:
                             balance = await asyncio.wait_for(read_balance(account, pw), timeout=12)
                             self.insights.record(profile, balance)
                         except Exception as exc:
                             message = str(exc) if isinstance(exc, ValueError) else '余额读取暂未完成，保留上次记录。'
                             self.insights.record(profile, error=message)
+                        finally:
+                            slot.close()
             except Exception:
                 pass
             finally:
@@ -344,11 +419,16 @@ def create_app(root, adapter, test=False):
         archive_worker = asyncio.create_task(c.archive_worker())
         index_worker = asyncio.create_task(c.index_worker())
         balance_worker = asyncio.create_task(c.balance_worker())
+        from flow_window_maintenance import worker as maintain_windows
+        maintenance_worker = asyncio.create_task(maintain_windows(c)) if not test else None
         yield
         c.worker.cancel()
         archive_worker.cancel()
         index_worker.cancel()
         balance_worker.cancel()
+        if maintenance_worker:
+            maintenance_worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):await maintenance_worker
         with contextlib.suppress(asyncio.CancelledError):
             await balance_worker
         with contextlib.suppress(asyncio.CancelledError):
@@ -450,6 +530,8 @@ def create_app(root, adapter, test=False):
         return JSONResponse(
             {
                 "test": test,
+                "dispatch": c.dispatch_limit.public_status(),
+                "coordination": __import__('task_coordinator').Coordinator().status() if not test else {"window_policy":"one_per_account","automatic_regeneration":False,"automatic_account_switch":False},
                 "accounts": accounts,
                 "account_insights": insights,
                 "projects": c.store.projects(),

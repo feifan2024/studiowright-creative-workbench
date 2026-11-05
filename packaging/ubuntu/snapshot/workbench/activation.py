@@ -6,6 +6,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -45,6 +46,10 @@ class Activation:
             if 'gemini_checked' not in {r[1] for r in db.execute('PRAGMA table_info(items)')}:
                 db.execute('ALTER TABLE items ADD COLUMN gemini_checked INTEGER NOT NULL DEFAULT 0')
                 db.execute("UPDATE items SET gemini_checked=1 WHERE status='done'")
+            if 'service' not in {r[1] for r in db.execute('PRAGMA table_info(batches)')}:
+                db.execute("ALTER TABLE batches ADD COLUMN service TEXT NOT NULL DEFAULT 'all'")
+            if 'flow_task_id' not in {r[1] for r in db.execute('PRAGMA table_info(items)')}:
+                db.execute('ALTER TABLE items ADD COLUMN flow_task_id TEXT')
             # Preserve the safety gate across restarts for operations already started.
             db.execute("""INSERT OR IGNORE INTO activation_schedule_holds(account_key,reason,created)
                           SELECT i.account_key,'定时检查中断，需手动核对',? FROM items i
@@ -78,14 +83,52 @@ class Activation:
         self.pool.annotate(accounts)
         return snapshot
 
-    def status(self):
+    def status(self, service=None):
+        if service not in (None, 'flow', 'gemini'):
+            raise ValueError('请选择 Flow 或 Gemini')
+        desktop = self.desktop_recovery_status()
         with self.db() as db:
-            batch = db.execute('SELECT id,created,flow_refresh FROM batches ORDER BY created DESC LIMIT 1').fetchone()
+            batch = db.execute('SELECT id,created,flow_refresh,service FROM batches' +
+                               (' WHERE service=?' if service else '') + ' ORDER BY created DESC LIMIT 1',
+                               (service,) if service else ()).fetchone()
             if not batch:
-                return {'status': 'idle', 'items': []}
-            items = [dict(r) for r in db.execute('SELECT account_key,status,due,message FROM items WHERE batch_id=? ORDER BY rowid', (batch['id'],))]
-        return {'status': 'running' if any(i['status'] in ('queued','processing','cooling') for i in items) else 'finished',
-                'created': batch['created'], 'flow_refresh': batch['flow_refresh'], 'items': items}
+                return {'status': 'idle', 'service': service, 'items': [], 'desktop_recovery': desktop}
+            items = [dict(r) for r in db.execute('SELECT account_key,status,due,message,flow_task_id FROM items WHERE batch_id=? ORDER BY rowid', (batch['id'],))]
+        return {'status': 'running' if any(i['status'] in ('queued','processing','cooling','waiting_flow') for i in items) else 'finished',
+                'id': batch['id'], 'service': batch['service'], 'created': batch['created'], 'flow_refresh': batch['flow_refresh'], 'items': items,
+                'desktop_recovery': desktop}
+
+    def desktop_recovery_status(self):
+        path = self.path.parent / 'account-desktops.sqlite3'
+        if not path.is_file() or path.is_symlink():
+            return []
+        try:
+            db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)
+            try:
+                rows = db.execute("SELECT account_key,reason FROM layouts WHERE status='blocked' ORDER BY changed DESC").fetchall()
+                enrolled = db.execute("SELECT 1 FROM layouts WHERE status IN ('active','recovering') LIMIT 1").fetchone()
+            finally:
+                db.close()
+            labels = {'flow_identity_unconfirmed':'Flow 登录身份未确认', 'flow_window_ambiguous':'Flow 窗口不唯一',
+                      'flow_window_unmatched':'Flow 窗口归属未确认', 'gemini_window_ambiguous':'Gemini 窗口不唯一',
+                      'gemini_pending':'存在未确认消息', 'gemini_busy':'账号正在处理任务',
+                      'gemini_paused':'Gemini 已手动暂停', 'flow_window_unconfirmed':'Flow 窗口状态未确认',
+                      'account_busy':'账号正在使用', 'flow_busy':'Flow 正在处理任务',
+                      'flow_not_ready':'Flow 状态尚不可用', 'account_state_changed':'账号状态发生变化',
+                      'recovery_interrupted':'上次恢复被中断', 'new_window_unconfirmed':'新窗口是否打开未确认',
+                      'new_window_ambiguous':'新窗口无法唯一识别', 'no_empty_workspace':'没有可用的空桌面'}
+            issues = [{'account_key':key, 'message':labels.get(reason,'窗口或账号状态无法确认') + '；已停止自动恢复，可先核查再手动一键激活'} for key,reason in rows]
+            if enrolled and sys.platform.startswith('linux'):
+                try:
+                    daemon = subprocess.run(['systemctl','--user','is-active','--quiet','studiowright-account-desktops.service'], capture_output=True, timeout=2)
+                    available = daemon.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    available = False
+                if not available:
+                    issues.append({'account_key':'', 'message':'Ubuntu 图形桌面或桌面恢复服务未就绪；请登录 Ubuntu 桌面后检查'})
+            return issues
+        except sqlite3.Error:
+            return [{'account_key':'', 'message':'桌面恢复状态暂时无法读取，请检查工作台'}]
 
     @staticmethod
     def next_daily(daily_time, now):
@@ -206,21 +249,23 @@ class Activation:
                 with self.db() as db:
                     db.execute("UPDATE activation_poll SET enabled=0,next_due=NULL,last_outcome='failed',last_note='轮询未能开始，已暂停且不会自动重试' WHERE id=1")
 
-    def start(self, origin='manual'):
+    def start(self, origin='manual', service='all'):
         if origin not in ('manual','scheduled','poll'):
             raise ValueError('激活方式不正确')
+        if service not in ('all', 'flow', 'gemini') or (origin != 'manual' and service != 'all'):
+            raise ValueError('激活业务不正确')
         with self.guard:
             if self.pool.maintenance():
                 raise ValueError('工作台正在更新，请稍后操作')
             if self.status()['status'] == 'running':
-                raise ValueError('已有一轮激活正在进行或等待冷却')
+                raise ValueError('已有一轮账号检查正在进行或等待冷却')
             snapshot = self.snapshot()
             items = snapshot['real_accounts']['items']
             keys = [a.get('key', '').removeprefix('flow-account-') for a in items]
             if not keys or len(keys) > 50 or len(set(keys)) != len(keys) or any(not re.fullmatch(r'[0-9a-f]{64}', k) for k in keys):
                 raise ValueError('现有账号列表不能唯一确认')
             batch = str(uuid.uuid4())
-            flow_refresh = 'pending'
+            flow_refresh = 'skipped_service' if service == 'gemini' else 'pending'
             if origin == 'poll':
                 keys.sort()
                 with self.db() as db:
@@ -238,7 +283,7 @@ class Activation:
                          a.get('gemini_unresolved') or a.get('gemini_busy') for a in items):
                     flow_refresh = 'skipped_safety'
             with self.db() as db:
-                db.execute('INSERT INTO batches(id,created,origin,flow_refresh) VALUES (?,?,?,?)', (batch,time.time(),origin,flow_refresh))
+                db.execute('INSERT INTO batches(id,created,origin,flow_refresh,service) VALUES (?,?,?,?,?)', (batch,time.time(),origin,flow_refresh,service))
                 db.executemany('INSERT INTO items(batch_id,account_key,status,due,message) VALUES (?,?,?,NULL,?)', [(batch,k,'queued','等待逐个核对') for k in keys])
                 if origin == 'poll':
                     db.execute('UPDATE activation_poll SET last_account=? WHERE id=1', (keys[0],))
@@ -249,11 +294,11 @@ class Activation:
         with self.db() as db:
             db.execute('UPDATE items SET status=?,message=?,due=?,gemini_checked=COALESCE(?,gemini_checked) WHERE batch_id=? AND account_key=?',
                        (status,message,due,checked,batch,key))
-            row = db.execute('SELECT origin FROM batches WHERE id=?', (batch,)).fetchone()
+            row = db.execute('SELECT origin,service FROM batches WHERE id=?', (batch,)).fetchone()
             if row and row['origin'] in ('scheduled','poll') and status in ('failed','interrupted'):
                 db.execute('INSERT OR REPLACE INTO activation_schedule_holds(account_key,reason,created) VALUES(?,?,?)',
                            (key, '上次定时检查失败或中断，需手动核对', time.time()))
-            elif row and row['origin'] == 'manual' and status == 'done':
+            elif row and row['origin'] == 'manual' and row['service'] != 'flow' and status == 'done':
                 db.execute('DELETE FROM activation_schedule_holds WHERE account_key=?', (key,))
             if row and row['origin'] == 'poll' and status in ('done','blocked','failed','interrupted'):
                 db.execute('UPDATE activation_poll SET last_outcome=?,last_note=? WHERE id=1', (status,message))
@@ -262,80 +307,125 @@ class Activation:
         flow_python = Path.home() / '.local/share/studiowright-evaluation/venv/bin/python'
         helper = self.program_dir / 'activation_browser.py'
         if not flow_python.is_file() or not helper.is_file() or helper.is_symlink():
-            return False
+            return {'result': 'not_ready', 'reason': 'helper_unavailable'}
         try:
             result = subprocess.run([str(flow_python), '-B', str(helper), account], stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45, check=False)
             data = json.loads(result.stdout)
-            return result.returncode == 0 and data.get('result') == 'browser_ready'
+            if result.returncode == 0 and data.get('result') == 'browser_ready':
+                return data
+            return {'result': 'not_ready', 'reason': data.get('reason', 'browser_unavailable')}
         except (OSError, ValueError, subprocess.SubprocessError):
-            return False
+            return {'result': 'not_ready', 'reason': 'browser_unavailable'}
 
     def process_one(self, batch, key, snapshot):
         account_data = snapshot['real_accounts']
-        items = account_data['items']
-        matches = [a for a in items if a.get('key') == 'flow-account-' + key]
+        matches = [a for a in account_data['items'] if a.get('key') == 'flow-account-' + key]
         if len(matches) != 1:
             return self.update(batch,key,'blocked','账号归属无法确认，未操作')
-        a = matches[0]
         with self.db() as db:
-            batch_row = db.execute('SELECT origin FROM batches WHERE id=?', (batch,)).fetchone()
-            scheduled = bool(batch_row and batch_row['origin'] in ('scheduled','poll'))
-            polling = bool(batch_row and batch_row['origin'] == 'poll')
-            held = bool(db.execute('SELECT 1 FROM activation_schedule_holds WHERE account_key=?', (key,)).fetchone())
-        if scheduled and held:
-            return self.update(batch,key,'blocked','上次定时检查未完成，需先手动核对，不会自动重试')
-        if scheduled and (a.get('keepalive_enabled') is False or a.get('keepalive_state') in ('paused','network_wait')):
-            return self.update(batch,key,'blocked','Gemini 保活已暂停，需先手动核对')
-        if a.get('gemini_enabled') is False:
-            return self.update(batch,key,'blocked','Gemini 已手动暂停，未自动启用')
-        if a.get('gemini_unresolved'):
-            return self.update(batch,key,'blocked','有结果未确认的消息，未操作')
-        if a.get('gemini_busy') or any(t.get('source_profile') == a.get('profile') and t.get('status') in ('queued','running') for t in snapshot.get('tasks', [])):
-            return self.update(batch,key,'blocked','账号正在处理任务，未操作')
-        if a.get('flow_login') != 'verified' or not a.get('flow_pacing_known') or not a.get('flow_risk_known'):
-            return self.update(batch,key,'blocked','Flow 登录或状态无法确认，未操作')
-        if a.get('flow_risk_paused'):
-            return self.update(batch,key,'blocked','Flow 已风控暂停，请先人工核查')
-        if a.get('flow_cooling'):
-            if polling:
-                return self.update(batch,key,'blocked','Flow 冷却中，本次跳过，到期后再检查')
-            seconds = a.get('flow_cooldown_seconds')
-            if type(seconds) not in (int,float) or seconds <= 0:
-                return self.update(batch,key,'blocked','冷却结束时间不明，未自动恢复')
-            return self.update(batch,key,'cooling','Flow 冷却中，到期后核对状态并恢复',time.time()+seconds)
-        browsers = self.pool._read_browser_inventory()
-        if browsers is None or key not in browsers:
-            return self.update(batch,key,'blocked','账号浏览器状态不明，未打开')
-        if browsers[key] is False:
-            if not self.opener(key):
-                return self.update(batch,key,'failed','浏览器未能打开，已停止，不会自动重试')
+            row = db.execute('SELECT service FROM batches WHERE id=?',(batch,)).fetchone()
+        if row and row['service']=='gemini':
+            return self.process_gemini(batch,key)
+        return self.process_flow(batch,key,matches[0],snapshot)
+
+    @staticmethod
+    def gemini_hold(db, key):
+        from official_pool import unresolved_official,busy_official
+        pref = db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?', (key,)).fetchone()
+        if pref and pref[0] == 0:
+            return '账号已手动暂停，本次保留'
+        block = db.execute('SELECT reason FROM official_account_blocks WHERE account_key=?', (key,)).fetchone()
+        if block and block[0] not in ('activation_verification_required','activation_quota_exhausted',
+                                    'official_authorization_verification_required','official_quota_exhausted'):
+            return '官方调用受限，需核查后恢复'
+        if unresolved_official(db,key):
+            return '官方通道有未确认的消息，本次保留限制'
+        if busy_official(db,key):
+            return '官方通道正在等待或执行任务，本次未操作'
+        return None
+
+    def process_gemini(self, batch, key):
+        """Check official authorization/quota without reading or changing legacy monitor state."""
+        official = getattr(self.pool, 'official', None)
+        if not official or not official.runtime.account(key):
+            return self.update(batch,key,'blocked','官方授权身份尚未就绪，请先检查登录')
+        with self.pool.connection() as db:
+            hold = self.gemini_hold(db,key)
+            before = db.execute('SELECT reason FROM official_account_blocks WHERE account_key=?',(key,)).fetchone()
+            before = tuple(before) if before else None
+        if hold:
+            return self.update(batch,key,'blocked',hold)
+        from official_quota import check_account
+        quota = check_account(official.runtime,key)
+        if quota.get('status') != 'ok':
+            messages = {
+                'verification_required':'额度查询返回核验提示；已识别登录身份，额度暂未读到；未因此暂停对话',
+                'authorization_required':'官方要求重新授权；请在官方 CLI 检查登录',
+                'authorization_unavailable':'本地官方授权资料未就绪，额度暂未读到',
+                'network_error':'连接官方服务失败，未读到额度；没有新增派发暂停',
+                'eligibility_failed':'官方资格检查失败，但未确认需要额外核验；没有新增派发暂停'}
+            return self.update(batch,key,'blocked',messages.get(quota.get('status'),'本轮未读到官方额度，不能据此认定账号失效；没有新增派发暂停'))
+        for window in ('five_hour','weekly'):
+            remaining = quota.get(window,{}).get('remaining_percent')
+            if type(remaining) not in (int,float) or not 0 < remaining <= 100:
+                if remaining == 0:
+                    with self.pool.connection() as db:
+                        db.execute('INSERT OR IGNORE INTO official_account_blocks(account_key,reason,created) VALUES(?,?,?)',
+                                   (key,'official_quota_exhausted',time.time()))
+                return self.update(batch,key,'blocked','官方额度已用尽，等待对应周期恢复' if remaining == 0 else '官方额度数据不完整，没有新增派发暂停')
+        with self.pool.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            try:
+                hold = self.gemini_hold(db,key)
+                current = db.execute('SELECT reason FROM official_account_blocks WHERE account_key=?',(key,)).fetchone()
+                if hold or (tuple(current) if current else None) != before:
+                    db.execute('ROLLBACK')
+                    return self.update(batch,key,'blocked',hold or '检查期间官方账号状态变化，请核对后再操作')
+                db.execute("DELETE FROM official_account_blocks WHERE account_key=? AND reason IN ('activation_verification_required','activation_quota_exhausted','official_authorization_verification_required','official_quota_exhausted')",(key,))
+                db.execute('COMMIT')
+            except BaseException:
+                if db.in_transaction: db.execute('ROLLBACK')
+                raise
+        self.update(batch,key,'done','官方授权与额度检查通过；未执行模型调用，未改变手动暂停或旧版记录')
+
+    def process_flow(self, batch, key, account, snapshot):
+        """Submit only one existing Flow login/project check; never generate or retry."""
         with self.db() as db:
-            prior = db.execute('SELECT gemini_checked FROM items WHERE batch_id=? AND account_key=?', (batch,key)).fetchone()
-        if prior and prior['gemini_checked']:
-            return self.update(batch,key,'done','Flow 冷却已结束，账号浏览器就绪；保留上次 Gemini 核对结果')
-        snapshot = self.snapshot()
-        items = snapshot['real_accounts']['items']
-        current = [x for x in items if x.get('key') == 'flow-account-' + key]
-        if (len(current) != 1 or current[0].get('gemini_unresolved') or current[0].get('gemini_busy')
-                or current[0].get('gemini_enabled') is False
-                or any(t.get('source_profile') == a.get('profile') and t.get('status') in ('queued','running') for t in snapshot.get('tasks', []))):
-            return self.update(batch,key,'blocked','浏览器已就绪；账号有任务或状态已变化，Gemini 检查留待处理')
-        fresh_at = current[0].get('gemini_usage_checked')
-        if (scheduled and current[0].get('gemini') == 'verified' and current[0].get('keepalive_state') == 'ready'
-                and type(fresh_at) in (int,float) and 0 <= time.time()-fresh_at <= 900):
-            return self.update(batch,key,'done','Flow 状态已读取；Gemini 近期已核对，本次不重复检查',checked=1)
-        result = self.pool.check(key, items)
-        if result.get('verified') and result.get('quota_available'):
-            return self.update(batch,key,'done','Flow 状态已读取；Gemini 登录和额度已核对',checked=1)
-        message = result.get('message') or 'Gemini 检查未完成，不会自动重试'
-        self.update(batch,key,'failed',str(message)[:200])
+            task_id = db.execute('SELECT flow_task_id FROM items WHERE batch_id=? AND account_key=?', (batch,key)).fetchone()[0]
+        if task_id:
+            tasks = [task for task in snapshot.get('tasks', []) if task.get('source_id') == task_id and task.get('source_profile') == account.get('profile')]
+            if len(tasks) != 1:
+                return self.update(batch,key,'blocked','已提交的 Flow 检查结果待核对；不会重复提交')
+            task = tasks[0]
+            if task.get('status') in ('queued','running'):
+                return self.update(batch,key,'waiting_flow','Flow 正在检查登录与连接，请稍候')
+            if task.get('status') == 'succeeded' and account.get('flow_login') == 'verified':
+                return self.update(batch,key,'done','Flow 登录与后台连接已核对；积分以后台最新读取为准')
+            return self.update(batch,key,'failed','Flow 检查未通过，请查看原任务详情或重新登录；不会自动重试')
+        if not account.get('flow_pacing_known') or not account.get('flow_risk_known'):
+            return self.update(batch,key,'blocked','Flow 风控或冷却状态无法确认，请先核查')
+        if account.get('flow_risk_paused'):
+            return self.update(batch,key,'blocked','Flow 风控暂停，需人工核查后恢复，本次未解除')
+        if account.get('flow_cooling'):
+            return self.update(batch,key,'blocked','Flow 仍在冷却，未提前解除；到期后可再次激活')
+        if account.get('gemini_busy') or any(t.get('source_profile') == account.get('profile') and t.get('status') in ('queued','running') for t in snapshot.get('tasks', [])):
+            return self.update(batch,key,'blocked','账号正在处理任务，本次未操作')
+        if account.get('flow_health') == 'ready' and account.get('flow_login') == 'verified' and account.get('flow_balance_fresh') is True:
+            return self.update(batch,key,'done','Flow 近期核对正常，无需重复恢复')
+        request_key = 'activate-' + batch.replace('-', '') + '-' + key[:32]
+        try:
+            task_id = self.sources.flow_activation_check(account['profile'], request_key)
+        except Exception:
+            return self.update(batch,key,'failed','Flow 检查提交结果未确认；请查原任务，不会自动重新提交')
+        with self.db() as db:
+            db.execute("UPDATE items SET flow_task_id=?,status='waiting_flow',message='Flow 检查已排队，等待原任务结果' WHERE batch_id=? AND account_key=?", (task_id,batch,key))
 
     def watch_cooldowns(self):
         """Track new cooldown episodes without repeating Gemini checks."""
         with self.db() as db:
-            batch = db.execute('SELECT id,origin FROM batches ORDER BY created DESC LIMIT 1').fetchone()
-            if not batch or batch['origin'] == 'poll':
+            batch = db.execute('SELECT id,origin,service FROM batches ORDER BY created DESC LIMIT 1').fetchone()
+            if not batch or batch['origin'] == 'poll' or batch['service'] != 'all':
                 return
             keys = {r[0] for r in db.execute("SELECT account_key FROM items WHERE batch_id=? AND status='done'", (batch['id'],))}
         if not keys:
@@ -356,7 +446,7 @@ class Activation:
         self.poll_tick()
         with self.guard:
             with self.db() as db:
-                batch = db.execute("SELECT id,origin FROM batches WHERE flow_refresh='pending' AND EXISTS (SELECT 1 FROM items WHERE items.batch_id=batches.id AND status IN ('queued','processing','cooling')) ORDER BY created LIMIT 1").fetchone()
+                batch = db.execute("SELECT id,origin FROM batches WHERE flow_refresh='pending' AND EXISTS (SELECT 1 FROM items WHERE items.batch_id=batches.id AND status IN ('queued','processing','cooling','waiting_flow')) ORDER BY created LIMIT 1").fetchone()
                 if batch and batch['origin'] == 'scheduled' and db.execute('SELECT flow_hold FROM activation_schedule WHERE id=1').fetchone()[0]:
                     db.execute("UPDATE batches SET flow_refresh='held' WHERE id=?", (batch['id'],))
                     batch = None
@@ -374,7 +464,7 @@ class Activation:
                     elif batch['origin'] == 'manual' and acknowledged:
                         db.execute('UPDATE activation_schedule SET flow_hold=0 WHERE id=1')
             with self.db() as db:
-                row = db.execute("SELECT batch_id,account_key,status,due FROM items WHERE status='queued' OR (status='cooling' AND due<=?) ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END,rowid LIMIT 1", (time.time(),)).fetchone()
+                row = db.execute("SELECT batch_id,account_key,status,due FROM items WHERE status IN ('queued','waiting_flow') OR (status='cooling' AND due<=?) ORDER BY CASE status WHEN 'waiting_flow' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,rowid LIMIT 1", (time.time(),)).fetchone()
             if not row:
                 if time.monotonic() >= self.next_watch:
                     self.next_watch = time.monotonic() + 30

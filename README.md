@@ -4,15 +4,15 @@
 
 ## 安装使用
 
-Windows、Ubuntu 安装包如已发布，可在本仓库的「Releases」下载。完整步骤见 [安装说明](docs/安装说明.md)。Ubuntu 可复用已运行的服务，Windows 安装时可选择创建桌面快捷方式。
+Windows 和 Ubuntu 安装包在本仓库的「Releases」下载。见 [安装说明](docs/安装说明.md) 与 [API 接入说明](docs/API.md)。Ubuntu 可复用已运行的服务，Windows 安装时可选择创建桌面快捷方式。
 
 ## 项目内容
 
-- `packaging/ubuntu/snapshot`：工作台、Flow 和 Gemini 集成的程序源码快照；`server` 包含安装和局域网发现组件。
+- `packaging/ubuntu/snapshot`：工作台、Flow 和官方 Gemini 通道的程序源码；`server` 包含安装和局域网发现组件。
 - `packaging/ubuntu/pooldesk-upstream`：原有 PoolDesk 请求核心与上游参考代码，相关许可保留在 `snapshot/workbench`。
 - `packaging/windows`：Windows 独立窗口、安装程序、账号助手及图标源码。
 
-Ubuntu 与 Windows 打包脚本分别为 `packaging/ubuntu/build_server.py` 和 `packaging/windows/build_client.py`。构建脚本所需的第三方运行库和离线依赖包不放入源码仓库；现成安装包中包含相应依赖。自行重新打包时，需要先为 Ubuntu 准备 `wheelhouse-linux/flow`、`wheelhouse-linux/gemini`，并为 Windows 的 `client-payload` 准备 Python 嵌入式运行环境、WebView2 SDK 文件和编译后的桌面程序。`fetch_webview.py` 可下载并校验 WebView2 SDK。这份源码快照的全新环境重新打包尚未单独验证。
+Ubuntu 与 Windows 打包脚本分别为 `packaging/ubuntu/build_server.py` 和 `packaging/windows/build_client.py`。自行重新打包时，先为 Ubuntu 准备 `wheelhouse-linux/flow` 中与锁定清单匹配的离线依赖；Windows 需 .NET 编译器、`client-payload/runtime` 下的 Python 嵌入式运行环境及 WebView2 SDK。`fetch_webview.py` 可下载并校验 WebView2 SDK。Windows 脚本会从源码编译桌面端和安装器。
 
 ## 数据和许可
 

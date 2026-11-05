@@ -94,6 +94,8 @@ class Store:
         ]
 
     def create_task(self, profile, project, kind, params, key, auto_retry=False):
+        if auto_retry and kind in ('image','video'):
+            raise ValueError('自动重新生成和自动换号尚未启用。')
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT * FROM tasks WHERE request_key=?", (key,)).fetchone()
@@ -140,13 +142,16 @@ class Store:
             db.execute("UPDATE flow_retry_roots SET state='interrupted',updated=? WHERE root_id IN (SELECT a.root_id FROM flow_retry_attempts a JOIN tasks t ON t.id=a.task_id WHERE t.status='running')", (now,))
             db.execute("UPDATE tasks SET status='interrupted',finished=?,error='后台曾中断；任务可能已提交，不会自动重试。请先核对原任务和项目素材。' WHERE status='running'", (now,))
 
-    def claim(self, busy, generation_allowed=None, retry_switch_allowed=None):
+    def claim(self, busy, generation_allowed=None, retry_switch_allowed=None, generation_shareable=None,
+              active_generation_projects=None, request_keys=None):
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
                 "SELECT t.*,a.reason AS retry_reason FROM tasks t LEFT JOIN flow_retry_attempts a ON a.task_id=t.id WHERE t.status='queued' ORDER BY t.created"
             ).fetchall()
-            row = next((r for r in rows if r["profile"] not in busy and
+            row = next((r for r in rows if (request_keys is None or r['request_key'] in request_keys) and r["profile"] not in busy and
+                        (r['kind'] not in ('image', 'video') or
+                         (r['profile'], r['project']) not in (active_generation_projects or set())) and
                         (generation_allowed is None or r["kind"] not in ('image', 'video') or
                          r["profile"] in generation_allowed) and
                         (retry_switch_allowed is None or r['retry_reason'] != 'switch_account' or
@@ -185,6 +190,8 @@ class Store:
             root, ordinal = attempt["root_id"], attempt["ordinal"]
             if not error:
                 state = 'succeeded'
+            elif not __import__('task_coordinator').AUTO_REGENERATE:
+                state = 'failed'
             elif retry_evidence == 'transient_before_submit' and ordinal == 0:
                 self._insert_retry(db, row, root, 1, row['profile'], row['project'], 'same_account', now)
                 state = 'active'
@@ -198,6 +205,8 @@ class Store:
 
     @staticmethod
     def _insert_retry(db, previous, root, ordinal, profile, project, reason, now):
+        if not __import__('task_coordinator').AUTO_REGENERATE:
+            raise ValueError('自动重新生成尚未启用。')
         ident = secrets.token_hex(8)
         key = f"retry-{ident}"
         db.execute("INSERT INTO tasks(id,profile,project,kind,params,status,created,request_key) VALUES(?,?,?,?,?,'queued',?,?)", (
@@ -230,6 +239,8 @@ class Store:
         return self.rows('SELECT profile,project,updated FROM flow_retry_projects')
 
     def enqueue_switch(self, root, profile, project):
+        if not __import__('task_coordinator').AUTO_SWITCH_ACCOUNT:
+            return False
         """Create one alternate attempt only if the saved account/project is still valid."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')

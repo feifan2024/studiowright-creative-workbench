@@ -16,8 +16,7 @@ import time
 from urllib.request import ProxyHandler, build_opener
 
 UNIT = 'studiowright-discovery.service'
-UNITS = ('studiowright-console.service', 'gemini-hanaoka-trial.service',
-         'creative-unified-workbench.service', 'creative-unified-api.service')
+UNITS = ('studiowright-console.service', 'creative-unified-workbench.service')
 PORT = 18925
 MAGIC = b'STUDIOWRIGHT_DISCOVER_V1\n'
 
@@ -40,6 +39,10 @@ def status():
         info = json.load(response)
     if info.get('application') != 'unified-workbench' or info.get('deployment') != 'ubuntu':
         raise RuntimeError('未识别到 Ubuntu 工作台。')
+    with build_opener(ProxyHandler({})).open('http://127.0.0.1:18922/health', timeout=4) as response:
+        api = json.load(response)
+    if api.get('application') != 'studiowright-unified-api':
+        raise RuntimeError('未识别到统一 API 服务。')
     return result
 
 

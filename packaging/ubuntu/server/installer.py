@@ -23,9 +23,9 @@ from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
 
 PACKAGE = Path(__file__).resolve().parent
-UNITS = ('studiowright-console.service', 'gemini-hanaoka-trial.service',
-         'creative-unified-workbench.service', 'creative-unified-api.service')
-PORTS = (18888, 8084, 18920, 18922)
+UNITS = ('studiowright-console.service', 'creative-unified-workbench.service',
+         'creative-unified-api.service')
+PORTS = (18888, 18920, 18922)
 
 
 def command(*args, check=True, timeout=30, env=None):
@@ -46,8 +46,6 @@ def health(port, expected):
         opener = build_opener(ProxyHandler({}))
         with opener.open('http://127.0.0.1:%d/health' % port, timeout=3) as response:
             value = json.load(response)
-        if expected is None:
-            return isinstance(value, dict) and value.get('status') == 'ok' and value.get('project') == 'HanaokaYuzu/Gemini-API'
         return isinstance(value, dict) and value.get('application') == expected
     except (OSError, ValueError, URLError):
         return False
@@ -69,7 +67,6 @@ def status():
         # The legacy Flow health endpoint creates a web session when accessed
         # locally. Read the service state and listening port instead.
         'flow': unit_state('studiowright-console.service') == 'active' and occupied(18888),
-        'gemini': health(8084, None),
         'workbench': workbench_health(),
         'api': health(18922, 'studiowright-unified-api'),
     }
@@ -93,8 +90,7 @@ def verify_payload():
 
 def check_reuse():
     info = status()
-    if all(value == 'active' for value in info['services'].values()) and all(
-            info[name] for name in ('flow', 'gemini', 'workbench', 'api')):
+    if all(info[name] for name in ('flow', 'workbench', 'api')):
         print('已识别现有服务，直接复用；未更改程序、账号、素材或记录。')
         return True
     print('现有服务尚未全部就绪，未进行安装或修改。')
@@ -146,7 +142,7 @@ def preflight_new(home):
             conflict.append('服务 ' + u)
     if conflict:
         raise RuntimeError('检测到现有程序、数据或端口，已停止以保护现有内容：' + '、'.join(conflict))
-    for name in ('flow', 'gemini'):
+    for name in ('flow',):
         wheel_dir = PACKAGE / 'wheels' / name
         if not wheel_dir.is_dir() or not any(wheel_dir.glob('*.whl')):
             raise RuntimeError('安装包缺少离线依赖：' + name)
@@ -185,7 +181,7 @@ def make_venv(python, target, requirements, wheels):
 def new_install(home):
     roots = preflight_new(home)
     verify_payload()
-    flow, gemini, work, units = (roots[k] for k in ('flow', 'gemini', 'workbench', 'units'))
+    flow, work, units = (roots[k] for k in ('flow', 'workbench', 'units'))
     # Every protected path and port has been checked before the first write.
     flow.mkdir(mode=0o700, parents=True, exist_ok=False)
     print('正在安装 Flow 程序和运行环境……', flush=True)
@@ -201,37 +197,24 @@ def new_install(home):
     flow_python = make_venv(sys.executable, flow / 'venv',
                             PACKAGE / 'snapshot/flow/requirements-frozen.txt',
                             PACKAGE / 'wheels/flow')
-    gemini.mkdir(mode=0o700, parents=True, exist_ok=False)
-    print('正在安装 Gemini 运行环境……', flush=True)
-    for name in ('server.py', 'index.html', 'requirements.lock.txt'):
-        shutil.copyfile(PACKAGE / 'snapshot/gemini' / name, gemini / name)
-    gemini_python = make_venv(sys.executable, gemini / 'venv',
-                              PACKAGE / 'snapshot/gemini/requirements-frozen.txt',
-                              PACKAGE / 'wheels/gemini')
-    access = gemini / 'access.json'
-    fd = os.open(access, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-        json.dump({'api_key': secrets.token_urlsafe(48)}, stream)
     copy_new(PACKAGE / 'snapshot/workbench', work)
     units.mkdir(parents=True, exist_ok=True)
     pythonpath = flow / 'source/src'
     common = [('PYTHONPATH', pythonpath), ('SW_ROOT', flow),
               ('PATH', str(flow / 'bin') + ':' + os.environ.get('PATH', '/usr/bin:/bin'))]
     write_unit(units, UNITS[0], [flow_python, flow / 'console/server.py'], flow / 'console', common)
-    write_unit(units, UNITS[1], [gemini_python, '-m', 'uvicorn', 'server:app', '--host', '127.0.0.1',
-                                '--port', '8084', '--no-access-log'], gemini)
-    write_unit(units, UNITS[2], [flow_python, '-B', work / 'server.py', '--port', '18920',
-                                '--flow-port', '18888', '--gemini-port', '8084', '--deployment', 'ubuntu'],
-               work, common, 'network.target studiowright-console.service gemini-hanaoka-trial.service')
-    write_unit(units, UNITS[3], [flow_python, '-B', work / 'unified_api.py'], work, common,
+    write_unit(units, UNITS[1], [flow_python, '-B', work / 'server.py', '--port', '18920',
+                                '--flow-port', '18888', '--deployment', 'ubuntu'],
+               work, common, 'network.target studiowright-console.service')
+    write_unit(units, UNITS[2], [flow_python, '-B', work / 'unified_api.py'], work, common,
                'network.target creative-unified-workbench.service')
     command('systemctl', '--user', 'daemon-reload')
     for unit in UNITS:
         command('systemctl', '--user', 'enable', '--now', unit, timeout=45)
     for _ in range(30):
         info = status()
-        if all(info[n] for n in ('flow', 'gemini', 'workbench', 'api')):
-            print('安装完成，服务已启动。账号、素材和历史记录均为空，需自行接入或通过单独的迁移流程导入。')
+        if all(info[n] for n in ('flow', 'workbench', 'api')):
+            print('安装完成，服务已启动。账号、素材和历史记录均为空；Gemini 需配置官方 Antigravity CLI 并单独授权。')
             return
         time.sleep(1)
     raise RuntimeError('程序已安装，但服务尚未全部就绪，请检查服务状态；安装数据已保留。')

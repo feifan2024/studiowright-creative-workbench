@@ -124,6 +124,26 @@ class MaterialBackfill:
         self.wake.set()
         return self.state()
 
+    def enqueue_project_assets(self, run_id, items):
+        """Queue only newly archived, untagged assets, without touching existing labels."""
+        self.pool.conversation_id(run_id)
+        with self.pool.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if self.pool.maintenance():
+                raise Conflict('工作台维护中，素材已保存，标签尚未排队。')
+            if db.execute('SELECT 1 FROM material_backfill_runs WHERE id=?', (run_id,)).fetchone():
+                db.execute('COMMIT')
+                return 0
+            chosen = self.candidates(db, items)['untagged']
+            now = time.time()
+            db.execute('INSERT INTO material_backfill_runs(id,scope,created) VALUES(?,?,?)', (run_id, 'untagged', now))
+            db.executemany("INSERT INTO material_backfill_jobs(asset_id,run_id,status,added,updated,note) VALUES(?,?,'waiting',?,?,?)",
+                           [(ident, run_id, added, now, '等待自动打标签') for ident, added in chosen])
+            db.execute('COMMIT')
+        if chosen:
+            self.wake.set()
+        return len(chosen)
+
     def resume(self):
         with self.pool.connection() as db:
             db.execute('BEGIN IMMEDIATE')

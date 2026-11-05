@@ -31,6 +31,21 @@ from studiowright.pacing import env_seconds
 
 log = logging.getLogger("studiowright.flow")
 
+
+class DownloadAddressExpired(RuntimeError):
+    """Refresh the existing media's address; never regenerate the media."""
+
+
+def record_recovery(action, **detail):
+    # Direct CLI downloads can run without the workbench's orchestration module.
+    try:
+        from task_coordinator import record
+    except ModuleNotFoundError as exc:
+        if exc.name=='task_coordinator':
+            return
+        raise
+    record(action,**detail)
+
 FLOW_ROOT = "https://flow.google.com/"
 IMAGE_RPC = "ogiZ0b"
 #: The project's media list, loaded with the project page.
@@ -357,6 +372,9 @@ class FlowPage:
         self.positions: dict[str, float] = {}
         #: Flow's credit balance after the last video submit, when its reply says.
         self.credits_left: int | None = None
+        self._foreground_lease = None
+        self._foreground_driver = None
+        self._foreground_target = None
 
     @property
     def session(self) -> ChromeSession:
@@ -381,9 +399,85 @@ class FlowPage:
         await flow.ready()
         return flow
 
+    @classmethod
+    async def open_foreground(cls, session: ChromeSession, project_id: str, profile: str, lease) -> FlowPage:
+        """Use the task's own page when present; leave normal user tabs intact."""
+        import hashlib
+        import sys
+        shared = str(Path.home() / '.local/share/creative-unified-workbench')
+        if shared not in sys.path:
+            sys.path.insert(0, shared)
+        from desktop_layout import call, gui_env
+        from wayland_desktop_driver import WaylandDesktopDriver
+        from window_binding import find_page_and_target
+        url = f'{FLOW_ROOT}project/{project_id}'
+        preferred_page = None
+        if hasattr(session, '_task_pages'):
+            preferred_page = await session.page_for(FLOW_ROOT)
+            if preferred_page not in session._task_pages:
+                raise FlowError('flow_task_page_unconfirmed')
+            if preferred_page.url.split('?')[0].split('#')[0].rstrip('/') != url:
+                from task_coordinator import recover_preparation
+                async def navigate_project():
+                    if hasattr(session,'_safe_editor'):
+                        await session._safe_editor(preferred_page)
+                    try:
+                        await preferred_page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    except PlaywrightTimeout as exc:
+                        raise TimeoutError('project_page_not_ready') from exc
+                await recover_preparation(navigate_project,reason='project_navigation')
+        page, target = await find_page_and_target(context=session.context,
+            account_key=hashlib.sha256(profile.encode()).hexdigest(), hostname='flow.google.com',
+            desired_url=url, layout_call=call, preferred_page=preferred_page)
+        driver = WaylandDesktopDriver(gui_env())
+        if not await driver.activate_and_confirm(target):
+            raise FlowError('desktop_focus_unconfirmed')
+        await page.bring_to_front()
+        if not await driver._os_focus_confirmed(target):
+            raise FlowError('desktop_focus_unconfirmed')
+        # Never replace an unsent prompt or reference assets on the user's page.
+        for selector in (s.COMPOSER, s.BOUND_CHIP, s.MENTION_CHIP):
+            items = page.locator(selector)
+            if selector == s.COMPOSER:
+                for index in range(await items.count()):
+                    if (await items.nth(index).inner_text()).strip():
+                        raise FlowError('existing_flow_draft')
+            elif await items.count():
+                raise FlowError('existing_flow_attachments')
+        flow = cls(page, project_id, session)
+        flow._foreground_lease, flow._foreground_driver, flow._foreground_target = lease, driver, target
+        if page.url.split('?')[0].split('#')[0].rstrip('/') != flow.url:
+            await page.goto(flow.url, wait_until='domcontentloaded', timeout=30000)
+        from task_coordinator import recover_preparation, record
+        async def ready_once():
+            try:
+                await flow.ready()
+            except FlowError as exc:
+                raise TimeoutError('project_page_not_ready') from exc
+        async def restore_page():
+            # Recheck the retained window; never erase a draft while repairing navigation.
+            if hasattr(session,'_safe_editor'):
+                await session._safe_editor(page)
+            record('project_page_reload')
+            await page.goto(flow.url,wait_until='domcontentloaded',timeout=30000)
+        await recover_preparation(ready_once,reason='project_page_ready',repair=restore_page)
+        return flow
+
+    @contextlib.asynccontextmanager
+    async def foreground_interaction(self):
+        """Queue later UI recovery work; passive result waits do not use it."""
+        if self._foreground_lease is None:
+            yield
+            return
+        async with self._foreground_lease.interaction(
+                self._foreground_driver, self._foreground_target, self.page):
+            yield
+
     # --- page state -------------------------------------------------------------------
     async def ready(self, timeout_s: float = 30) -> None:
         try:
+            if self._foreground_lease and self._foreground_lease.active:
+                await self.dismiss_flow_changelog()
             await self._leave_agent_mode(timeout_s)
             await self.page.locator(s.READY).first.wait_for(
                 state="visible", timeout=timeout_s * 1000
@@ -395,10 +489,37 @@ class FlowPage:
             ) from exc
         await self.clear_blockers()
 
+    async def dismiss_flow_changelog(self) -> bool:
+        """Dismiss only Flow's identified update notice, never an arbitrary dialog."""
+        from urllib.parse import urlparse
+        if urlparse(self.page.url).hostname != 'flow.google.com':
+            return False
+        dialogs = self.page.locator("[role='dialog']:has(flow-change-log-modal)")
+        visible = [dialogs.nth(i) for i in range(await dialogs.count())
+                   if await dialogs.nth(i).is_visible()]
+        if len(visible) != 1:
+            return False
+        dialog = visible[0]
+        frame = dialog.locator('flow-change-log-modal iframe')
+        if await frame.count() != 1:
+            return False
+        src = urlparse((await frame.get_attribute('src')) or '')
+        if (src.scheme != 'https' or src.hostname != 'www.gstatic.com'
+                or not src.path.startswith('/aitestkitchen/website/flow/changelogs/')):
+            return False
+        buttons = dialog.get_by_role('button', name=re.compile(r'^(?:开始使用|Get started)$', re.I))
+        if await buttons.count() != 1 or not await buttons.first.is_visible():
+            return False
+        await buttons.first.click(timeout=5000)
+        await dialog.wait_for(state='hidden', timeout=5000)
+        return True
+
     async def _leave_agent_mode(self, timeout_s: float) -> None:
         """Close the agent panel and leave agent mode, where the account has them."""
         ready = self.page.locator(s.READY).first
         for _ in range(int(timeout_s * 2)):
+            if self._foreground_lease and self._foreground_lease.active:
+                await self.dismiss_flow_changelog()
             if await ready.is_visible():
                 return
             for selector in (s.AGENT_PANEL_CLOSE, s.AGENT_CHIP_ON):
@@ -409,7 +530,9 @@ class FlowPage:
             await self.page.wait_for_timeout(500)
 
     async def clear_blockers(self) -> None:
-        for selector in (s.COOKIE_REJECT, s.DIALOG_CLOSE):
+        # During a managed task, close only identified notices, never arbitrary dialogs.
+        selectors = (s.COOKIE_REJECT,) if self._foreground_lease else (s.COOKIE_REJECT, s.DIALOG_CLOSE)
+        for selector in selectors:
             button = self.page.locator(selector).first
             if await button.count() and await button.is_visible():
                 await button.click()
@@ -723,23 +846,53 @@ class FlowPage:
     async def _type_and_submit(
         self, prompt: str, on_submit: Callable[[], None] | None = None
     ) -> None:
+        if self._foreground_lease and self._foreground_lease.active:
+            await self.dismiss_flow_changelog()
+        # Opt in explicitly; without this local marker the original path is unchanged.
+        from pathlib import Path
+        marker = Path.home() / '.local/state/creative-unified-workbench/foreground-input-enabled'
+        if not marker.is_file() or marker.is_symlink():
+            composer = self.page.locator(s.COMPOSER).first
+            await composer.click()
+            await self.page.keyboard.press("Control+End")
+            await self.page.keyboard.insert_text(prompt)
+            submit = self.page.locator(s.SUBMIT).first
+            deadline = time.monotonic() + 5
+            while await submit.is_disabled():
+                if await self.page.locator(s.CREDITS_WARNING).count():
+                    raise FlowError("Flow reports there are not enough credits for this generation")
+                if time.monotonic() > deadline:
+                    raise FlowError("the generate button stayed disabled")
+                await asyncio.sleep(0.05)
+            # Persist the ambiguity boundary *before* the click; if the write fails,
+            # do not submit anything. A lost reply after this point is not a failure.
+            if on_submit is not None:
+                on_submit()
+            await submit.click()
+            return
+        # This function runs only inside the existing account/profile lock.
+        # The queue serializes foreground focus and clipboard access across both businesses.
+        import sys
+        from pathlib import Path
+        shared = str(Path.home() / '.local/share/creative-unified-workbench')
+        if shared not in sys.path:
+            sys.path.insert(0, shared)
+        from desktop_layout import call, gui_env
+        from foreground_queue import ForegroundQueue
+        from flow_window_binding import find_flow_target
+        from provider_paste_hooks import flow_submit
+        from wayland_desktop_driver import WaylandDesktopDriver
+        queue = ForegroundQueue(Path.home() / '.local/state/creative-unified-workbench/foreground-input')
+        reserved = bool(self._foreground_lease and self._foreground_lease.active)
+        target = self._foreground_target if reserved else await find_flow_target(self.session, self.page, call)
         composer = self.page.locator(s.COMPOSER).first
-        await composer.click()
-        await self.page.keyboard.press("Control+End")
-        await self.page.keyboard.insert_text(prompt)
-        submit = self.page.locator(s.SUBMIT).first
-        deadline = time.monotonic() + 5
-        while await submit.is_disabled():
-            if await self.page.locator(s.CREDITS_WARNING).count():
-                raise FlowError("Flow reports there are not enough credits for this generation")
-            if time.monotonic() > deadline:
-                raise FlowError("the generate button stayed disabled")
-            await asyncio.sleep(0.05)
-        # Persist the ambiguity boundary *before* the click; if the write fails,
-        # do not submit anything. A lost reply after this point is not a failure.
-        if on_submit is not None:
-            on_submit()
-        await submit.click()
+        await flow_submit(page=self.page, composer=composer,
+            submit_button=self.page.locator(s.SUBMIT).first,
+            credits_warning=self.page.locator(s.CREDITS_WARNING),
+            target=target, prompt=prompt, queue=queue,
+            driver=WaylandDesktopDriver(gui_env()), on_submit=on_submit, reserved=reserved)
+        if reserved:
+            await self._foreground_lease.release()
 
     async def generate_images(
         self, prompt: str, count: int = 1, timeout_s: float | None = None,
@@ -789,13 +942,15 @@ class FlowPage:
             else f"no image reply within {timeout_s:.0f} s"
         )
         log.warning("%s; looking for the new image in the project", why)
-        found = replies.new_media(before, await self.list_media(), submitted - CLOCK_SLACK_S, count)
-        results = []
-        for item in found:
-            urls = await self.edit_view_urls(item.media_id)
-            if "image" in urls:
-                results.append(replies.ImageResult(item.media_id, urls["image"], recovered=True))
-        await self.reload()
+        record_recovery('original_image_result_lookup')
+        async with self.foreground_interaction():
+            found = replies.new_media(before, await self.list_media(), submitted - CLOCK_SLACK_S, count)
+            results = []
+            for item in found:
+                urls = await self.edit_view_urls(item.media_id)
+                if "image" in urls:
+                    results.append(replies.ImageResult(item.media_id, urls["image"], recovered=True))
+            await self.reload()
         if not results:
             raise FlowError(f"{why}, and no new image is in the project")
         return results
@@ -861,6 +1016,8 @@ class FlowPage:
             urls: dict[str, dict[str, str]] = {}
             seen = 0
             finished_at: float | None = None
+            url_refreshes = 0
+            last_url_refresh = 0.0
             while time.monotonic() < deadline:
                 await watch.wait(2.0)
                 for rpc_id, _status, text in watch.bodies[seen:]:
@@ -913,11 +1070,18 @@ class FlowPage:
                     finished_at is not None
                     and time.monotonic() - finished_at > 8
                     and not all("video" in urls.get(i, {}) for i in new_ids)
+                    and url_refreshes < 2
+                    and time.monotonic() - last_url_refresh > 15
                 ):
                     # Some modes never fetch the finished clip's URL on their own; opening
                     # the edit view makes the page fetch fresh URLs for every medium.
                     log.info("clip done; fetching its URL through the edit view")
-                    for media_id, found in (await self.fresh_media_urls()).items():
+                    url_refreshes += 1
+                    last_url_refresh = time.monotonic()
+                    record_recovery('original_video_address_lookup',attempt=url_refreshes,media_count=len(new_ids))
+                    async with self.foreground_interaction():
+                        fresh_urls = await self.fresh_media_urls()
+                    for media_id, found in fresh_urls.items():
                         urls.setdefault(media_id, {}).update(found)
                 if new_ids and all("video" in urls.get(i, {}) for i in new_ids):
                     log.info("clip URLs received")
@@ -1102,13 +1266,53 @@ class FlowPage:
                 await self.ready()
 
     async def download(self, url: str, target: Path) -> Path:
-        response = await self.page.context.request.get(url)
-        if response.status != 200:
-            raise FlowError(f"download failed with HTTP {response.status}")
-        body = await response.body()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(body)
-        return target
+        import os
+        import tempfile
+        for attempt in range(3):
+            response = None
+            try:
+                response = await self.page.context.request.get(url,timeout=30000)
+                if response.status in (401,403,410):
+                    raise DownloadAddressExpired('original_download_address_expired')
+                if response.status in (408,429,500,502,503,504):
+                    retry_after=response.headers.get('retry-after')
+                    # A long provider cooldown must not be shortened by local retries.
+                    if retry_after and (not retry_after.isdigit() or int(retry_after)>5):
+                        raise FlowError('download_cooldown_required')
+                    raise ConnectionError('download_temporarily_unavailable')
+                if response.status != 200:
+                    raise FlowError(f'download failed with HTTP {response.status}')
+                body=await response.body()
+                declared=response.headers.get('content-length')
+                if not body or (declared and declared.isdigit() and len(body)!=int(declared)):
+                    raise ConnectionError('download_incomplete')
+                if 'text/html' in response.headers.get('content-type','').lower():
+                    raise FlowError('download_returned_webpage')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() or target.is_symlink():
+                    raise FlowError('download_target_already_exists')
+                fd,temporary=tempfile.mkstemp(prefix='.flow-download-',dir=target.parent)
+                try:
+                    with os.fdopen(fd,'wb') as stream:
+                        stream.write(body);stream.flush();os.fsync(stream.fileno())
+                    # link is atomic and fails if another task has already saved this name.
+                    os.link(temporary,target)
+                finally:
+                    Path(temporary).unlink(missing_ok=True)
+                if attempt:
+                    record_recovery('original_download_recovered',attempt=attempt+1)
+                return target
+            except (ConnectionError,TimeoutError,PlaywrightTimeout):
+                record_recovery('original_download_retry',attempt=attempt+1)
+                if attempt==2:
+                    raise
+                delay=float(response.headers.get('retry-after','0')) if response else 0
+                await asyncio.sleep(max(delay,.3*(attempt+1)))
+            finally:
+                if response is not None:
+                    with contextlib.suppress(Exception):
+                        await response.dispose()
+        raise FlowError('download_recovery_exhausted')
 
 
 _PRICE = re.compile(
@@ -1119,6 +1323,7 @@ _PRICE = re.compile(
 def credit_price(pane_text: str) -> int | None:
     """The credit cost the settings pane states, e.g. "uses 12 credits" / "12 kredi"."""
     matches = _PRICE.findall(pane_text)
+    matches += re.findall(r"(?:生成将消耗|将消耗|消耗)\s*(\d+)\s*(?:个)?(?:点数|积分)", pane_text)
     return int(matches[-1]) if matches else None
 
 
