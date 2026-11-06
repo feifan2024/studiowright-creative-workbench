@@ -14,7 +14,7 @@ class PortalKeyboard:
         self.root = Path(runtime or Path.home()/'.local/state/creative-unified-workbench/desktop-keyboard')
         self.path = self.root/'keyboard.sock'
         self.env = dict(gui_environment or os.environ)
-        self.target = {'pid':target.process_id,'window':target.window_id,'workspace':target.workspace}
+        self.target = None if target is None else {'pid':target.process_id,'window':target.window_id,'workspace':target.workspace}
 
     def _helper_running(self, pid):
         if type(pid) is not int or pid <= 1: return False
@@ -22,6 +22,21 @@ class PortalKeyboard:
             cmd = Path('/proc')/str(pid)/'cmdline'
             return str(self.root/'helper.py').encode() in cmd.read_bytes().split(b'\0')
         except OSError:
+            return False
+
+    def ready(self):
+        """Read the existing desktop session without launching it or injecting keys."""
+        try:
+            root = self.root.lstat()
+            status = self.root / 'status.json'
+            meta, endpoint = status.lstat(), self.path.lstat()
+            if (not stat.S_ISDIR(root.st_mode) or root.st_mode & 0o077
+                    or not stat.S_ISREG(meta.st_mode) or not stat.S_ISSOCK(endpoint.st_mode)
+                    or any(item.st_uid != os.getuid() for item in (root, meta, endpoint))):
+                return False
+            current = json.loads(status.read_text(encoding='utf-8'))
+            return isinstance(current, dict) and current.get('state') == 'ready' and self._helper_running(current.get('pid'))
+        except (OSError, ValueError):
             return False
 
     async def ensure_ready(self, timeout=250):
@@ -58,6 +73,8 @@ class PortalKeyboard:
         raise RuntimeError('desktop_keyboard_authorization_timeout')
 
     async def _send(self, action, **values):
+        if self.target is None:
+            raise RuntimeError('desktop_keyboard_target_required')
         reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(self.path)), 3)
         try:
             data = {'action':action, 'target':self.target, **values}

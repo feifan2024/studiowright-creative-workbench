@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -19,11 +20,12 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 
 from account_pacing import account_status, resume_after_review
-from adapter import PreSubmissionTransient
+from adapter import AccountWindowBusy, PreSubmissionTransient
 from api_keys import APIKeys
 from account_insights import Insights
-from console_store import Store
+from console_store import RETRY_KINDS, Store
 from dispatch_limit import DispatchLimit, MAX_CONCURRENCY
+from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
 from web_auth import WebAuth
 from login_sessions import Vault, normalize_bundle
 from material_library import Library
@@ -33,6 +35,7 @@ from remote_login import RemoteLogins
 HERE = Path(__file__).resolve().parent
 PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 KINDS = {"sync", "login", "media", "doctor", "quote", "image", "video"}
+RETRYABLE_INPUT_STOPS = frozenset(('pasted_text_mismatch', 'pre_submit_failed:pointer_not_over_input', 'pre_submit_failed:desktop_keyboard_authorization_timeout'))
 
 
 def safe_error(exc):
@@ -52,6 +55,7 @@ class Console:
         self.insights = Insights(self.store, self.root / "data/studiowright.db")
         self.balance_wake = asyncio.Event()
         self.balance_refreshing = False
+        self.balance_busy = set()
         self.library = Library(self.root / "material-library")
         self.vault = Vault(self.root / "console-data")
         self.remote = RemoteLogins(self.root, fixture=test)
@@ -65,7 +69,9 @@ class Console:
         self.running = set()
         dispatch_state = (self.root / 'console-data') if test else (Path.home() / '.local/state/creative-unified-workbench')
         self.dispatch_limit = DispatchLimit(dispatch_state / 'dispatch')
+        self.references = ReferenceStore(dispatch_state)
         self.worker = None
+        self.keyboard_warmup = None
         for profile in adapter.discover():
             if not self.store.account(profile):
                 self.store.add_account(profile, profile)
@@ -85,15 +91,18 @@ class Console:
         # This second check is before the adapter is called, so a racing restriction
         # can safely leave the existing task in the queue without resubmission.
         try:
+            if task['kind'] in RETRY_KINDS and not self.desktop_keyboard_ready():
+                self.store.release_unsubmitted(task['id'])
+                self.release_profile(task)
+                return
             database = self.root / 'data/studiowright.db'
             if task['kind'] in {'image', 'video'} and not (self.test and not database.exists()):
                 status = account_status([{'profile': task['profile']}], database)[0]
                 detail = self.store.retry_detail(task['id'])
                 switched = detail and detail['reason'] == 'switch_account'
-                mapped = {(p['profile'], p['project']) for p in self.store.retry_projects()}
                 if (status['generation_state'] != 'not_cooling_down' or status['risk_paused'] is not False
                         or (switched and (task['profile'] not in self.switch_ready_profiles()
-                                          or (task['profile'], task['project']) not in mapped))):
+                                          or not self.retry_project_matches(task['profile'], task['project'])))):
                     self.store.release_unsubmitted(task['id'])
                     self.release_profile(task)
                     return
@@ -146,15 +155,29 @@ class Console:
                     source = dict(linked[0])
                     raw = json.loads(source.get('result') or '{}')
                     evidence, stage = raw.get('retry_evidence'), raw.get('stage')
+                    # Only explicitly allowed local input guards before the send
+                    # checkpoint count; require the matching persisted source record.
+                    stop = exc.args[0] if len(exc.args) == 1 and isinstance(exc.args[0], str) else None
+                    source_error = str(source.get('error') or '')
+                    if (stage == 'preparing' and type(exc).__name__ == 'InputNotSubmitted'
+                            and type(exc).__module__ == 'foreground_input'
+                            and stop in RETRYABLE_INPUT_STOPS
+                            and (source_error == f'InputNotSubmitted: {stop}'
+                                 or source_error.startswith(f'InputNotSubmitted: {stop} ('))):
+                        evidence = 'transient_before_submit'
                     if (source['status'] == 'failed' and source['project_id'] == task['project']
-                            and source['kind'] == task['kind'] and not raw.get('media_ids') and not raw.get('files')
+                            and source['profile'] == task['profile'] and source['kind'] == task['kind'] and not raw.get('media_ids') and not raw.get('files')
                             and ((evidence == 'transient_before_submit' and stage == 'preparing')
                                  or (evidence == 'provider_rejected_unusual' and stage == 'submitting'
                                      and task['params'].get('count') == 1))):
                         retry_evidence = evidence
-                elif not linked and isinstance(exc, PreSubmissionTransient) and self.store.retry_detail(task['id']):
+                elif (not linked and self.store.retry_detail(task['id']) and (
+                        isinstance(exc, PreSubmissionTransient) or (
+                            type(exc).__module__ == 'task_coordinator'
+                            and type(exc).__name__ == 'CoordinationBlocked'
+                            and exc.args in (('existing_flow_attachments',), ('existing_flow_draft',))))):
                     retry_evidence = 'transient_before_submit'
-            if task["kind"] in {"sync", "session_import"}:
+            if task["kind"] in {"sync", "session_import"} and not isinstance(exc, AccountWindowBusy):
                 account = self.store.account(task["profile"])
                 self.store.update_account(
                     task["profile"], account["email"], "attention", safe_error(exc)
@@ -176,16 +199,81 @@ class Console:
         finally:
             slot.close()
 
+    def reconcile_rejected_windows(self, coordinator=None):
+        """A provider rejection is not an unknown result, if correlated to one failed attempt."""
+        if self.test:
+            return
+        from task_coordinator import Coordinator
+        coordinator = coordinator or Coordinator()
+        for window in coordinator.pending_rejections():
+            if window['profile'] in self.busy:
+                continue
+            with contextlib.suppress(OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                task = self.store.task(window['task_id'])
+                if (not task or task['status'] != 'failed' or not task['finished']
+                        or task['profile'] != window['profile'] or task['kind'] not in ('image', 'video')
+                        or task['params'].get('count') != 1):
+                    continue
+                linked = list(self.adapter.source_jobs_for_task(task['profile'], task['id']))
+                if len(linked) != 1:
+                    continue
+                source = dict(linked[0])
+                result = json.loads(source['result'] or '{}')
+                if (isinstance(result, dict) and source['status'] == 'failed' and source['profile'] == task['profile']
+                        and source['project_id'] == task['project'] and source['kind'] == task['kind']
+                        and result.get('stage') == 'submitting'
+                        and result.get('retry_evidence') == 'provider_rejected_unusual'
+                        and not result.get('media_ids') and not result.get('files')):
+                    coordinator.release_confirmed_rejection(task['profile'], task['id'])
+
+    def desktop_keyboard_ready(self):
+        if self.test:
+            return True
+        try:
+            from portal_keyboard_client import PortalKeyboard
+            return PortalKeyboard(None).ready()
+        except ImportError:
+            return False
+
+    async def prepare_desktop_keyboard(self):
+        # A single shared permission request, outside account/dispatch slots.
+        try:
+            from flow_browser_state import gui_env
+            from portal_keyboard_client import PortalKeyboard
+            env = await asyncio.to_thread(gui_env)
+            await PortalKeyboard(None, gui_environment=env).ensure_ready(timeout=45)
+        except (ImportError, OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+            pass  # The queue remains intact; continue observing the existing session.
+
     async def scheduler(self):
         next_switch_check = 0.0
+        next_window_check = 0.0
         while True:
             for ident, s in list(self.remote.sessions.items()):
                 if s["expires"] < time.time():
                     await asyncio.to_thread(self.remote.close, ident)
                     self.busy.discard(s["profile"])
             self.running = {t for t in self.running if not t.done()}
-            if (not (self.dispatch_limit.root/'flow-stress-once.json').exists()
-                    and time.monotonic() >= next_switch_check):
+            if self.dispatch_limit.marker.exists() or self.dispatch_limit.marker.is_symlink():
+                await asyncio.sleep(0.2)
+                continue
+            stress_marker = self.dispatch_limit.root/'flow-stress-once.json'
+            if not stress_marker.exists() and time.monotonic() >= next_window_check:
+                next_window_check = time.monotonic() + 5.0
+                with contextlib.suppress(OSError, ValueError, sqlite3.Error):
+                    self.reconcile_rejected_windows()
+            keyboard_ready = self.desktop_keyboard_ready()
+            if keyboard_ready:
+                if self.keyboard_warmup and self.keyboard_warmup.done():
+                    self.keyboard_warmup = None
+            else:
+                demand = self.store.rows("""SELECT 1 FROM tasks WHERE status='queued' AND kind IN ('image','video')
+                    UNION ALL SELECT 1 FROM flow_retry_roots WHERE state='pending_switch' LIMIT 1""")
+                if demand and self.keyboard_warmup is None:
+                    self.keyboard_warmup = asyncio.create_task(self.prepare_desktop_keyboard())
+                elif not demand and self.keyboard_warmup and self.keyboard_warmup.done():
+                    self.keyboard_warmup = None
+            if keyboard_ready and not stress_marker.exists() and time.monotonic() >= next_switch_check:
                 # Missing projects, stale balance, or uncertain account state all wait.
                 with contextlib.suppress(Exception):
                     self.schedule_pending_switches()
@@ -211,7 +299,9 @@ class Console:
                         allowed -= held - self.busy
                     if self.test and not database.exists():
                         allowed = {a['profile'] for a in accounts}  # FakeAdapter fixture only.
-                    task = self.store.claim(self.busy, allowed, self.switch_ready_profiles(),
+                    if not keyboard_ready:
+                        allowed.clear()
+                    task = self.store.claim(self.busy | self.balance_busy, allowed, self.switch_ready_profiles(),
                                             set(), self.generation_projects,
                                             request_keys=set(scope['requests']) if scope else None)
                     if not task:
@@ -231,25 +321,70 @@ class Console:
                     raise
             await asyncio.sleep(0.2)
 
+    def retry_project_matches(self, profile, project):
+        account = self.store.account(profile)
+        email = (account or {}).get('email') or ''
+        return ('@' in email and account['state'] == 'verified' and
+                [p['id'] for p in self.store.projects(profile)
+                 if p['title'] == 'FLOW+' + email.split('@', 1)[0]] == [project])
+
     def schedule_pending_switches(self):
-        # Explicit deployment policy: no regeneration and no automatic account switch.
-        from task_coordinator import AUTO_SWITCH_ACCOUNT
-        if not AUTO_SWITCH_ACCOUNT:
-            return
+        now = time.time()
+        self.store.expire_unstarted_switches(now)
         roots = self.store.pending_retry_roots()
         if not roots:
             return
-        now = time.time()
+        from task_coordinator import Coordinator
         states = account_status(self.store.accounts(), self.root / 'data/studiowright.db', now)
         allowed = {a['profile'] for a in states if a['state'] == 'verified'
                    and a['generation_state'] == 'not_cooling_down' and a['risk_paused'] is False
-                   and a['profile'] not in self.busy}
-        fresh = self.switch_ready_profiles(now)
-        projects = sorted((p for p in self.store.retry_projects() if p['profile'] in allowed & fresh),
-                          key=lambda p: (p['updated'], p['profile']))
-        for root in roots:
-            for p in projects:
-                if self.store.enqueue_switch(root['root_id'], p['profile'], p['project']):
+                   and a['profile'] not in self.busy and a['profile'] not in self.balance_busy}
+        if not self.test:
+            allowed -= {w['profile'] for w in Coordinator().status()['windows']
+                        if w['state'] not in ('idle',)}
+        balances = {r['profile']:r['balance'] for r in self.store.rows(
+            "SELECT profile,balance FROM account_balances WHERE status='ready' AND observed BETWEEN ? AND ?",
+            (now-900,now))}
+        projects = []
+        for profile in allowed & balances.keys():
+            account = self.store.account(profile)
+            email = account.get('email') or ''
+            if '@' not in email:
+                continue
+            owned = [p for p in self.store.projects(profile) if p['title'] == 'FLOW+' + email.split('@', 1)[0]]
+            if len(owned) == 1:
+                projects.append((profile, owned[0]['id'], email, balances[profile]))
+        projects.sort(key=lambda entry: (-entry[3], entry[0]))
+        for row in roots:
+            root = row['root_id']
+            original = self.store.task(root)
+            info = self.store.retry_detail(root)
+            if not original or not info or original['kind'] not in RETRY_KINDS:
+                self.store.stop_retry_wait(root, 'no_account')
+                continue
+            params = original['params']
+            attempts = info['attempts']
+            used = {a['profile'] for a in attempts}
+            ordinal = attempts[-1]['ordinal'] + 1
+            minimum = params['max_credits'] if original['kind'] == 'video' else 1
+            eligible = [p for p in projects if p[0] not in used and p[3] >= minimum]
+            if not eligible:
+                if now - row['updated'] >= 900:
+                    self.store.stop_retry_wait(root, 'no_account')
+                continue
+            source_account = self.store.account(original['profile'])
+            for profile, project, email, _ in eligible:
+                retry_params = params
+                if params.keys() & REFERENCE_FIELDS:
+                    try:
+                        retry_params = self.references.clone_retry(original['kind'], params,
+                            (original['profile'],original['project'],(source_account or {}).get('email')),
+                            (profile,project,email), f'{root}:{ordinal}:{profile}:{project}')
+                    except ValueError:
+                        self.store.stop_retry_wait(root, 'references_unavailable')
+                        break
+                if self.store.enqueue_switch(root, profile, project, retry_params, ordinal):
+                    projects = [p for p in projects if p[0] != profile]
                     break
 
     def switch_ready_profiles(self, now=None):
@@ -297,6 +432,9 @@ class Console:
                         slot = self.dispatch_limit.try_acquire()
                         if slot is None:
                             continue
+                        # Reserve before awaiting: the scheduler must leave this
+                        # account queued while the balance reader owns its window.
+                        self.balance_busy.add(profile)
                         try:
                             balance = await asyncio.wait_for(read_balance(account, pw), timeout=12)
                             self.insights.record(profile, balance)
@@ -304,6 +442,7 @@ class Console:
                             message = str(exc) if isinstance(exc, ValueError) else '余额读取暂未完成，保留上次记录。'
                             self.insights.record(profile, error=message)
                         finally:
+                            self.balance_busy.discard(profile)
                             slot.close()
             except Exception:
                 pass
@@ -314,7 +453,7 @@ class Console:
             except asyncio.TimeoutError:
                 pass
 
-    def validate(self, body):
+    def validate(self, body, with_references=False):
         profile, project, kind = body.get("profile"), body.get("project"), body.get("kind")
         if (
             not isinstance(profile, str)
@@ -355,6 +494,16 @@ class Console:
                 "resolution": p.get("resolution", "720p"),
                 "duration": p.get("duration", 8),
             }
+            if with_references:
+                if kind not in ('image', 'video'):
+                    raise ValueError('仅图片和视频任务可以使用参考素材。')
+                if p.keys() - params.keys() - {'max_credits'} - REFERENCE_FIELDS:
+                    raise ValueError('参考图任务包含不支持的参数。')
+                refs = task_reference_ids(kind, p)
+                self.references.check(refs, profile, project, account.get('email'), allow_video=p['mode'] == 'ingredients')
+                params.update({key: p[key] for key in p.keys() & REFERENCE_FIELDS})
+            elif p.keys() & (REFERENCE_FIELDS | {'refs', 'start', 'end'}):
+                raise ValueError('含参考图的任务必须使用对应的提交入口。')
             if params["aspect"] not in (
                 ["16:9", "9:16"] if kind != "image" else ["16:9", "4:3", "1:1", "3:4", "9:16"]
             ):
@@ -378,8 +527,37 @@ class Console:
             raise ValueError("缺少提交编号，请重新提交。")
         return profile, project, kind, params, key
 
+    def task_view(self, row):
+        # Keep the public ID and submission metadata; resolve the current attempt separately.
+        out = dict(row)
+        retry = self.store.retry_detail(row['id'])
+        if not retry or retry['ordinal'] != 0 or not retry['attempts']:
+            return out, retry
+        latest = retry['attempts'][-1]
+        state = retry['state']
+        current = row if latest['id'] == row['id'] else self.store.task(latest['id'])
+        if current is None:
+            out.update(status='interrupted',result=None,error='重试记录待核对。')
+            return out, retry
+        out.update(effective_profile=current['profile'], effective_project=current['project'],
+                   result=current['result'],error=current['error'],finished=current['finished'])
+        if state == 'pending_switch':
+            out.update(status='queued',result=None,error=None,finished=None)
+        elif state == 'active':
+            out.update(status='queued' if latest['status']=='queued' else 'running',
+                       result=None,error=None,finished=None)
+        elif state == 'succeeded' and latest['status'] == 'succeeded':
+            out.update(status='succeeded',error=None)
+        elif state in ('interrupted', 'needs_review') or state == 'succeeded':
+            out.update(status='interrupted',result=None,error='原结果需核对，已停止重试。')
+        elif state == 'cancelled':
+            out.update(status='cancelled',result=None,error=None)
+        else:
+            out.update(status='failed',result=None,error=current['error'] or '重试未能完成。')
+        return out, retry
+
     def public_task(self, row):
-        row = dict(row)
+        row, retry = self.task_view(row)
         result = row.get("result") or {}
         files = []
         for path in result.get("files", []):
@@ -396,7 +574,7 @@ class Console:
         result["files"] = [Path(f).name for f in result.get("files", [])]
         row["result"] = result if row.get("result") is not None else None
         row.pop("request_key", None)
-        row['retry'] = self.store.retry_detail(row['id'])
+        row['retry'] = retry
         if row["kind"] == "session_import":
             row["params"] = {"expected_email": row["params"].get("expected_email")}
         return row
@@ -423,6 +601,10 @@ def create_app(root, adapter, test=False):
         maintenance_worker = asyncio.create_task(maintain_windows(c)) if not test else None
         yield
         c.worker.cancel()
+        if c.keyboard_warmup and not c.keyboard_warmup.done():
+            c.keyboard_warmup.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await c.keyboard_warmup
         archive_worker.cancel()
         index_worker.cancel()
         balance_worker.cancel()
@@ -531,7 +713,9 @@ def create_app(root, adapter, test=False):
             {
                 "test": test,
                 "dispatch": c.dispatch_limit.public_status(),
-                "coordination": __import__('task_coordinator').Coordinator().status() if not test else {"window_policy":"one_per_account","automatic_regeneration":False,"automatic_account_switch":False},
+                "coordination": dict(__import__('task_coordinator').Coordinator().status(), video_retry_max=3,
+                                     desktop_keyboard_ready=c.desktop_keyboard_ready()) if not test else
+                                {"window_policy":"one_per_account","video_retry_max":3,"desktop_keyboard_ready":True},
                 "accounts": accounts,
                 "account_insights": insights,
                 "projects": c.store.projects(),
@@ -619,11 +803,14 @@ def create_app(root, adapter, test=False):
     async def submit(request):
         try:
             body = await payload(request)
+            with_references = request.url.path == '/api/tasks/with-references'
+            if with_references and body.get('kind') not in ('image', 'video'):
+                raise ValueError('参考图任务只支持图生图和 Omni 多参考视频。')
             if request.state.api_key and body.get("kind") not in {"image", "video", "quote", "media", "doctor", "sync"}:
                 return JSONResponse({"error": "API Key 不允许打开登录窗口或修改登录信息。"}, status_code=403)
-            args = c.validate(body)
-            automatic = body.get('auto_retry', False)
-            if type(automatic) is not bool or (automatic and args[2] not in ('image', 'video')):
+            args = c.validate(body, with_references=True) if with_references else c.validate(body)
+            automatic = body.get('auto_retry')
+            if ('auto_retry' in body and type(automatic) is not bool) or (automatic and (args[2] not in RETRY_KINDS or args[3]['count'] != 1)):
                 raise ValueError('任务重试设置不正确。')
             row = c.store.create_task(*args, auto_retry=automatic)
             return JSONResponse(c.public_task(row), status_code=202)
@@ -642,9 +829,25 @@ def create_app(root, adapter, test=False):
                 c.vault.remove(row["params"]["bundle_id"])
         return JSONResponse({"ok": True})
 
+    async def task_status(request):
+        row = c.store.task(request.path_params['ident'])
+        if not row:
+            return JSONResponse({'error':'任务不存在。'}, status_code=404)
+        public = c.public_task(row)
+        data = {key:public[key] for key in ('id','kind','status','created','finished','downloads','retry')}
+        # The API response omits prompts, reference IDs and internal error details.
+        data['task_id'] = data['id']
+        data['downloads'] = [{'path':item['url'],'name':item['name']} for item in data['downloads']]
+        if data['retry']:
+            data['retry'] = dict(data['retry'], attempts=[
+                {key:a[key] for key in ('id','ordinal','status','started','finished')}
+                for a in data['retry']['attempts']])
+        return JSONResponse(data)
+
     async def download(request):
         row = c.store.task(request.path_params["ident"])
         if row:
+            row, _ = c.task_view(row)
             paths = []
             for f in (row.get("result") or {}).get("files", []):
                 p = Path(f).resolve()
@@ -872,6 +1075,8 @@ def create_app(root, adapter, test=False):
                 old = c.remote.for_profile(profile)
                 if old:
                     return JSONResponse(c.remote.public(old))
+                if profile in c.balance_busy:
+                    raise ValueError("此账号正在读取 Flow 积分，请稍后再远程登录。")
                 if profile in c.busy:
                     raise ValueError("此账号正在执行任务，请结束后再远程登录。")
                 c.busy.add(profile)
@@ -1013,6 +1218,8 @@ def create_app(root, adapter, test=False):
         Route("/api/projects", projects, methods=["POST"]),
         Route("/api/retry-project", retry_project, methods=["POST"]),
         Route("/api/tasks", submit, methods=["POST"]),
+        Route("/api/tasks/with-references", submit, methods=["POST"]),
+        Route("/api/tasks/{ident}", task_status, methods=["GET"]),
         Route("/api/tasks/{ident}/cancel", cancel, methods=["POST"]),
         Route("/api/tasks/{ident}/files/{index:int}", download),
         Mount("/static", StaticFiles(directory=HERE / "static"), name="static"),

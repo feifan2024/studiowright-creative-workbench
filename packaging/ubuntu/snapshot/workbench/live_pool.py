@@ -114,6 +114,7 @@ class RealPool:
         self.execute = self.dispatch_limit.wrap(execute or self._execute)
         self.browser_inventory = browser_inventory if browser_inventory is not None else (self._browser_inventory if execute is None else None)
         self.upload_lock = threading.Lock()
+        self.flow_reference_locks = tuple(threading.Lock() for _ in range(32))
         with self.connection() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS account_status(
@@ -576,19 +577,38 @@ class RealPool:
 
     def get(self, request_id):
         with self.connection() as db:
+            db.execute('BEGIN')
             row = db.execute('SELECT request_id,account_key,selection,status,created,finished,response,note FROM requests WHERE request_id=?', (request_id,)).fetchone()
             diagnostic = db.execute('SELECT phase,failure_stage,error_type,http_status,first_text_seen FROM request_diagnostics WHERE request_id=?', (request_id,)).fetchone()
             images = db.execute('SELECT position FROM gemini_images WHERE request_id=? ORDER BY position', (request_id,)).fetchall()
             image_status = db.execute('SELECT expected,saved FROM gemini_image_status WHERE request_id=?', (request_id,)).fetchone()
-        if not row:
-            return None
+            if not row:
+                return None
+            official=db.execute("""SELECT j.conversation_id,j.queue_wait_ms,j.model,j.reason,t.attachments,a.state AS reauth_state,
+                                  b.reason AS block_reason,b.created AS block_created,
+                                  CASE WHEN json_valid(c.native_json) THEN json_extract(c.native_json,'$.channel') END AS channel
+                                  FROM official_jobs j LEFT JOIN conversations c ON c.id=j.conversation_id
+                                  JOIN conversation_turns t USING(request_id)
+                                  LEFT JOIN official_reauth a USING(request_id)
+                                  LEFT JOIN official_account_blocks b ON b.account_key=(SELECT account_key FROM requests WHERE request_id=j.request_id)
+                                  WHERE j.request_id=?""",(request_id,)).fetchone()
+            metric=db.execute('SELECT first_text_ms,total_ms,token_count FROM request_metrics WHERE request_id=?',(request_id,)).fetchone()
+            attempts=[dict(a) for a in db.execute("""SELECT ordinal,status,reason,submitted,started,finished,total_ms,
+                         CASE WHEN status!='completed' THEN response END AS response
+                         FROM official_attempts WHERE request_id=? ORDER BY ordinal""",(request_id,))]
         result = dict(row)
         result['diagnostic'] = dict(diagnostic) if diagnostic else None
-        with self.connection() as db:
-            official=db.execute('SELECT conversation_id,queue_wait_ms,model FROM official_jobs WHERE request_id=?',(request_id,)).fetchone()
-            metric=db.execute('SELECT first_text_ms,total_ms,token_count FROM request_metrics WHERE request_id=?',(request_id,)).fetchone()
         if official:
-            result.update(dict(official));result['channel']='official_antigravity_cli'
+            from gemini_image_input import CHANNEL as image_channel
+            result.update({name:official[name] for name in ('conversation_id','queue_wait_ms','model')})
+            result['channel']=image_channel if official['channel']==image_channel else 'official_antigravity_cli'
+            if result['channel']==image_channel:result['reason']=official['reason']
+            else:
+                result['attempts']=attempts
+                result['reauthorization']=self.official.reauth.view(
+                    {**result,'official_reason':official['reason'],'attachments':official['attachments'],
+                     'block_reason':official['block_reason'],'block_created':official['block_created'],
+                     'first_text_ms':metric['first_text_ms'] if metric else None},attempts,official['reauth_state'])
         if metric:result.update(dict(metric))
         result['images'] = ['/api/gemini-images/'+request_id+'/'+str(image['position']) for image in images]
         result['image_status'] = dict(image_status) if image_status else None
@@ -631,14 +651,18 @@ class RealPool:
     def conversation(self, ident):
         ident = self.conversation_id(ident)
         with self.connection() as db:
+            db.execute('BEGIN')
             row = db.execute('SELECT id,title,created,updated,account_key,blocked,hidden,native_json FROM conversations WHERE id=?', (ident,)).fetchone()
             if not row:
                 return None
-            turns = db.execute('''SELECT t.request_id,t.prompt,t.attachments,r.account_key,r.status,r.response,r.note,r.created,m.first_text_ms,m.token_count,j.queue_wait_ms,am.model AS selected_model,
+            turns = db.execute('''SELECT t.request_id,t.prompt,t.attachments,r.account_key,r.status,r.response,r.note,r.created,m.first_text_ms,m.token_count,j.queue_wait_ms,am.model AS selected_model,j.reason AS official_reason,a.state AS reauth_state,
+                                  r.finished,b.reason AS block_reason,b.created AS block_created,
                                   COALESCE(m.total_ms,CASE WHEN r.status='completed' AND r.finished>=r.created THEN (r.finished-r.created)*1000 END) AS total_ms
                                   FROM conversation_turns t JOIN requests r ON r.request_id=t.request_id
                                   LEFT JOIN request_metrics m ON m.request_id=r.request_id
                                   LEFT JOIN official_jobs j ON j.request_id=r.request_id
+                                  LEFT JOIN official_reauth a ON a.request_id=r.request_id
+                                  LEFT JOIN official_account_blocks b ON b.account_key=r.account_key
                                   LEFT JOIN conversation_attempt_models am ON am.request_id=t.request_id
                                   WHERE t.conversation_id=? ORDER BY r.created,r.request_id''', (ident,)).fetchall()
             attempted = db.execute('''SELECT m.model FROM conversation_turns t
@@ -650,6 +674,13 @@ class RealPool:
                                    JOIN conversation_turns t USING(request_id) WHERE t.conversation_id=? ORDER BY i.position''', (ident,)).fetchall()
             image_status = {r['request_id']:dict(r) for r in db.execute('''SELECT s.request_id,s.expected,s.saved FROM gemini_image_status s
                             JOIN conversation_turns t USING(request_id) WHERE t.conversation_id=?''', (ident,))}
+            attempts = {}
+            for entry in db.execute('''SELECT a.request_id,a.ordinal,a.status,a.reason,a.submitted,a.started,a.finished,a.total_ms,
+                       CASE WHEN a.status!='completed' THEN a.response END AS response
+                       FROM official_attempts a JOIN conversation_turns t USING(request_id)
+                       WHERE t.conversation_id=? ORDER BY a.ordinal''', (ident,)):
+                attempt = dict(entry)
+                attempts.setdefault(attempt.pop('request_id'), []).append(attempt)
         result = dict(row)
         native = result.pop('native_json')
         try:
@@ -661,8 +692,17 @@ class RealPool:
         result['model_unconfirmed'] = bool(result['blocked'] and not result['model'] and attempted)
         if result['model_unconfirmed']:
             result['model'] = attempted['model']
-        result['turns'] = [{**dict(turn), 'attachments': json.loads(turn['attachments'])} for turn in turns]
+        result['turns'] = []
+        for row in turns:
+            turn=dict(row)
+            saved=attempts.get(turn['request_id'], [])
+            turn['reauthorization']=None if result['hidden'] else self.official.reauth.view(turn,saved,turn['reauth_state'])
+            for field in ('official_reason','reauth_state','finished','block_reason','block_created'):
+                del turn[field]
+            turn['attachments']=json.loads(turn['attachments'])
+            result['turns'].append(turn)
         for turn in result['turns']:
+            turn['attempts'] = attempts.get(turn['request_id'], [])
             turn['images'] = ['/api/gemini-images/'+turn['request_id']+'/'+str(r['position']) for r in images if r['request_id']==turn['request_id']]
             turn['image_status'] = image_status.get(turn['request_id'])
             if turn['status'] != 'unknown':
@@ -1212,7 +1252,8 @@ class RealPool:
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
         encoded = json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-        request = Request('http://127.0.0.1:18888/api/tasks', data=encoded, method='POST',
+        path = '/api/tasks/with-references' if 'mode' in body['params'] else '/api/tasks'
+        request = Request('http://127.0.0.1:18888' + path, data=encoded, method='POST',
                           headers={'Content-Type': 'application/json', 'X-Console-Request': '1'})
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=8) as response:
             if response.status != 202:
@@ -1261,15 +1302,26 @@ class RealPool:
         if not isinstance(result, dict) or result.get('ok') is not True:
             raise RuntimeError('项目登记未确认。')
 
-    def _auto_flow_project(self, snapshot, request_id, intent):
+    @staticmethod
+    def _flow_window_blocked(snapshot):
+        coordination = snapshot.get('flow_coordination')
+        windows = (coordination.get('windows') or []) if isinstance(coordination, dict) else []
+        return {w['profile'] for w in windows if isinstance(w, dict) and isinstance(w.get('profile'), str)
+                and w.get('state') in ('result_unknown', 'needs_verification')}
+
+    @staticmethod
+    def _flow_dispatch_accounts(snapshot):
+        blocked = RealPool._flow_window_blocked(snapshot)
+        return {a['profile']: a for a in snapshot.get('real_accounts', {}).get('items', [])
+                if isinstance(a, dict) and isinstance(a.get('profile'), str) and a.get('flow_login') == 'verified'
+                and a.get('flow_health') == 'ready' and a.get('flow_risk_known') is True
+                and a.get('flow_risk_paused') is False and a.get('flow_pacing_known') is True
+                and a.get('flow_cooling') is False and a['profile'] not in blocked}
+
+    def _auto_flow_project(self, snapshot, request_id, intent, *, named_only=False):
         if not snapshot.get('flow_state', {}).get('available') or not snapshot.get('real_accounts', {}).get('available'):
             raise Conflict('Flow 账号或项目列表暂不可用，无法自动安排。')
-        accounts = [a for a in snapshot['real_accounts'].get('items', []) if isinstance(a, dict)
-                    and isinstance(a.get('profile'), str) and a.get('flow_login') == 'verified'
-                    and a.get('flow_health') == 'ready' and a.get('flow_risk_known') is True
-                    and a.get('flow_risk_paused') is False and a.get('flow_pacing_known') is True
-                    and a.get('flow_cooling') is False]
-        unique = {a['profile']: a for a in accounts}
+        unique = self._flow_dispatch_accounts(snapshot)
         if not unique:
             raise Conflict('当前没有可自动派发的 Flow 账号。')
         with self.connection() as db:
@@ -1293,7 +1345,12 @@ class RealPool:
         projects = snapshot.get('projects', [])
         # Choose the account first; lack of a project must not skip its turn.
         profile = order[0]
-        rows = [p for p in projects if p.get('source_profile') == profile and isinstance(p.get('key'), str)
+        owned = [p for p in projects if p.get('source_profile') == profile]
+        if named_only:
+            from flow_references import normalized_owner
+            title = 'FLOW+' + normalized_owner(unique[profile].get('email')).split('@', 1)[0]
+            owned = [p for p in owned if p.get('title') == title]
+        rows = [p for p in owned if isinstance(p.get('key'), str)
                 and isinstance(p.get('source_id'), str)
                 and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', p['source_id'])
                 and sum(q.get('key') == p['key'] for q in projects) == 1]
@@ -1305,7 +1362,7 @@ class RealPool:
             rows.sort(key=lambda p: (project_load[p['key']], p['key'] != preferred,
                                      -(p.get('checked') or 0), p['source_id']))
             return rows[0]
-        if any(p.get('source_profile') == profile for p in projects):
+        if owned:
             raise Conflict('此账号现有项目的归属或编号无法确认，暂不新建或改用其他账号。')
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -1338,23 +1395,83 @@ class RealPool:
             raise Conflict('项目已创建，但登记结果待核对；不会重复创建。') from None
         return {'key': self.flow_project_key(profile, project_id), 'source_profile': profile, 'source_id': project_id}
 
-    def submit_flow(self, data, request_id, snapshot, send=None):
+    @staticmethod
+    def reference_scope(snapshot, project_key):
+        from flow_references import normalized_owner
+        projects = [p for p in snapshot.get('projects', []) if p.get('key') == project_key]
+        if len(projects) != 1:
+            raise Conflict('参考图需要指定已登记的完整项目编号。')
+        profile, project = projects[0]['source_profile'], projects[0]['source_id']
+        accounts = [a for a in snapshot.get('real_accounts', {}).get('items', []) if a.get('profile') == profile]
+        if len(accounts) != 1 or accounts[0].get('flow_login') != 'verified':
+            raise Conflict('该项目所属账号的 Flow 登录未确认。')
+        return profile, project, normalized_owner(accounts[0].get('email'))
+
+    def upload_flow_reference(self, snapshot, project_key, ident, ext, data, *, request_id=None):
+        from flow_references import ReferenceStore
+        if self.maintenance():
+            raise Conflict('工作台正在更新。')
+        if project_key == 'auto':
+            with self.upload_lock:
+                expires, created = ReferenceStore(self.state_dir).put_auto(request_id, ident, ext, data)
+            return {'reference_id': ident, 'request_id': request_id, 'expires_at': expires}, created
+        profile, project, owner = self.reference_scope(snapshot, project_key)
+        with self.upload_lock:
+            expires, created = ReferenceStore(self.state_dir).put(ident, profile, project, owner, ext, data)
+        return {'reference_id': ident, 'project_key': project_key, 'expires_at': expires}, created
+
+    def _bind_auto_flow_references(self, store, snapshot, request_id, ids, allow_video, params, kind):
+        from flow_references import normalized_owner
+        lock = self.flow_reference_locks[int(uuid.UUID(request_id)) % len(self.flow_reference_locks)]
+        with lock:
+            if self.maintenance():
+                raise Conflict('工作台正在更新。')
+            scope = store.auto_scope(ids, request_id, allow_video=allow_video)
+            if scope:
+                profile, project_id, owner = scope
+                account = self._flow_dispatch_accounts(snapshot).get(profile)
+                key = self.flow_project_key(profile, project_id)
+                if (not snapshot.get('flow_state', {}).get('available') or not account
+                        or normalized_owner(account.get('email')) != owner
+                        or self.reference_scope(snapshot, key) != scope):
+                    raise Conflict('本次请求已绑定的 Flow 账号或项目暂不可用。')
+                return profile, project_id, key
+            intent = hashlib.sha256(json.dumps({'kind': kind, 'params': params}, ensure_ascii=False,
+                                               sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            selected = self._auto_flow_project(snapshot, request_id, intent, named_only=True)
+            profile, project_id = selected['source_profile'], selected['source_id']
+            owner = normalized_owner(self._flow_dispatch_accounts(snapshot)[profile].get('email'))
+            store.auto_scope(ids, request_id, allow_video=allow_video, bind=(profile, project_id, owner))
+            return profile, project_id, selected['key']
+
+    def submit_flow(self, data, request_id, snapshot, send=None, validate_only=False):
         try:
             if not isinstance(request_id, str) or str(uuid.UUID(request_id)) != request_id:
                 raise ValueError()
         except (ValueError, AttributeError):
             raise ValueError('请求标识不正确。') from None
         if (not isinstance(data, dict) or set(data) - {'project_key', 'kind', 'params', 'confirm', 'auto_retry'}
-                or not {'kind', 'params', 'confirm'} <= set(data) or data['confirm'] is not True):
-            raise ValueError('请确认任务和可能使用的积分。')
-        auto_retry = data.get('auto_retry', False)
-        if type(auto_retry) is not bool:
-            raise ValueError('自动重试设置不正确。')
+                or not {'kind', 'params', 'confirm'} <= set(data) or data['confirm'] is not (not validate_only)):
+            raise ValueError('验证请设置 confirm: false；真实提交须设置 confirm: true。')
         kind, params = data['kind'], data['params']
         if kind not in ('image', 'video') or not isinstance(params, dict):
             raise ValueError('任务类型不正确。')
-        if set(params) != {'prompt', 'model', 'aspect', 'count', 'resolution', 'duration', 'max_credits'}:
+        retry_omitted = 'auto_retry' not in data
+        auto_retry = data.get('auto_retry', params.get('count') == 1)
+        if type(auto_retry) is not bool:
+            raise ValueError('自动重试设置不正确。')
+        if auto_retry and params.get('count') != 1:
+            raise ValueError('换号重试只支持每次生成一张图片或一段视频。')
+        required = {'prompt', 'model', 'aspect', 'count', 'resolution', 'duration', 'max_credits'}
+        from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
+        if not required <= params.keys() or params.keys() - required - REFERENCE_FIELDS:
             raise ValueError('任务参数不正确。')
+        with_references = params.keys() != required
+        ids = []
+        if with_references:
+            ids = task_reference_ids(kind, params)
+        elif validate_only:
+            raise ValueError('此验证入口用于图生图、Omni 多参考图或首尾帧任务。')
         prompt, model, aspect = params['prompt'], params['model'], params['aspect']
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 10000:
             raise ValueError('请输入不超过 10000 字的提示词。')
@@ -1380,12 +1497,27 @@ class RealPool:
         if project_key is not None and not isinstance(project_key, str):
             raise ValueError('项目标识不正确。')
         auto = project_key in (None, '', 'auto')
+        store = ReferenceStore(self.state_dir)
+        allow_video = params.get('mode') == 'ingredients'
+        if validate_only:
+            if auto:
+                store.auto_scope(ids, request_id, allow_video=allow_video)
+            else:
+                profile, project_id, owner = self.reference_scope(snapshot, project_key)
+                store.check(ids, profile, project_id, owner, allow_video=allow_video, explicit_only=True)
+            return {'valid': True, 'submitted': False, 'project_key': None if auto else project_key, 'kind': kind,
+                    'mode': params['mode'], 'reference_count': len(ids)}, False
         with self.connection() as db:
+            if db.execute('SELECT 1 FROM requests WHERE request_id=?', (request_id,)).fetchone():
+                raise Conflict('该请求编号属于 Gemini，不能在 Flow 提交或重试。')
             prior = db.execute('SELECT * FROM flow_requests WHERE request_id=?', (request_id,)).fetchone()
         if prior:
             if not auto and project_key != prior['project_key']:
                 raise Conflict('该请求编号已用于其他任务。')
             profile, project_id, project_key = prior['profile'], prior['project'], prior['project_key']
+        elif auto and with_references:
+            profile, project_id, project_key = self._bind_auto_flow_references(
+                store, snapshot, request_id, ids, allow_video, params, kind)
         elif auto:
             if self.maintenance():
                 raise Conflict('工作台正在更新。')
@@ -1393,6 +1525,9 @@ class RealPool:
                                                sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             project = self._auto_flow_project(snapshot, request_id, intent)
             profile, project_id, project_key = project['source_profile'], project['source_id'], project['key']
+        elif with_references:
+            profile, project_id, owner = self.reference_scope(snapshot, project_key)
+            store.check(ids, profile, project_id, owner, allow_video=allow_video, explicit_only=True)
         else:
             projects = [p for p in snapshot.get('projects', []) if p.get('key') == project_key]
             if len(projects) != 1:
@@ -1402,16 +1537,25 @@ class RealPool:
             accounts = [a for a in snapshot.get('real_accounts', {}).get('items', []) if a.get('profile') == profile]
             if len(accounts) != 1 or accounts[0].get('flow_login') != 'verified':
                 raise Conflict('该项目所属账号的 Flow 登录未确认。')
+        if not prior and profile in self._flow_window_blocked(snapshot):
+            raise Conflict('该账号的 Flow 窗口有旧任务或验证待核对，本次未入队。')
         body = {'profile': profile, 'project': project_id, 'kind': kind, 'params': flow_params,
                 'confirm_generation': True, 'request_key': request_id, 'auto_retry': auto_retry}
         if len(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > 32768:
             raise ValueError('提示词过长，请缩短后提交。')
-        digest = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        def request_digest(payload):
+            return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        digest = request_digest(body)
+        # A replay of an older request with an omitted flag keeps its stored policy.
+        legacy_digest = request_digest({**body, 'auto_retry': False}) if retry_omitted and auto_retry else digest
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM requests WHERE request_id=?', (request_id,)).fetchone():
+                db.execute('ROLLBACK')
+                raise Conflict('该请求编号属于 Gemini，不能在 Flow 提交或重试。')
             old = db.execute('SELECT digest FROM flow_requests WHERE request_id=?', (request_id,)).fetchone()
             if old:
-                if old['digest'] != digest:
+                if old['digest'] not in (digest, legacy_digest):
                     db.execute('ROLLBACK')
                     raise Conflict('该请求编号已用于其他任务。')
                 db.execute('COMMIT')

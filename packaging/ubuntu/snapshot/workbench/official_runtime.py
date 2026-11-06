@@ -1,11 +1,82 @@
 """Account-pinned official CLI transport; no browser, retry, fallback, or shell."""
-import json,os,re,selectors,signal,subprocess,time
+import ast,errno,http.client,json,os,re,selectors,signal,subprocess,time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 CHANNEL='official_antigravity_cli'
 MODEL='gemini-3.8-flash-medium'
+TEMPORARY_LAUNCH_FAILURE='temporary_cli_launch_failure'
+AUTH_UNSENT='authorization_required_unsent'
+BAD_REPLY='confirmed_bad_reply'
+INCOMPLETE_REPLY='confirmed_incomplete_reply'
+_REFUSALS=frozenset({
+    '身为一个语言模型我没办法提供这方面的帮助',
+    '我只是一个语言模型不具备这方面的信息或能力因此没法帮到你',
+    '作为一个语言模型我无法提供这方面的帮助',
+    "asalanguagemodelican'thelpwiththat",
+})
+
+def generic_refusal(response):
+    # Match only whole known boilerplate replies. Do not classify ordinary answers,
+    # policy refusals with a reason, or arbitrary factual claims by keywords.
+    return isinstance(response,str) and re.sub(r"[\s，。！、,.!]+",'',response.casefold()) in _REFUSALS
+AUTH_MESSAGES=frozenset({
+    'Authentication required. Please visit the URL to log in:',
+    'Error: authentication timed out.',
+})
+
+def auth_failure_proven(markers, answer, stdout_lines):
+    return (AUTH_MESSAGES <= markers and stdout_lines == 1 and isinstance(answer,dict)
+            and answer.get('status')=='ERROR' and answer.get('error')=='authentication failed or timed out'
+            and not answer.get('response') and not answer.get('conversation_id')
+            and type(answer.get('num_turns')) is int and answer['num_turns']==0
+            and isinstance(answer.get('usage'),dict) and 'total_tokens' in answer['usage']
+            and all(type(n) is int and n==0 for n in answer['usage'].values()))
 DENY={'command(*)','read_file(*)','write_file(*)','read_url(*)','execute_url(*)','mcp(*)'}
 KEY=re.compile(r'[0-9a-f]{64}\Z')
+
+def desktop_authorization_proxy():
+    """Read the enrolled Ubuntu desktop's local HTTPS proxy; never change it."""
+    def setting(schema,key):
+        return ast.literal_eval(subprocess.check_output(
+            ['gsettings','get',schema,key],text=True,timeout=1,
+            stderr=subprocess.DEVNULL).strip())
+    try:
+        if setting('org.gnome.system.proxy','mode')!='manual':return None
+        schema='org.gnome.system.proxy.https'
+        host=setting(schema,'host')
+        port=setting(schema,'port')
+    except (OSError,ValueError,SyntaxError,subprocess.SubprocessError):
+        return None
+    if host not in ('localhost','127.0.0.1','::1') or type(port) is not int or not 1<=port<=65535:
+        return None
+    return host,port
+
+
+def official_network_env():
+    proxy=desktop_authorization_proxy()
+    if not proxy:return {}
+    host,port=proxy
+    url=f'http://{"[::1]" if host=="::1" else host}:{port}'
+    return {'HTTPS_PROXY':url,'HTTP_PROXY':url,'NO_PROXY':'localhost,127.0.0.1,::1'}
+
+
+def check_official_network():
+    """Confirm HTTPS connectivity without credentials or a Gemini request."""
+    proxy=desktop_authorization_proxy()
+    def reachable(host):
+        conn=http.client.HTTPSConnection(*(proxy or (host,443)),timeout=3)
+        try:
+            if proxy:conn.set_tunnel(host,443)
+            conn.request('HEAD','/')
+            return conn.getresponse().status not in (407,502,503,504)
+        except (OSError,http.client.HTTPException):
+            return False
+        finally:
+            conn.close()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        return all(list(pool.map(reachable,('oauth2.googleapis.com','daily-cloudcode-pa.googleapis.com'))))
+
 
 class OfficialRuntime:
     def __init__(self,config):
@@ -54,6 +125,7 @@ class OfficialRuntime:
         root=account['root'];home=root/'home'
         env={'HOME':str(home),'XDG_CONFIG_HOME':str(home/'.config'),'XDG_CACHE_HOME':str(home/'.cache'),
              'XDG_DATA_HOME':str(home/'.local/share'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','TERM':'xterm-256color'}
+        env.update(official_network_env())
         argv=[str(account['binary']),'--print',prompt,'--output-format','stream-json','--model',MODEL,
               '--disable-slash-commands','--print-timeout','150s']
         if native:argv+=['--conversation',native]
@@ -63,16 +135,22 @@ class OfficialRuntime:
             os.fchmod(f.fileno(),0o600);json.dump({'account_key':key,'created':time.time(),'native':native,'model':MODEL},f);f.flush();os.fsync(f.fileno())
         started=time.monotonic();first=None;answer=None;error=None;rc=None;proc=None
         selector=selectors.DefaultSelector();buffers={'stdout':b'','stderr':b''};total=0
+        auth_markers=set();stdout_lines=0;chunks=[]
         def event_line(channel,line):
-            nonlocal first,answer,error
+            nonlocal first,answer,error,stdout_lines
             if channel=='stderr':
+                if line.strip() in AUTH_MESSAGES:auth_markers.add(line.strip())
                 if re.search(r'\bretrying\b|\bretry attempt\b|switching.*model|falling back',line,re.I):error='retry_or_fallback_stopped'
                 return
+            if line.strip():stdout_lines+=1
             try:event=json.loads(line)
             except ValueError:return
             if event.get('event')=='step_update':
                 step=event.get('step_update',{})
-                if step.get('step_type')=='agent_response' and step.get('text_delta') and first is None:first=round((time.monotonic()-started)*1000)
+                delta=step.get('text_delta')
+                if step.get('step_type')=='agent_response' and isinstance(delta,str) and delta:
+                    chunks.append(delta)
+                    if first is None:first=round((time.monotonic()-started)*1000)
                 if step.get('step_type')=='tool':error='unexpected_tool_stopped'
             if event.get('event')=='result':
                 if answer is not None:error='duplicate_result'
@@ -81,7 +159,12 @@ class OfficialRuntime:
         try:
             with (audit/'events.jsonl').open('x',encoding='utf-8') as log:
                 os.fchmod(log.fileno(),0o600)
-                proc=subprocess.Popen(argv,env=env,cwd=root/'workspace',stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+                try:
+                    proc=subprocess.Popen(argv,env=env,cwd=root/'workspace',stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+                except OSError as exc:
+                    # These errors at process creation mean the CLI did not run.
+                    if exc.errno in (errno.EAGAIN,errno.ETXTBSY):error=TEMPORARY_LAUNCH_FAILURE
+                    raise
                 submitted=True
                 for name,stream in [('stdout',proc.stdout),('stderr',proc.stderr)]:
                     os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ,name)
@@ -99,7 +182,7 @@ class OfficialRuntime:
                             event_line(name,line)
                 for name,raw in buffers.items():
                     if raw:event_line(name,raw.decode('utf-8',errors='replace'))
-        except (OSError,ValueError,subprocess.SubprocessError):error='execution_interrupted'
+        except (OSError,ValueError,subprocess.SubprocessError):error=error or 'execution_interrupted'
         finally:
             selector.close()
             if proc:
@@ -113,17 +196,28 @@ class OfficialRuntime:
                     rc=proc.wait(timeout=5)
                 proc.stdout.close();proc.stderr.close()
         elapsed=round((time.monotonic()-started)*1000)
-        success=bool(not error and rc==0 and isinstance(answer,dict) and answer.get('status')=='SUCCESS'
-                     and isinstance(answer.get('response'),str) and answer['response'].strip()
+        terminal=bool(not error and rc==0 and isinstance(answer,dict) and answer.get('status')=='SUCCESS'
                      and isinstance(answer.get('conversation_id'),str) and re.fullmatch(r'[0-9a-f-]{36}',answer['conversation_id'])
                      and (native is None or answer['conversation_id']==native))
+        response=answer.get('response') if isinstance(answer,dict) else None
+        nonempty=isinstance(response,str) and bool(response.strip())
+        finish_reason=answer.get('finish_reason') if terminal else None
+        incomplete=terminal and (not nonempty or finish_reason in ('MAX_TOKENS','max_tokens','length'))
+        bad=terminal and not incomplete and generic_refusal(response)
+        success=terminal and not incomplete and not bad
         provider_error=str((answer or {}).get('error') or '') if isinstance(answer,dict) else ''
         reason=('verification_required' if re.search(r'verify your account|VALIDATION_REQUIRED',provider_error,re.I) else
                 'quota_or_rate_limit' if re.search(r'quota|rate.limit|RESOURCE_EXHAUSTED|\b429\b',provider_error,re.I) else
+                'provider_connection_failed' if re.search(r'ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|fetch failed|network error',provider_error,re.I) else
+                'provider_unavailable' if re.search(r'\b50[0234]\b|SERVICE_UNAVAILABLE|upstream unavailable',provider_error,re.I) else
                 'provider_error' if answer and not success else error)
-        result={'submitted':submitted,'status':'completed' if success else 'failed' if answer or not submitted else 'unknown',
-                'reason':reason,'response':answer.get('response') if isinstance(answer,dict) else None,
-                'native':answer.get('conversation_id') if success else native,'first_text_ms':first,'total_ms':elapsed,
+        if submitted and not error and first is None and auth_failure_proven(auth_markers,answer,stdout_lines):
+            submitted=False;reason=AUTH_UNSENT
+        if incomplete or bad:reason=INCOMPLETE_REPLY if incomplete else BAD_REPLY
+        explicit_failure=not error and isinstance(answer,dict) and answer.get('status')=='ERROR' and first is None and not nonempty
+        result={'submitted':submitted,'status':'completed' if success else 'failed' if terminal or explicit_failure or not submitted else 'unknown',
+                'reason':reason,'response':response if nonempty else ''.join(chunks) or None,
+                'native':answer.get('conversation_id') if terminal else native,'first_text_ms':first,'total_ms':elapsed,
                 'token_count':(answer.get('usage') or {}).get('total_tokens') if isinstance(answer,dict) else None}
         with (audit/'result.json').open('x',encoding='utf-8') as f:
             os.fchmod(f.fileno(),0o600);json.dump(result,f,ensure_ascii=False);f.flush();os.fsync(f.fileno())

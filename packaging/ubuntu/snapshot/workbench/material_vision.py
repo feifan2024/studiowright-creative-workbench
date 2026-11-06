@@ -11,7 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from official_runtime import MODEL
+from official_runtime import MODEL, official_network_env
 
 MAX_MEDIA = 100 * 1024 * 1024
 MIMES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp',
@@ -97,7 +97,7 @@ def frame_parts(media, mime):
     return [{'type':'text','text':PROMPT}, *frames]
 
 
-def analyze(runtime, key, parts, receipt):
+def analyze(runtime, key, parts, receipt, *, keep_partial=False):
     """Exactly one ACP prompt. Unknown submissions are never retried here."""
     account = runtime.account(key)
     if not account:
@@ -106,6 +106,7 @@ def analyze(runtime, key, parts, receipt):
     env = {'HOME':str(home),'XDG_CONFIG_HOME':str(home/'.config'),
            'XDG_CACHE_HOME':str(home/'.cache'),'XDG_DATA_HOME':str(home/'.local/share'),
            'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','AGY_CLI_DISABLE_AUTO_UPDATE':'true'}
+    env.update(official_network_env())
     submitted = False
     started = time.monotonic()
     receipt = Path(receipt)
@@ -179,6 +180,10 @@ def analyze(runtime, key, parts, receipt):
                     submitted=True
                     result=call(4,'session/prompt',{'sessionId':sid,'prompt':parts},145)
                     text=''.join(chunks).strip()
+                    if keep_partial and (result.get('stopReason')=='max_tokens' or
+                                         result.get('stopReason')=='end_turn' and not text):
+                        return {'status':'failed','submitted':True,'reason':'confirmed_incomplete_reply',
+                                'response':text or None,'total_ms':round((time.monotonic()-started)*1000)}
                     if result.get('stopReason')!='end_turn' or not text:
                         raise ValueError('incomplete_model_reply')
                     return {'status':'completed','submitted':True,'response':text,
@@ -193,4 +198,6 @@ def analyze(runtime, key, parts, receipt):
                     for f in (proc.stdin,proc.stdout,proc.stderr):f.close()
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         reason=str(exc) if type(exc) is ValueError and re.fullmatch(r'[a-z0-9_]{1,60}',str(exc)) else 'material_transport_error'
-        return {'status':'unknown' if submitted else 'failed','submitted':submitted,'reason':reason}
+        result={'status':'unknown' if submitted else 'failed','submitted':submitted,'reason':reason}
+        if keep_partial and chunks:result['response']=''.join(chunks)
+        return result

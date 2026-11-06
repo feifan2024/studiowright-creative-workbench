@@ -11,6 +11,8 @@ import tempfile
 import threading
 import time
 
+from official_runtime import official_network_env
+
 ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))')
 KEY = re.compile(r'[0-9a-f]{64}\Z')
 TTL = 300
@@ -58,7 +60,7 @@ def parse_usage(text, checked_at):
     return result
 
 
-def read_account(runtime, key):
+def read_account(runtime, key, *, save_renewal=False):
     # Imports are Linux-only; the pure parser and aggregation run on Windows too.
     import fcntl
     import pty
@@ -74,17 +76,22 @@ def read_account(runtime, key):
     with tempfile.TemporaryDirectory(prefix='workbench-quota-', dir='/dev/shm') as temporary:
         root = Path(temporary); home = root/'home'; cfg = home/'.gemini/antigravity-cli'
         cfg.mkdir(parents=True, mode=0o700)
-        for name in ('antigravity-oauth-token', 'settings.json', 'jetski_state.pbtxt', 'cache/onboarding.json'):
+        token_name='antigravity-oauth-token'
+        original_token=None
+        for name in (token_name, 'settings.json', 'jetski_state.pbtxt', 'cache/onboarding.json'):
             source = original/name
             if source.is_symlink() or not source.is_file() or source.stat().st_size > 1024*1024:
                 return {'status': 'authorization_unavailable', 'checked_at': time.time()}
             target = cfg/name; target.parent.mkdir(parents=True, exist_ok=True)
+            data=source.read_bytes()
+            if name==token_name: original_token=data
             with target.open('xb') as stream:
-                os.fchmod(stream.fileno(), 0o600); stream.write(source.read_bytes())
+                os.fchmod(stream.fileno(), 0o600); stream.write(data)
         workspace = root/'workspace'; workspace.mkdir(mode=0o700)
         env = {'HOME':str(home), 'XDG_CONFIG_HOME':str(home/'.config'), 'XDG_CACHE_HOME':str(home/'.cache'),
                'XDG_DATA_HOME':str(home/'.local/share'), 'PATH':'/usr/bin:/bin', 'LANG':'C.UTF-8',
                'TERM':'xterm-256color', 'SSH_TTY':'quota-read-only', 'SSH_CONNECTION':'quota-read-only'}
+        env.update(official_network_env())
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH',60,150,0,0))
         process = None
@@ -112,6 +119,8 @@ def read_account(runtime, key):
                 if sent:
                     parsed = parse_usage(output.decode('utf-8',errors='replace'),time.time())
                     if parsed:
+                        if save_renewal:
+                            save_verified_token(original/token_name,cfg/token_name,original_token,account['email'])
                         return {'status':'ok', 'checked_at':time.time(),'phase':'usage','identity_matched':True, **parsed}
                 if process.poll() is not None and not select.select([master],[],[],0)[0]:break
             return classify_failure(output.decode('utf-8',errors='replace'),sent=sent,identity=identity)
@@ -127,6 +136,49 @@ def read_account(runtime, key):
                     except ProcessLookupError: pass
                     process.wait(timeout=3)
             os.close(master)
+
+
+def save_verified_token(original, refreshed, before, email):
+    if any(path.is_symlink() or not path.is_file() or path.stat().st_size>100000
+           for path in (original,refreshed)):
+        raise ValueError('Authorization file is not available')
+    after=refreshed.read_bytes()
+    if json.loads(after).get('id_token_email','').casefold()!=email.casefold():
+        raise ValueError('Authorization identity changed')
+    if original.read_bytes()!=before:
+        raise ValueError('Authorization was updated by another operation')
+    if after==before:
+        return
+    fd,name=tempfile.mkstemp(prefix='.workbench-renewal-',dir=original.parent)
+    try:
+        with os.fdopen(fd,'wb') as out:
+            out.write(after);out.flush();os.fsync(out.fileno())
+        if not original.is_symlink() and original.read_bytes()==before:
+            os.replace(name,original)
+        else:
+            raise ValueError('Authorization was updated by another operation')
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def recover_saved_authorization(runtime,key):
+    # Only used by a worker that owns the original account's proven-unsent turn.
+    try:
+        if not hasattr(runtime,'config'):
+            return False
+        reader=reader_for(runtime)
+        with reader.lock:
+            lock=reader.account_locks.setdefault(key,threading.Lock())
+        if not lock.acquire(timeout=1):
+            return False
+        try:
+            row=read_account(runtime,key,save_renewal=True)
+        finally:
+            lock.release()
+        return row.get('status')=='ok' and row.get('identity_matched') is True and all(
+            row[window]['remaining_percent']>0 for window in ('five_hour','weekly'))
+    except (OSError,ValueError,TypeError,KeyError,AttributeError,subprocess.SubprocessError):
+        return False
 
 
 def aggregate(accounts, now):
@@ -156,7 +208,7 @@ class QuotaReader:
                     self.attempted=attempted if type(attempted) in (float,int) and math.isfinite(attempted) and attempted<=time.time() else 0
         except (OSError,ValueError,TypeError): pass
 
-    def snapshot(self, force=False):
+    def snapshot(self, force=False, recover=False, refresh=True):
         try: keys = list((self.runtime.settings() or {}).get('accounts',{}))
         except (OSError,ValueError,TypeError): keys = []
         now = time.time()
@@ -166,17 +218,19 @@ class QuotaReader:
             automatic = not self.attempted or (any(r.get('status')=='ok' for r in self.rows.values()) and now-self.attempted >= TTL)
             explicit = force and now-self.attempted>=60
             plan = tuple(k for k,r in self.rows.items() if explicit or r.get('status') in ('ok','not_read'))
-            if plan and not self.running and (automatic or explicit):
+            if refresh and plan and not self.running and (automatic or explicit):
                 self.running=True; self.attempted=now
-                threading.Thread(target=self._refresh,args=(plan,),daemon=True,name='official-quota-reader').start()
+                threading.Thread(target=self._refresh,args=(plan,recover),daemon=True,name='official-quota-reader').start()
             rows=copy.deepcopy(self.rows)
             return {'schema_version':1,'source':'official_cli_usage','read_at':now,'attempted_at':self.attempted,
                     'refreshing':self.running,'accounts':rows,**aggregate(rows,now)}
 
-    def _refresh(self,keys):
+    def _refresh(self,keys,recover=False):
         try:
             for key in keys:
-                self.check(key)
+                row=self.check(key)
+                if recover and row.get('status') in ('network_error','unavailable'):
+                    self.check(key)
         except OSError:
             pass  # The in-memory snapshot remains usable when cache storage is unavailable.
         finally:

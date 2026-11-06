@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
 import sys
+import time
 from filelock import FileLock, Timeout
 
 from studiowright.browser import ChromeSession
@@ -167,7 +168,83 @@ class RenderingSession(ChromeSession):
             await super().detach()
 
 
+class MixedReferencePage:
+    """Keep video attachment separate from the upstream image tile path."""
+    def __init__(self, flow):
+        self.flow = flow
+        self.video_ids = set()
+
+    def __getattr__(self, key):
+        return getattr(self.flow, key)
+
+    async def upload_reference_video(self, path):
+        from studiowright.flow.page import ReplyWatch, UPLOAD_RPC, be, replies
+        async with ReplyWatch(self.page, [UPLOAD_RPC]) as watch:
+            chooser = await self.flow._open_file_chooser()
+            await chooser.set_files(str(path))
+            deadline = time.monotonic() + 90
+            while not watch.bodies and not watch.unreadable and time.monotonic() < deadline:
+                if await self.page.locator("[role='dialog']").count():
+                    raise ValueError('Flow 要求确认参考视频上传，请先人工处理，未提交生成。')
+                await watch.wait(1)
+        if len(watch.bodies) != 1:
+            raise ValueError('Flow 未确认唯一的参考视频上传结果，未提交生成。')
+        result = replies.upload_result(be.parse_reply(watch.bodies[0][2], UPLOAD_RPC))
+        if not result.name or result.name != path.name:
+            raise ValueError('Flow 未返回匹配的参考视频名称，未提交生成。')
+        self.flow.names[result.media_id] = result.name
+        self.video_ids.add(result.media_id)
+        return result
+
+    async def attach_reference(self, media_id):
+        if media_id not in self.video_ids:
+            return await self.flow.attach_reference(media_id)
+        before = await self.flow.attachments()
+        if not await self.flow._pick_by_name(media_id):
+            raise ValueError('未在当前项目的素材选择器找到对应参考视频，未提交生成。')
+        await self.flow._wait_attachments(before + 1)
+
+
 class RenderingStudio(Studio):
+    def configure_reference_uploads(self, project, files):
+        self._scoped_references = (project, tuple(files))
+
+    async def _generation_page(self, project_id):
+        lease, flow = await super()._generation_page(project_id)
+        scope = getattr(self, '_scoped_references', None)
+        if scope and any(path.endswith('.mp4') for path in scope[1]):
+            flow = MixedReferencePage(flow)
+        return lease, flow
+
+    async def _media_ids(self, flow, refs):
+        scoped = getattr(self, '_scoped_references', None)
+        if scoped is None or not refs:
+            return await super()._media_ids(flow, refs)
+        from urllib.parse import urlsplit
+        from flow_references import reference_ids
+        project, files = scoped
+        url = urlsplit(flow.page.url)
+        if (tuple(refs) != files or flow.project_id != project or url.scheme != 'https'
+                or url.netloc != 'flow.google.com' or url.path.rstrip('/') != '/project/' + project):
+            raise ValueError('参考图目标项目页面不一致，已停止生成。')
+        results = []
+        # Do not consult the upstream hash cache, which only keys on project ID.
+        # Each upload is performed inside the verified account's project page.
+        from pathlib import Path
+        try:
+            async with asyncio.timeout(180):
+                for path in map(Path, files):
+                    if path.suffix == '.mp4':
+                        uploaded = [await flow.upload_reference_video(path)]
+                    else:
+                        uploaded = await flow.upload([path])
+                    if len(uploaded) != 1 or (uploaded[0].name and uploaded[0].name != path.name):
+                        raise ValueError('参考素材上传结果无法对应，已停止生成。')
+                    results.append(uploaded[0].media_id)
+        except TimeoutError:
+            raise ValueError('参考素材上传超时，未提交生成。') from None
+        return reference_ids(results)
+
     def configure_task(self, task_id):
         self._task_id = task_id
         # The adapter holds the shared, cross-process lease for the full task.

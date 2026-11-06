@@ -10,6 +10,7 @@ import sqlite3
 from urllib.parse import urlsplit
 
 from unified_keys import UnifiedKeys
+from flow_references import MAX_BYTES as FLOW_REFERENCE_LIMIT, UPLOAD_ROUTE as FLOW_REFERENCE_UPLOAD
 
 
 def allowed_route(method, target):
@@ -30,10 +31,13 @@ def allowed_route(method, target):
             return 'workbench'
         if re.fullmatch(r'/api/library(?:/facets|/[0-9a-f]{64}(?:/(?:file|thumbnail))?)?', path):
             return 'workbench'
-        if re.fullmatch(r'/api/tasks/[A-Za-z0-9_-]{1,128}/files/[0-9]{1,4}', path):
+        if re.fullmatch(r'/api/tasks/[A-Za-z0-9_-]{1,128}(?:/files/[0-9]{1,4})?', path):
             return 'flow'
     if method == 'POST' and not parts.query:
-        if path in ('/api/conversations', '/api/real-pool/chat', '/api/real-pool/flow'):
+        if path in ('/api/conversations', '/api/real-pool/chat', '/api/real-pool/image-analysis',
+                    '/api/real-pool/image-analysis-validate', '/api/real-pool/flow', '/api/real-pool/flow-validate'):
+            return 'workbench'
+        if FLOW_REFERENCE_UPLOAD.fullmatch(path):
             return 'workbench'
         if re.fullmatch(r'/api/real-pool/uploads/[0-9a-f-]{36}/[0-3]/(?:jpg|jpeg|png|webp|mp4|mov|webm|pdf)', path):
             return 'workbench'
@@ -78,13 +82,14 @@ def handler_for(store, upstream_port=18920, flow_port=18888):
             route = allowed_route(self.command, self.path)
             if not route:
                 return self.error_json(404, '接口不存在。')
-            is_upload = self.path.startswith('/api/real-pool/uploads/')
+            flow_reference = FLOW_REFERENCE_UPLOAD.fullmatch(self.path) is not None
+            is_upload = flow_reference or self.path.startswith('/api/real-pool/uploads/')
             size = 0
             if self.command == 'POST':
                 length = self.headers.get('Content-Length', '')
-                maximum = 100 * 1024 * 1024 if is_upload else 100000
+                maximum = FLOW_REFERENCE_LIMIT if flow_reference else (100 * 1024 * 1024 if is_upload else 100000)
                 ctype = 'application/octet-stream' if is_upload else 'application/json'
-                if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1 or not length.isdigit() or not 0 < int(length) <= maximum
+                if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1 or not re.fullmatch(r'[0-9]{1,9}', length) or not 0 < int(length) <= maximum
                         or self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != ctype):
                     return self.error_json(400, '请求内容格式或大小不正确。')
                 size = int(length)

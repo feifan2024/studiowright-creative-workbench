@@ -7,6 +7,11 @@ from contextlib import closing
 from pathlib import Path
 
 
+MAX_GENERATION_RETRIES = 3
+SAFE_VIDEO_RETRY = frozenset(('transient_before_submit', 'provider_rejected_unusual'))
+RETRY_KINDS = frozenset(('image', 'video'))
+
+
 class Store:
     def __init__(self, root):
         self.root = Path(root)
@@ -88,14 +93,19 @@ class Store:
         return self.decode(rows[0]) if rows else None
 
     def tasks(self):
-        return [
-            self.decode(row)
-            for row in self.rows("SELECT * FROM tasks ORDER BY created DESC LIMIT 150")
-        ]
+        # The recent window is measured in logical tasks, not internal attempts.
+        return [self.decode(row) for row in self.rows("""
+            SELECT t.* FROM tasks t JOIN (
+                SELECT COALESCE(a.root_id,v.id) AS id, MAX(v.created) AS latest
+                FROM tasks v LEFT JOIN flow_retry_attempts a ON a.task_id=v.id
+                GROUP BY COALESCE(a.root_id,v.id)
+                ORDER BY latest DESC, id DESC LIMIT 150
+            ) recent ON recent.id=t.id ORDER BY recent.latest DESC,t.id DESC
+        """)]
 
     def create_task(self, profile, project, kind, params, key, auto_retry=False):
-        if auto_retry and kind in ('image','video'):
-            raise ValueError('自动重新生成和自动换号尚未启用。')
+        if auto_retry and (kind not in RETRY_KINDS or params.get('count') != 1):
+            raise ValueError('换号重试只支持每次生成一张图片或一段视频。')
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT * FROM tasks WHERE request_key=?", (key,)).fetchone()
@@ -109,7 +119,7 @@ class Store:
                 ):
                     raise ValueError("同一提交编号不能用于不同任务，请重新提交。")
                 enrolled = db.execute("SELECT 1 FROM flow_retry_roots WHERE root_id=?", (row["id"],)).fetchone()
-                if bool(enrolled) != bool(auto_retry):
+                if auto_retry is not None and bool(enrolled) != bool(auto_retry):
                     raise ValueError("同一提交编号不能更改重试设置。")
                 return row
             if kind == "sync":
@@ -130,7 +140,7 @@ class Store:
                     key,
                 ),
             )
-            if auto_retry and kind in ("image", "video"):
+            if auto_retry is True or (auto_retry is None and kind in RETRY_KINDS and params.get('count') == 1):
                 db.execute("INSERT INTO flow_retry_roots VALUES(?,'active',?)", (ident, time.time()))
                 db.execute("INSERT INTO flow_retry_attempts VALUES(?,?,0,'original')", (ident, ident))
         return self.task(ident)
@@ -189,41 +199,65 @@ class Store:
                 return
             root, ordinal = attempt["root_id"], attempt["ordinal"]
             if not error:
-                state = 'succeeded'
-            elif not __import__('task_coordinator').AUTO_REGENERATE:
-                state = 'failed'
-            elif retry_evidence == 'transient_before_submit' and ordinal == 0:
-                self._insert_retry(db, row, root, 1, row['profile'], row['project'], 'same_account', now)
-                state = 'active'
-            elif retry_evidence in ('transient_before_submit', 'provider_rejected_unusual') and ordinal <= 1:
-                # A task already switched once never cascades through accounts.
-                switched = db.execute("SELECT 1 FROM flow_retry_attempts WHERE root_id=? AND reason='switch_account'", (root,)).fetchone()
-                state = 'failed' if switched else 'pending_switch'
+                state = 'succeeded' if result and result.get('files') else 'needs_review'
+            elif retry_evidence != 'transient_before_submit' and not (
+                    row['kind'] == 'video' and retry_evidence == 'provider_rejected_unusual'):
+                state = 'needs_review'
+            elif ordinal < MAX_GENERATION_RETRIES:
+                state = 'pending_switch'
             else:
-                state = 'failed'
+                state = 'exhausted'
             db.execute("UPDATE flow_retry_roots SET state=?,updated=? WHERE root_id=?", (state, now, root))
 
-    @staticmethod
-    def _insert_retry(db, previous, root, ordinal, profile, project, reason, now):
-        if not __import__('task_coordinator').AUTO_REGENERATE:
-            raise ValueError('自动重新生成尚未启用。')
-        ident = secrets.token_hex(8)
-        key = f"retry-{ident}"
-        db.execute("INSERT INTO tasks(id,profile,project,kind,params,status,created,request_key) VALUES(?,?,?,?,?,'queued',?,?)", (
-            ident, profile, project, previous['kind'], previous['params'], now, key,
-        ))
-        db.execute("INSERT INTO flow_retry_attempts VALUES(?,?,?,?)", (ident, root, ordinal, reason))
+    def enroll_failed_video(self, ident, evidence):
+        """Internal maintenance entry, after correlating proof of no output."""
+        if evidence not in SAFE_VIDEO_RETRY:
+            return False
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM tasks WHERE id=? AND kind='video' AND status='failed' AND finished IS NOT NULL", (ident,)).fetchone()
+            if (not row or json.loads(row['params']).get('count') != 1 or
+                db.execute("SELECT 1 FROM flow_retry_attempts WHERE task_id=?", (ident,)).fetchone()):
+                return False
+            db.execute("INSERT INTO flow_retry_roots VALUES(?,'pending_switch',?)", (ident, time.time()))
+            db.execute("INSERT INTO flow_retry_attempts VALUES(?,?,0,'original')", (ident, ident))
+            return True
+
+    def stop_retry_wait(self, root, state):
+        if state not in ('references_unavailable', 'no_account'):
+            raise ValueError('Unsupported retry stop state')
+        return self.execute("UPDATE flow_retry_roots SET state=?,updated=? WHERE root_id=? AND state='pending_switch'",
+                            (state,time.time(),root))
 
     def retry_detail(self, ident):
-        row = self.rows("SELECT a.root_id,a.ordinal,a.reason,r.state FROM flow_retry_attempts a JOIN flow_retry_roots r ON r.root_id=a.root_id WHERE a.task_id=?", (ident,))
-        if not row:
-            return None
-        info = row[0]
-        info['attempts'] = self.rows("SELECT a.ordinal,a.reason,t.id,t.profile,t.project,t.status FROM flow_retry_attempts a JOIN tasks t ON t.id=a.task_id WHERE a.root_id=? ORDER BY a.ordinal", (info['root_id'],))
-        return info
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN')
+            row = db.execute("SELECT a.root_id,a.ordinal,a.reason,r.state FROM flow_retry_attempts a JOIN flow_retry_roots r ON r.root_id=a.root_id WHERE a.task_id=?", (ident,)).fetchone()
+            if not row:
+                return None
+            info = dict(row)
+            info['attempts'] = [dict(r) for r in db.execute("""
+                SELECT a.ordinal,a.reason,t.id,t.profile,t.project,t.status,t.started,t.finished,t.error
+                FROM flow_retry_attempts a JOIN tasks t ON t.id=a.task_id
+                WHERE a.root_id=? ORDER BY a.ordinal
+            """, (info['root_id'],))]
+            return info
 
     def pending_retry_roots(self):
-        return self.rows("SELECT root_id FROM flow_retry_roots WHERE state='pending_switch' ORDER BY updated")
+        return self.rows("SELECT root_id,updated FROM flow_retry_roots WHERE state='pending_switch' ORDER BY updated")
+
+    def expire_unstarted_switches(self, now):
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("""SELECT t.id,a.root_id,a.ordinal FROM tasks t
+                JOIN flow_retry_attempts a ON a.task_id=t.id JOIN flow_retry_roots r ON r.root_id=a.root_id
+                WHERE t.status='queued' AND t.started IS NULL AND a.reason='switch_account'
+                AND r.state='active' AND t.created<?""", (now-900,)).fetchall()
+            for row in rows:
+                db.execute("UPDATE tasks SET status='failed',finished=?,error=? WHERE id=?",
+                           (now,'分配后账号一直不可用，本次未发送。',row['id']))
+                db.execute("UPDATE flow_retry_roots SET state=?,updated=? WHERE root_id=?",
+                           ('exhausted' if row['ordinal'] >= MAX_GENERATION_RETRIES else 'pending_switch', now, row['root_id']))
 
     def set_retry_project(self, profile, project):
         with self.connect() as db:
@@ -238,23 +272,27 @@ class Store:
     def retry_projects(self):
         return self.rows('SELECT profile,project,updated FROM flow_retry_projects')
 
-    def enqueue_switch(self, root, profile, project):
-        if not __import__('task_coordinator').AUTO_SWITCH_ACCOUNT:
-            return False
-        """Create one alternate attempt only if the saved account/project is still valid."""
-        with self.connect() as db:
+    def enqueue_switch(self, root, profile, project, params, expected_ordinal):
+        """Atomically create one attempt. A lost response or restart cannot add duplicates."""
+        with closing(self.connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
             current = db.execute("SELECT state FROM flow_retry_roots WHERE root_id=?", (root,)).fetchone()
             if not current or current['state'] != 'pending_switch':
                 return False
-            eligible = db.execute("SELECT 1 FROM accounts a JOIN projects p ON p.profile=a.profile JOIN flow_retry_projects m ON m.profile=p.profile AND m.project=p.id WHERE a.profile=? AND p.id=? AND a.state='verified'", (profile, project)).fetchone()
+            candidates = db.execute("SELECT p.id FROM accounts a JOIN projects p ON p.profile=a.profile WHERE a.profile=? AND a.state='verified' AND p.title='FLOW+' || substr(a.email,1,instr(a.email,'@')-1)", (profile,)).fetchall()
             used = db.execute('SELECT 1 FROM flow_retry_attempts a JOIN tasks t ON t.id=a.task_id WHERE a.root_id=? AND t.profile=?', (root, profile)).fetchone()
             previous = db.execute('SELECT t.*,a.ordinal FROM flow_retry_attempts a JOIN tasks t ON t.id=a.task_id WHERE a.root_id=? ORDER BY a.ordinal DESC LIMIT 1', (root,)).fetchone()
-            if not eligible or used or not previous or previous['status'] != 'failed' or previous['ordinal'] >= 2:
+            if ([r['id'] for r in candidates] != [project] or used or not previous or previous['kind'] not in RETRY_KINDS
+                or previous['status'] != 'failed' or previous['ordinal']+1 != expected_ordinal
+                or json.loads(previous['params']).get('count') != 1 or params.get('count') != 1
+                or expected_ordinal > MAX_GENERATION_RETRIES):
                 return False
             now = time.time()
-            self._insert_retry(db, previous, root, previous['ordinal'] + 1, profile, project, 'switch_account', now)
-            db.execute("UPDATE flow_retry_roots SET state='active',updated=? WHERE root_id=?", (now, root))
+            ident = secrets.token_hex(8)
+            db.execute("INSERT INTO tasks(id,profile,project,kind,params,status,created,request_key) VALUES(?,?,?,?,?,'queued',?,?)",
+                (ident,profile,project,previous['kind'],json.dumps(params,ensure_ascii=False),now,f"retry-{ident}"))
+            db.execute("INSERT INTO flow_retry_attempts VALUES(?,?,?,'switch_account')", (ident,root,expected_ordinal))
+            db.execute("UPDATE flow_retry_roots SET state='active',updated=? WHERE root_id=?", (now,root))
             return True
 
     def cancel(self, ident):

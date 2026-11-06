@@ -104,6 +104,25 @@ class Coordinator:
         with closing(self.connect()) as db, db:
             db.execute("UPDATE windows SET state='idle',updated=? WHERE profile=? AND state='needs_verification'",(time.time(),profile))
 
+    def release_confirmed_rejection(self, profile, task_id):
+        """Release only the exact hold already verified against the failed source job."""
+        now = time.time()
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            changed = db.execute("""UPDATE windows SET state='idle',updated=?
+                WHERE profile=? AND task_id=? AND stage='submitting' AND state='result_unknown'""",
+                (now, profile, task_id)).rowcount
+            if changed:
+                db.execute('INSERT INTO events(profile,task_id,action,detail,created) VALUES(?,?,?,?,?)',
+                    (profile,task_id,'confirmed_rejection_released','{}',now))
+        return changed == 1
+
+    def pending_rejections(self):
+        with closing(self.connect()) as db:
+            return [dict(row) for row in db.execute(
+                "SELECT profile,task_id FROM windows WHERE state='result_unknown' "
+                "AND stage='submitting' AND task_id IS NOT NULL")]
+
     def events(self, task_id):
         with closing(self.connect()) as db:
             return [dict(r) for r in db.execute('SELECT action,detail,created FROM events WHERE task_id=? ORDER BY id', (task_id,))]

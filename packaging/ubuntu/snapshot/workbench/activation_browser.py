@@ -43,7 +43,7 @@ async def ensure_window(port):
         return 'opened'
 
 
-def main(account_key):
+def main(account_key, *, flow_only_start=False):
     if not re.fullmatch(r'[0-9a-f]{64}', account_key):
         raise ValueError('invalid_account')
     home = Path.home()
@@ -69,11 +69,12 @@ def main(account_key):
         raise ValueError('interactive_login')
     with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
         preference = db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?', (account_key,)).fetchone()
-        if preference and not preference[0]:
+        if not flow_only_start and preference and not preference[0]:
             raise ValueError('gemini_paused')
         if db.execute("SELECT 1 FROM flow_requests WHERE profile=? AND status='dispatching'", (profile,)).fetchone():
             raise ValueError('flow_busy')
-        if has_unresolved_request(db, account_key):
+        if (db.execute("SELECT 1 FROM requests WHERE account_key=? AND status='dispatching'", (account_key,)).fetchone()
+                or not flow_only_start and has_unresolved_request(db, account_key)):
             raise ValueError('gemini_pending')
         if db.execute("SELECT 1 FROM account_monitor WHERE account_key=? AND status='dispatching'", (account_key,)).fetchone():
             raise ValueError('gemini_busy')
@@ -102,14 +103,23 @@ def main(account_key):
             raise ValueError('account_state_changed')
         with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
             preference = db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?', (account_key,)).fetchone()
-            if preference and not preference[0]:
+            if not flow_only_start and preference and not preference[0]:
                 raise ValueError('gemini_paused')
             if db.execute("SELECT 1 FROM flow_requests WHERE profile=? AND status='dispatching'", (profile,)).fetchone():
                 raise ValueError('flow_busy')
-            if has_unresolved_request(db, account_key):
+            if (db.execute("SELECT 1 FROM requests WHERE account_key=? AND status='dispatching'", (account_key,)).fetchone()
+                or not flow_only_start and has_unresolved_request(db, account_key)):
                 raise ValueError('gemini_pending')
             if db.execute("SELECT 1 FROM account_monitor WHERE account_key=? AND status='dispatching'", (account_key,)).fetchone():
                 raise ValueError('gemini_busy')
+        if flow_only_start:
+            wanted = '--user-data-dir=' + str(paths.profile_dir(profile))
+            for proc in Path('/proc').glob('[0-9]*/cmdline'):
+                try:
+                    if wanted in process_args(proc.parent.name):
+                        raise ValueError('flow_browser_already_running')
+                except (OSError, UnicodeError):
+                    continue
         RealAdapter(root)._browser(profile, login=False)
         running = running_accounts(current.get('accounts', []), chrome, paths)
         if profile not in running:

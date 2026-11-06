@@ -142,10 +142,11 @@ class WaylandDesktopDriver:
 
     async def copy_prompt_and_paste(self, page, composer, target, prompt):
         if not await self.confirm_focus(target,page,composer): raise ValueError('focus_lost')
-        await page.evaluate('(text) => navigator.clipboard.writeText(text)',prompt)
-        if not await self.confirm_focus(target,page,composer): raise ValueError('focus_lost')
         from portal_keyboard_client import PortalKeyboard
         keyboard = PortalKeyboard(target, gui_environment=self.env)
-        await keyboard.ensure_ready(timeout=3)
+        if not keyboard.ready():
+            from foreground_input import InputNotSubmitted
+            raise InputNotSubmitted('desktop_keyboard_not_ready')
+        await page.evaluate('(text) => navigator.clipboard.writeText(text)',prompt)
         if not await self.confirm_focus(target, page, composer): raise ValueError('focus_lost')
         await keyboard.paste()

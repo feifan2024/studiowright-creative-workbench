@@ -16,6 +16,7 @@ import threading
 from dispatch_limit import DispatchBusy
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from functools import lru_cache
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -23,6 +24,7 @@ from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, ProxyHandle
 
 
 ROOT = Path(__file__).resolve().parent
+FLOW_READINESS_LOCK = threading.Lock()
 MAX_RESPONSE = 16 * 1024 * 1024
 APPLY_LIBRARY_TAGS = r'''
 import json,os,pathlib,re,sqlite3,subprocess,sys
@@ -55,6 +57,23 @@ ALLOWED_STATIC = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
+
+
+@lru_cache(maxsize=8)
+def _asset_digest(path, fingerprint):
+    return hashlib.sha256(path.read_bytes()).digest()
+
+
+def frontend_revision(index=None):
+    revision = hashlib.sha256()
+    for name, _ in ALLOWED_STATIC.values():
+        path = ROOT / name
+        if name == "index.html" and index is not None:
+            revision.update(hashlib.sha256(index).digest())
+        else:
+            st = path.stat()
+            revision.update(_asset_digest(path, (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)))
+    return revision.hexdigest()
 
 
 def clean_text(value, limit=300):
@@ -235,6 +254,9 @@ def task_failure_reason(row):
     if not error:
         return '后台未提供具体失败原因。'
     known = {
+        'pasted_text_mismatch': '提示词粘贴后校验不一致，任务在发送前停止。',
+        'desktop_keyboard_not_ready': 'Ubuntu 桌面键盘控制未就绪，任务在粘贴和发送前停止。',
+        'desktop_keyboard_authorization_timeout': '等待 Ubuntu 桌面键盘控制授权超时，未粘贴或发送。',
         'desktop_binding_unconfirmed': '无法确认账号对应的浏览器窗口，任务在发送前停止。',
         'desktop_focus_unconfirmed': '未能确认浏览器窗口已激活，任务在发送前停止。',
         'input_focus_unconfirmed': '未能确认输入框已获得焦点，任务在发送前停止。',
@@ -280,8 +302,8 @@ def task_rows(state, projects):
         ident = identity_text(row.get("id"))
         if not ident:
             continue
-        profile = identity_text(row.get("profile"))
-        project = identity_text(row.get("project"))
+        profile = identity_text(row.get("effective_profile") or row.get("profile"))
+        project = identity_text(row.get("effective_project") or row.get("project"))
         key = project_key(profile, project) if profile and project else None
         downloads = []
         raw_downloads = row.get('downloads', [])
@@ -309,15 +331,30 @@ def task_rows(state, projects):
         retry = None
         if isinstance(raw_retry, dict) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', str(raw_retry.get('root_id', ''))):
             ordinal = raw_retry.get('ordinal')
-            if type(ordinal) is int and 0 <= ordinal <= 2 and raw_retry.get('reason') in ('original', 'same_account', 'switch_account'):
+            if type(ordinal) is int and 0 <= ordinal <= 3 and raw_retry.get('reason') in ('original', 'same_account', 'switch_account'):
                 retry = {'root_id': raw_retry['root_id'], 'ordinal': ordinal,
                          'reason': raw_retry['reason'], 'state': raw_retry.get('state')}
+                retry['attempts'] = [
+                    {'id':identity_text(a.get('id')), 'ordinal':a['ordinal'], 'profile':identity_text(a.get('profile')),
+                     'status':clean_text(a.get('status'),80), 'started':numeric_time(a.get('started')),
+                     'finished':numeric_time(a.get('finished')), 'failure_reason':task_failure_reason(a)}
+                    for a in (raw_retry.get('attempts') or [])[:4] if isinstance(a,dict)
+                    and type(a.get('ordinal')) is int and 0 <= a['ordinal'] <= 3]
+                if not note and retry['state'] in ('needs_review','interrupted'):
+                    note = '原结果需核对，已停止重试。'
+                if not note and retry['state'] == 'succeeded' and len(retry['attempts']) > 1:
+                    note = '换号重试已完成，仍用原任务编号查询和下载。'
                 if not note and retry['state'] == 'pending_switch':
-                    note = '等待可用账号及已指定的备用项目。'
+                    note = '正在等待另一个可用账号及其 Flow 项目。'
                 elif not note and retry['state'] == 'succeeded' and row.get('status') == 'failed':
                     note = '关联的后续重试已成功。'
                 elif not note and retry['state'] == 'active' and row.get('status') == 'failed':
                     note = '已安排后续重试，请查看关联任务。'
+                elif not note and row.get('status') == 'failed':
+                    note = {'needs_review':'结果需核对，停止重试。','exhausted':'已达到 3 次换号重试上限。',
+                            'references_unavailable':'原参考素材不可用，停止重试。','no_account':'等待超时，没有符合条件的其他账号。'}.get(retry['state'])
+        if not note and not retry and row.get('kind') in ('image', 'video') and row.get('status') == 'failed':
+            note = '这条任务未启用自动换号重试，没有重试记录。'
         rows.append({
             "key": "flow-task-" + hashlib.sha256(ident.encode("utf-8")).hexdigest(),
             "source": "Flow",
@@ -611,6 +648,27 @@ class Sources:
         except HTTPError as exc:
             return exc
 
+    def flow_task(self, ident):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', ident):
+            raise ValueError('任务编号不正确。')
+        try:
+            request = Request(f"http://127.0.0.1:{self.ports['flow']}/api/tasks/{ident}",
+                              headers={'Accept': 'application/json'})
+            with self.opener.open(request, timeout=self.timeout) as response:
+                raw = response.read(65537)
+            if len(raw) > 65536:
+                return 503, {'error':'任务状态暂不可读取。'}
+            task = json.loads(raw)
+            if not isinstance(task,dict) or task.get('task_id') != ident:
+                return 503, {'error':'任务状态暂不可读取。'}
+            return 200, task
+        except HTTPError as exc:
+            if exc.code == 404:
+                return 404, {'error':'任务不存在。'}
+        except (OSError, ValueError):
+            pass
+        return 503, {'error':'任务状态暂不可读取。'}
+
     def flow_risk_resume(self, profile):
         if not isinstance(profile, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', profile):
             raise ValueError('账号标识不正确。')
@@ -750,6 +808,93 @@ class Sources:
                        "name": gemini_name, "description": gemini_description},
         }
 
+    def task_feed(self):
+        # Poll only stored Flow records. No browser title scan, library facets or Gemini statistics.
+        state, error = self.read("flow", "/api/state")
+        if not state or not isinstance(state.get('tasks'), list) or not isinstance(state.get('projects'), list):
+            return None, error or '任务记录暂不可读取。'
+        projects = project_rows(state)
+        accounts = account_rows(state)
+        tasks = task_rows(state, projects)
+        flow_task_notes(tasks, accounts, state.get('coordination'))
+        return {"checked_at": time.time(), "flow_state": {"available": True, "skipped_tasks": len(state['tasks']) - len(tasks)},
+                "tasks": tasks, "flow_coordination": state.get('coordination'), "real_accounts": {"items": accounts or []}}, None
+
+    def flow_readiness(self, repair=False, manual_review=None):
+        """Read current pages; only the explicit POST may repair or release a hold."""
+        from flow_readiness_recovery import generation_evidence
+        state, _ = self.read("flow", "/api/state")
+        if not state or state.get('test') is True:
+            raise ValueError('flow_not_connected')
+        accounts = account_rows(state)
+        if not accounts:
+            raise ValueError('flow_accounts_unavailable')
+        projects = project_rows(state)
+        coordination = state.get('coordination') or {}
+        windows = {w['profile']:w for w in coordination.get('windows', [])}
+        busy = {t.get('source_profile') for t in task_rows(state, projects)
+                if t.get('status') in ('running','dispatching')}
+        busy.update(w.get('profile') for w in coordination.get('windows', [])
+                    if w.get('state') in ('preparing','submitting','submitted','generated','downloading'))
+        payload = {'accounts': [{'profile': a['profile'], 'key': a['key'], 'email': a['email'],
+                                'projects': [p['source_id'] for p in projects if p['source_profile']==a['profile']],
+                                'review_task': windows.get(a['profile'],{}).get('task_id') if windows.get(a['profile'],{}).get('state')=='result_unknown' else None,
+                                'repairable': (a['flow_login']=='verified' and a['flow_risk_known'] and not a['flow_risk_paused']
+                                               and a['flow_pacing_known'] and not a['flow_cooling'])}
+                               for a in accounts if a.get('email')],
+                   'bindings': coordination.get('window_bindings', []), 'busy': sorted(p for p in busy if p)}
+        helper = ROOT/'flow_check_readiness.py'
+        if helper.is_symlink() or not helper.is_file():
+            raise ValueError('readiness_helper_unavailable')
+        pid = subprocess.check_output(['systemctl','--user','show','studiowright-console.service',
+                                       '-p','MainPID','--value'], text=True, timeout=3).strip()
+        if not pid.isdigit() or pid == '0':
+            raise ValueError('flow_not_connected')
+        python = Path(os.fsdecode(Path('/proc',pid,'cmdline').read_bytes().split(b'\0',1)[0]))
+        if not python.is_absolute() or not python.is_file():
+            raise ValueError('flow_runtime_unavailable')
+        repairs = {}
+        if repair:
+            recovery = ROOT/'flow_readiness_recovery.py'
+            if recovery.is_symlink() or not recovery.is_file():
+                raise ValueError('recovery_helper_unavailable')
+            if manual_review:
+                key, task_id = manual_review
+                payload['accounts'] = [a for a in payload['accounts'] if a['key']==key and a['review_task']==task_id]
+                if len(payload['accounts'])!=1:
+                    return {'released':False}
+                payload['manual_review'] = True
+            result = subprocess.run([str(python),'-B',str(recovery)],input=json.dumps(payload).encode(),
+                                    capture_output=True,check=True,timeout=175)
+            repairs = json.loads(result.stdout)
+            if manual_review:
+                return {'released':any('release_review' in r.get('actions',[]) for r in repairs.values())}
+            state, _ = self.read('flow','/api/state')
+            if not state or state.get('test') is True:
+                raise ValueError('flow_not_connected')
+            coordination = state.get('coordination') or {}
+            windows = {w['profile']:w for w in coordination.get('windows', [])}
+            payload['bindings'] = coordination.get('window_bindings', [])
+            projects = project_rows(state)
+            for account in payload['accounts']:
+                account['projects'] = [p['source_id'] for p in projects if p['source_profile']==account['profile']]
+            payload['busy'] = sorted({t['source_profile'] for t in task_rows(state, projects)
+                if t.get('source_profile') and t.get('status') in ('running','dispatching')} |
+                {p for p,w in windows.items() if w.get('state') in ('preparing','submitting','submitted','generated','downloading')})
+        result = subprocess.run([str(python),'-B',str(helper)], input=json.dumps(payload).encode(),
+                                capture_output=True, check=True, timeout=10)
+        checks = json.loads(result.stdout)
+        allowed = {'ok','busy','binding','unique','project','login','draft','overlay','editor','unconfirmed'}
+        if not isinstance(checks,dict) or any(v not in allowed for v in checks.values()):
+            raise ValueError('invalid_readiness_result')
+        for profile, item in repairs.items():
+            if checks.get(profile) in ('binding','project','editor','unconfirmed') and item.get('page') in ('draft','login','overlay'):
+                checks[profile] = item['page']
+        now = time.time()
+        return {'accounts':checks,'checked_at':now,'repairs':repairs,
+                'evidence':generation_evidence(state['tasks'],windows,now),
+                'review':{p:w['task_id'] for p,w in windows.items() if w.get('state')=='result_unknown' and w.get('task_id')}}
+
     def snapshot(self):
         state, state_error = self.read("flow", "/api/state")
         facets, facets_error = self.read("flow", "/api/library/facets")
@@ -765,14 +910,7 @@ class Sources:
         for item in state.get('retry_projects', []) if isinstance(state, dict) else []:
             if isinstance(item, dict) and (item.get('profile'), item.get('project')) in valid_projects:
                 retry_projects[item['profile']] = valid_projects[(item['profile'], item['project'])]
-        by_profile = {a['profile']: a for a in accounts or []}
-        for task in tasks:
-            account = by_profile.get(task['source_profile'])
-            if task['status'] == 'queued' and task['kind'] in ('image', 'video') and account:
-                if account['flow_risk_paused']:
-                    task['note'] = '等待人工核查并恢复该账号的 Flow。'
-                elif account['flow_cooling']:
-                    task['note'] = '账号冷却中，任务等待派发。'
+        flow_task_notes(tasks, accounts, state.get('coordination') if state is not None else None)
         return {
             "checked_at": time.time(),
             "flow_state": {"available": state is not None, "message": state_error,
@@ -791,6 +929,22 @@ class Sources:
                               "message": state_error if state is None else
                               ("当前 Flow 数据无法作为真实账号使用。" if accounts is None else None)},
         }
+
+
+def flow_task_notes(tasks, accounts, coordination=None):
+    by_profile = {a['profile']: a for a in accounts or []}
+    for task in tasks:
+        account = by_profile.get(task['source_profile'])
+        if (task['status'] == 'queued' and task['kind'] in ('image', 'video')
+                and isinstance(coordination, dict) and coordination.get('desktop_keyboard_ready') is False):
+            task['note'] = '等待 Ubuntu 桌面键盘就绪，任务尚未派发。'
+            continue
+        if (task['status'] == 'queued' and task['kind'] in ('image', 'video') and account
+                and (task.get('retry') or {}).get('state') != 'pending_switch'):
+            if account['flow_risk_paused']:
+                task['note'] = '等待人工核查并恢复该账号的 Flow。'
+            elif account['flow_cooling']:
+                task['note'] = '账号冷却中，任务等待派发。'
 
 
 class Coordinator:
@@ -842,8 +996,29 @@ class Coordinator:
             return 502, {"error": "工作台任务组件返回的数据不正确。"}
 
 
+SCHEDULER_TASK_KINDS = frozenset(('sync', 'login', 'session_import', 'check', 'doctor', 'keepalive', 'quote'))
+
+
+def split_public_tasks(result):
+    """Keep account and preflight operations out of clients' generation list."""
+    tasks, scheduler_tasks = [], []
+    for task in result.get('tasks', []):
+        (scheduler_tasks if task.get('kind') in SCHEDULER_TASK_KINDS else tasks).append(task)
+    return {**result, 'tasks': tasks, 'scheduler_tasks': scheduler_tasks}
+
+
 def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
+    from task_feed import TaskFeed
+    frontend_connections = threading.BoundedSemaphore(16)
     coordinator = coordinator or Coordinator()
+    def task_snapshot():
+        result, error = sources.task_feed()
+        if result is not None and real_pool:
+            real_pool.annotate_tasks(result["tasks"])
+        return split_public_tasks(result) if result is not None else None, error
+    databases = (Path.home() / '.local/share/studiowright-evaluation/console-data/console.db', real_pool.path) if real_pool else ()
+    task_stream = TaskFeed(task_snapshot, databases)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "LocalWorkbench/1"
 
@@ -876,9 +1051,73 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             body = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             return self.respond(status, body, "application/json; charset=utf-8")
 
+        def stream_tasks(self):
+            if not task_stream.subscribe():
+                return self.json_response(503, {"error": "任务实时连接已满。"})
+            self.close_connection = True
+            try:
+                self.connection.settimeout(8)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                self.send_header("Connection", "close")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(b'retry: 3000\n\n')
+                self.wfile.flush()
+                version = -1
+                while True:
+                    version, event = task_stream.next_event(version)
+                    self.wfile.write(event)
+                    self.wfile.flush()
+            except OSError:
+                pass
+            finally:
+                task_stream.unsubscribe()
+
+        def stream_frontend(self):
+            if not frontend_connections.acquire(blocking=False):
+                return self.json_response(503, {"error": "界面更新连接已满。"})
+            self.close_connection = True
+            try:
+                self.connection.settimeout(8)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                self.send_header("Connection", "close")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                self.wfile.write(b"retry: 3000\n\n")
+                previous = None
+                while True:
+                    revision = frontend_revision()
+                    event = ("event: frontend\ndata: " + revision + "\n\n").encode("ascii") if revision != previous else b"event: heartbeat\ndata: 1\n\n"
+                    self.wfile.write(event)
+                    self.wfile.flush()
+                    previous = revision
+                    time.sleep(5)
+            except OSError:
+                pass
+            finally:
+                frontend_connections.release()
+
         def do_GET(self):
             if not self.valid():
                 return self.respond(403, b"Forbidden", "text/plain; charset=utf-8")
+            if self.path == '/api/recent-tasks/events':
+                return self.stream_tasks()
+            if self.path == '/api/frontend/events':
+                return self.stream_frontend()
+            if self.path == '/api/flow-readiness' and deployment == 'ubuntu':
+                try:
+                    return self.json_response(200,sources.flow_readiness())
+                except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+                    return self.json_response(503,{'error':'Flow 实际任务窗口暂不可核对。'})
+            if self.path == '/api/official-reauth':
+                if not real_pool:
+                    return self.json_response(503, {'error':'账号治理暂不可用。'})
+                return self.json_response(200,real_pool.official.reauth.dashboard())
             if self.path == '/api/official-quota':
                 from official_quota import snapshot
                 return self.json_response(200, snapshot(real_pool.official.runtime) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
@@ -908,7 +1147,11 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 return self.json_response(200, activation.status(self.path.split('=', 1)[1]))
             if self.path in ALLOWED_STATIC:
                 name, content_type = ALLOWED_STATIC[self.path]
-                return self.respond(200, (ROOT / name).read_bytes(), content_type)
+                body = (ROOT / name).read_bytes()
+                if name == "index.html":
+                    meta = f'<meta name="workbench-revision" content="{frontend_revision(index=body)}">'.encode("ascii")
+                    body = body.replace(b"</head>", meta + b"\n</head>", 1)
+                return self.respond(200, body, content_type)
             if self.path == '/api/storage/library':
                 try:
                     result = sources.library_storage()
@@ -1030,6 +1273,10 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 result = {"application": "unified-workbench", "version": 1, "deployment": deployment}
             elif self.path == "/api/status":
                 result = sources.status()
+            elif self.path == "/api/recent-tasks":
+                result, error = task_snapshot()
+                if result is None:
+                    return self.json_response(503, {'error': error})
             elif self.path == "/api/snapshot":
                 result = sources.snapshot()
                 if real_pool:
@@ -1038,6 +1285,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     result['keepalive_monitor'] = dict(real_pool.monitor_heartbeat)
                     if "tasks" in result:
                         real_pool.annotate_tasks(result["tasks"])
+                result = split_public_tasks(result)
             elif self.path in {"/api/scheduler/health", "/api/scheduler/workflows", "/api/scheduler/demo-accounts"}:
                 status, result = coordinator.request("GET", self.path.replace("/api/scheduler/", "/api/", 1))
                 return self.json_response(status, result)
@@ -1047,10 +1295,17 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 result = real_pool.get(self.path.rsplit('/', 1)[-1])
                 if result is None:
                     return self.json_response(404, {"error": "没有找到该请求。"})
+            elif re.fullmatch(r"/api/tasks/[A-Za-z0-9_-]{1,128}", self.path):
+                status, task = sources.flow_task(self.path.rsplit('/',1)[-1])
+                return self.json_response(status, task)
             elif real_pool and re.fullmatch(r"/api/real-pool/flow-requests/[0-9a-f-]{36}", self.path):
                 result = real_pool.get_flow(self.path.rsplit('/', 1)[-1])
                 if result is None:
                     return self.json_response(404, {"error": "没有找到该请求。"})
+                if result.get('task_id'):
+                    status, task = sources.flow_task(result['task_id'])
+                    if status == 200:
+                        result['task'] = task
             elif real_pool and re.fullmatch(r"/api/real-pool/recoveries/[A-Za-z0-9_-]{1,128}/file", self.path):
                 recovered = real_pool.recovered_file(self.path.split('/')[-2])
                 if not recovered:
@@ -1061,12 +1316,92 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             return self.json_response(200, result)
 
         def do_POST(self):
-            if self.path == '/api/official-quota/refresh':
+            if self.path in ('/api/flow-readiness','/api/flow-readiness/review') and deployment == 'ubuntu':
+                if not self.valid(mutation=True):
+                    return self.json_response(403,{'error':'请从工作台发起 Flow 就绪检查。'})
+                length = self.headers.get_all('Content-Length',[])
+                if (self.headers.get('Transfer-Encoding') or len(length)!=1 or not re.fullmatch(r'[0-9]{1,3}',length[0])
+                        or not 0<int(length[0])<=300):
+                    return self.json_response(400,{'error':'请求格式不正确。'})
+                try:
+                    self.connection.settimeout(4)
+                    raw = json.loads(self.rfile.read(int(length[0])))
+                    manual = self.path.endswith('/review')
+                    if manual:
+                        if (not isinstance(raw,dict) or set(raw)!={'account','task','confirmed'} or raw['confirmed'] is not True
+                                or not isinstance(raw['account'],str) or not re.fullmatch(r'flow-account-[0-9a-f]{64}',raw['account'])
+                                or not isinstance(raw['task'],str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',raw['task'])):
+                            raise ValueError()
+                    elif raw != {}:
+                        raise ValueError()
+                    self.connection.settimeout(None)
+                except (OSError,ValueError,TypeError):
+                    return self.json_response(400,{'error':'请求格式不正确。'})
+                if not real_pool or real_pool.maintenance() or not FLOW_READINESS_LOCK.acquire(blocking=False):
+                    return self.json_response(409,{'error':'工作台正在维护或已有一轮就绪检查，请稍后再试。'})
+                try:
+                    result = sources.flow_readiness(repair=True,manual_review=(raw['account'],raw['task']) if manual else None)
+                    if manual and not result.get('released'):
+                        return self.json_response(409,{'error':'原任务或账号状态已变化，未放行；请重新检查。'})
+                    return self.json_response(200,result)
+                except (OSError,ValueError,TypeError,KeyError,sqlite3.Error,subprocess.SubprocessError):
+                    return self.json_response(503,{'error':'本轮 Flow 就绪治理未完成，请重新检查当前状态。'})
+                finally:
+                    FLOW_READINESS_LOCK.release()
+            reauth = re.fullmatch(r'/api/official-reauth/([0-9a-f-]{36})', self.path)
+            if reauth:
+                if not real_pool or not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台发起重新授权。'})
+                if self.headers.get('Transfer-Encoding') or self.headers.get_all('Content-Length',[]) != ['2'] or self.rfile.read(2) != b'{}':
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                try:
+                    return self.json_response(202,real_pool.official.reauth.start(reauth[1]))
+                except ValueError as exc:
+                    return self.json_response(409,{'error':str(exc)})
+                except (OSError,sqlite3.Error):
+                    return self.json_response(503,{'error':'重新授权暂不可用，请稍后再试。'})
+            from flow_references import MAX_BYTES as reference_limit, UPLOAD_ROUTE as reference_route
+            match = reference_route.fullmatch(self.path)
+            if match:
+                if not real_pool or real_pool.maintenance():
+                    return self.json_response(503, {'error': '工作台暂不可用。'})
+                if not self.valid(mutation=True, content_type='application/octet-stream'):
+                    return self.json_response(403, {'error': '请使用统一 API 提交参考图。'})
+                length = self.headers.get('Content-Length', '')
+                if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1
+                        or not re.fullmatch(r'[0-9]{1,8}', length) or not 0 < int(length) <= reference_limit):
+                    return self.json_response(400, {'error': '参考图文件大小无效，单张最多 8 MiB。'})
+                try:
+                    self.connection.settimeout(30)
+                    data = self.rfile.read(int(length))
+                    if len(data) != int(length):
+                        raise ValueError('参考图上传不完整。')
+                    snapshot = {} if match.group(1) == 'auto' else sources.snapshot()
+                    result, created = real_pool.upload_flow_reference(
+                        snapshot, *match.groups(), data, request_id=self.headers.get('Idempotency-Key', ''))
+                    return self.json_response(201 if created else 200, result)
+                except ValueError as exc:
+                    return self.json_response(400, {'error': str(exc)})
+                except (ImportError, OSError, sqlite3.Error):
+                    return self.json_response(503, {'error': '参考图暂存服务暂不可用。'})
+            if self.path in ('/api/official-quota/refresh','/api/gemini-readiness','/api/gemini-readiness?scope=recoverable'):
                 if not self.valid(mutation=True):
                     return self.json_response(403, {'error':'请从工作台刷新额度。'})
                 if self.headers.get('Transfer-Encoding') or self.headers.get_all('Content-Length',[]) != ['2'] or self.rfile.read(2) != b'{}':
                     return self.json_response(400, {'error':'请求格式不正确。'})
-                from official_quota import snapshot
+                from official_quota import snapshot,reader_for
+                if self.path!='/api/official-quota/refresh':
+                    if not real_pool:
+                        return self.json_response(503, {'error':'Gemini 检查暂不可用。'})
+                    from official_runtime import check_official_network
+                    if not check_official_network():
+                        return self.json_response(503, {'error':'Ubuntu 暂时连不上 Google 的授权或 Gemini 服务。本轮没有发送验活消息，请检查 Ubuntu 的代理连接。','code':'gemini_network_unavailable'})
+                    official=real_pool.official
+                    quota=reader_for(official.runtime).snapshot(refresh=False)
+                    snapshot_accounts=sources.snapshot().get('real_accounts',{})
+                    probes=official.queue_readiness_probes(snapshot_accounts.get('items',[]),quota['accounts'],
+                        blocked_only=self.path.endswith('?scope=recoverable')) if snapshot_accounts.get('available') is True else []
+                    return self.json_response(200, {**quota,'readiness_probes':probes})
                 return self.json_response(200, snapshot(real_pool.official.runtime, force=True) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
             if self.path in {'/api/real-pool/recover-account', '/api/real-pool/check'}:
                 return self.json_response(410, {"error":'旧 Gemini 网页功能已停用。当前官方通道提供文字对话；这项旧操作未执行。',"code":"legacy_gemini_removed"})
@@ -1334,7 +1669,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(400, {"error": str(exc)})
                 except Exception:
                     return self.json_response(500, {"error": "暂时无法找回，请核对原任务。"})
-            if self.path in {"/api/real-pool/check", "/api/real-pool/recover-account", "/api/real-pool/chat", "/api/real-pool/flow", "/api/real-pool/enabled", "/api/real-pool/keepalive-enabled", "/api/real-pool/dispatch-policy", "/api/real-pool/flow-risk-resume", "/api/real-pool/flow-retry-project"}:
+            if self.path in {"/api/real-pool/check", "/api/real-pool/recover-account", "/api/real-pool/chat", "/api/real-pool/image-analysis", "/api/real-pool/image-analysis-validate", "/api/real-pool/flow", "/api/real-pool/flow-validate", "/api/real-pool/enabled", "/api/real-pool/keepalive-enabled", "/api/real-pool/dispatch-policy", "/api/real-pool/flow-risk-resume", "/api/real-pool/flow-retry-project"}:
                 if not real_pool:
                     return self.json_response(503, {"error": "真实账号接入暂不可用。"})
                 if getattr(real_pool, 'maintenance', lambda: False)():
@@ -1348,10 +1683,40 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     data = json.loads(self.rfile.read(int(length)).decode("utf-8"))
                     if not isinstance(data, dict):
                         raise ValueError("请求内容格式不正确。")
+                    if 'method' in data:
+                        # HTTP POST is shared. The operation, not the caller, selects the pipeline.
+                        expected = {
+                            '/api/real-pool/chat': 'gemini.chat',
+                            '/api/real-pool/image-analysis': 'gemini.analyze_image',
+                            '/api/real-pool/image-analysis-validate': 'gemini.analyze_image',
+                            '/api/real-pool/flow': 'flow.generate',
+                            '/api/real-pool/flow-validate': 'flow.generate',
+                        }.get(self.path)
+                        if expected is None or data.pop('method') != expected:
+                            return self.json_response(400, {'error': '请求操作与接口不匹配，未提交。'})
                     snapshot = sources.snapshot()
                     account_data = snapshot.get("real_accounts", {})
                     if not account_data.get("available"):
                         return self.json_response(503, {"error": "现有账号池暂不可读取。"})
+                    if self.path in {'/api/real-pool/image-analysis', '/api/real-pool/image-analysis-validate'}:
+                        import gemini_image_input as vision
+                        if set(data) != {'account', 'prompt', 'attachments'}:
+                            raise ValueError('识图需要账号、问题和图片回执。')
+                        request_id = real_pool.conversation_id(self.headers.get('Idempotency-Key', ''))
+                        account, prompt = data['account'], data['prompt']
+                        if not isinstance(account, str):
+                            raise ValueError('请选择账号或自动轮询。')
+                        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 20000:
+                            raise ValueError('请输入 1 到 20000 字的问题。')
+                        attachments = vision.normalized_attachments(data['attachments'])
+                        if self.path.endswith('-validate'):
+                            if account != 'auto':
+                                real_pool.allowed(account, account_data['items'])
+                            vision.prompt_parts(prompt, attachments, vision.files_for(real_pool, request_id, attachments))
+                            return self.json_response(200, {'valid': True, 'submitted': False, 'image_count': len(attachments)})
+                        record, created = real_pool.official.generate(
+                            account, prompt, request_id, account_data['items'], attachments, image_analysis=True)
+                        return self.json_response(201 if created else 200, record)
                     if self.path.endswith('/flow-retry-project'):
                         if set(data) != {'account', 'project'} or not isinstance(data['account'], str) or not re.fullmatch(r'[0-9a-f]{64}', data['account']):
                             raise ValueError('请选择已登记账号。')
@@ -1376,10 +1741,9 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         if set(data) != {'five_hour_limit', 'weekly_limit'}:
                             raise ValueError('请求内容格式不正确。')
                         return self.json_response(200, real_pool.set_dispatch_policy(data['five_hour_limit'], data['weekly_limit']))
-                    if self.path.endswith('/flow'):
-                        if data.get('auto_retry') is True:
-                            raise ValueError('自动重新生成和自动换号尚未启用。')
-                        record, created = real_pool.submit_flow(data, self.headers.get('Idempotency-Key', ''), snapshot)
+                    if self.path.endswith(('/flow', '/flow-validate')):
+                        kwargs = {'validate_only': True} if self.path.endswith('/flow-validate') else {}
+                        record, created = real_pool.submit_flow(data, self.headers.get('Idempotency-Key', ''), snapshot, **kwargs)
                         return self.json_response(201 if created else 200, record)
                     if self.path.endswith('/check'):
                         if set(data) != {"account"}:

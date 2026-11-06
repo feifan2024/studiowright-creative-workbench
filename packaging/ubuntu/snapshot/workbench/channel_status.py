@@ -52,6 +52,7 @@ def read_status(database, runtime=None):
                     official[row['id']] = (row['blocked'], native.get('model'), native.get('channel') or CHANNEL)
             controls = {r['account_key']: dict(r) for r in db.execute('SELECT account_key,gemini_enabled FROM account_preferences')}
             latest = {}
+            latest_probes = {}
             for row in db.execute('''SELECT r.request_id,r.account_key,r.status,r.created,r.finished,r.response,r.note,
                 t.conversation_id,m.first_text_ms,m.total_ms,am.model FROM requests r
                 JOIN conversation_turns t USING(request_id)
@@ -70,6 +71,33 @@ def read_status(database, runtime=None):
                     'outcome': outcome, 'verification': verification, 'created': row['created'],
                     'finished': number(row['finished']), 'first_text_ms': number(row['first_text_ms']),
                     'total_ms': number(row['total_ms']), 'model': model, 'channel': channel}
+            # Deleting the conversation list does not remove the separate official
+            # execution ledger. Keep its proof, without returning a deleted link.
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='official_jobs'").fetchone():
+                probe='j.readiness_probe' if any(row['name']=='readiness_probe' for row in db.execute('PRAGMA table_info(official_jobs)')) else '0'
+                for row in db.execute(f"""SELECT r.request_id,r.account_key,r.status,r.created,r.finished,r.response,r.note,j.reason,{probe} AS readiness_probe,
+                    j.model,t.conversation_id,c.blocked,m.first_text_ms,m.total_ms
+                    FROM official_jobs j JOIN requests r USING(request_id)
+                    LEFT JOIN conversation_turns t USING(request_id)
+                    LEFT JOIN conversations c ON c.id=t.conversation_id
+                    LEFT JOIN request_metrics m USING(request_id)
+                    ORDER BY r.created DESC,r.request_id DESC"""):
+                    key=row['account_key'];created=number(row['created'])
+                    if not KEY.fullmatch(key or '') or created is None:continue
+                    if row['readiness_probe'] and key not in latest_probes:
+                        latest_probes[key]={'request_id':row['request_id'],'status':row['status'],'reason':row['reason'],
+                                           'finished':number(row['finished']),'total_ms':number(row['total_ms'])}
+                    previous=latest.get(key)
+                    if previous and (previous['created']>created or
+                                     previous['created']==created and previous['request_id']!=row['request_id']):continue
+                    outcome,verification=classify(row['status'],row['response'],row['note'],row['blocked'])
+                    model=row['model']
+                    latest[key]={'request_id':row['request_id'],'conversation_id':row['conversation_id'],
+                        'outcome':outcome,'verification':verification,'created':created,
+                        'finished':number(row['finished']),'first_text_ms':number(row['first_text_ms']),
+                        'total_ms':number(row['total_ms']),
+                        'model':model if isinstance(model,str) and re.fullmatch(r'[a-zA-Z0-9._/-]{1,128}',model) else None,
+                        'channel':'official_antigravity_cli','readiness_probe':bool(row['readiness_probe'])}
             runtime_accounts = (runtime or {}).get('accounts', {})
             for key in sorted(set(controls) | set(latest) | set(runtime_accounts)):
                 if not KEY.fullmatch(key):
@@ -79,14 +107,17 @@ def read_status(database, runtime=None):
                 paused = pause_source is not None
                 call = latest.get(key)
                 result['accounts'].append({'account_key': key, 'paused': paused, 'pause_source': pause_source, 'latest_call': call,
+                    'latest_probe': latest_probes.get(key),
+                    'block_reason': runtime_accounts.get(key, {}).get('block_reason'),
                     'authorization': runtime_accounts.get(key, {}).get('authorization', 'not_connected'),
                     'dispatch_eligible': runtime_accounts.get(key, {}).get('dispatch_eligible', False),
+                    'busy': runtime_accounts.get(key, {}).get('busy', False),
                     'restriction': runtime_accounts.get(key, {}).get('restriction'), 'source': 'saved_official_requests'})
             result['conversations'] = {ident: value[2] for ident,value in official.items()}
             if runtime:
                 result.update(channel='official_antigravity_cli', production_send_available=runtime.get('available') is True,
                               authorization_source='saved_verified_identity',
-                              dispatch={k:runtime.get(k) for k in ('queued','active','selection','max_concurrency','retry','failover','model')})
+                              dispatch={k:runtime.get(k) for k in ('queued','active','selection','max_concurrency','retry','failover','model','shared_dispatch')})
             result['available'] = True
     except (sqlite3.Error, OSError):
         # Do not forward DB errors, private native metadata, response bodies or URLs.

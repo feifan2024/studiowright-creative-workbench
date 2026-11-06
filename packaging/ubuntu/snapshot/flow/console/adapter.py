@@ -22,6 +22,10 @@ class PreSubmissionTransient(RuntimeError):
     """A temporary error occurred before the generation operation was invoked."""
 
 
+class AccountWindowBusy(ValueError):
+    """An account operation owns the window lock; login was not checked."""
+
+
 class RealAdapter:
     def __init__(self, root):
         self.root = Path(root)
@@ -57,7 +61,7 @@ class RealAdapter:
             ImageOptions.build(**args)
             if kind == "image"
             else VideoOptions.build(
-                **args, resolution=params["resolution"], duration=params["duration"]
+                **args, mode=params.get("mode", "frames"), resolution=params["resolution"], duration=params["duration"]
             )
         )
 
@@ -170,13 +174,24 @@ class RealAdapter:
         try:
             guard.acquire(timeout=0)
         except Timeout:
-            raise ValueError("此账号正在执行原项目任务，请任务结束后再检查或打开登录。") from None
+            raise AccountWindowBusy("账号窗口暂被其他操作占用，本次未检查登录，请稍后再检查。") from None
         try:
             return await self._run(task, account)
         finally:
             guard.release()
 
     async def _run(self, task, account, phase=None):
+        p = task["params"]
+        from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
+        if p.keys() & REFERENCE_FIELDS:
+            ids = task_reference_ids(task['kind'], p)
+            store = ReferenceStore(Path.home() / '.local/state/creative-unified-workbench')
+            with store.files(ids, task['profile'], task['project'], account.get('email'),
+                             allow_video=p['mode'] == 'ingredients') as files:
+                return await self._run_prepared(task, account, phase, files)
+        return await self._run_prepared(task, account, phase)
+
+    async def _run_prepared(self, task, account, phase=None, reference_files=()):
         profile, project, kind, p = task["profile"], task["project"], task["kind"], task["params"]
         await asyncio.to_thread(self._browser, profile, kind == "login")
         if kind == "login":
@@ -186,6 +201,8 @@ class RealAdapter:
         studio = self.Studio(profile)
         if kind in {'image', 'video'}:
             studio.configure_task(task['id'])
+        if reference_files:
+            studio.configure_reference_uploads(project, reference_files)
         async with studio:
             from studiowright.flow.page import FLOW_ROOT
 
@@ -291,7 +308,7 @@ class RealAdapter:
                 if phase is not None:
                     phase['generation_invoked'] = True
                 return await studio.image(
-                    ImageRequest(p["prompt"], options, project=project, out_dir=out)
+                    ImageRequest(p["prompt"], options, refs=reference_files, project=project, out_dir=out)
                 )
             # Source price reading is mandatory. Unknown does not mean free.
             quote = await studio.video(
@@ -308,9 +325,15 @@ class RealAdapter:
             studio.console_task_id = task["id"]
             if phase is not None:
                 phase['generation_invoked'] = True
+            frame_fields = {}
+            if p.get('mode') == 'frames' and reference_files:
+                frame_fields['start'] = reference_files[0]
+                if len(reference_files) == 2:
+                    frame_fields['end'] = reference_files[1]
             return await studio.video(
                 VideoRequest(
-                    p["prompt"], options, project=project, out_dir=out, max_credits=p["max_credits"]
+                    p["prompt"], options, refs=() if frame_fields else reference_files, project=project,
+                    out_dir=out, max_credits=p["max_credits"], **frame_fields
                 )
             )
 
