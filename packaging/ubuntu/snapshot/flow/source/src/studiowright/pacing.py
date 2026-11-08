@@ -147,7 +147,12 @@ class Governor:
     def report_unusual_activity(self, now: float | None = None) -> float:
         now = time.time() if now is None else now
         is_generation = ':' not in self.profile
-        until = now + (max(3600, self.settings.cooldown_s) if is_generation else self.settings.cooldown_s)
+        base = (max(3600, self.settings.cooldown_s) if is_generation else self.settings.cooldown_s)
+        with self.store.transaction() as db:
+            prior_row = db.execute("SELECT refusals FROM pacing WHERE profile = ?", (self.profile,)).fetchone()
+        prior_refusals = (prior_row[0] if prior_row else 0) or 0
+        # Escalating cooldown: repeat offenders sit out longer (1h → up to 4h).
+        until = now + base * (1 + min(prior_refusals, 3))
         with self.store.transaction() as db:
             db.execute(
                 "INSERT INTO pacing (profile, cooldown_until, refusals) VALUES (?, ?, 1) "
@@ -164,6 +169,16 @@ class Governor:
                     "last_unusual=excluded.last_unusual", (self.profile, now),
                 )
                 db.execute("INSERT INTO flow_risk_events(profile,action,created) VALUES(?,'unusual',?)", (self.profile, now))
+        # Governance: a cooling account goes fully silent. Close its managed
+        # browser; the readiness/activation path reopens it on demand afterwards.
+        if is_generation:
+            try:
+                import subprocess
+                subprocess.run(["systemctl", "--user", "stop",
+                                "studiowright-browser-" + self.profile + ".service"],
+                               check=False, capture_output=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
         return until
 
     def report_success(self) -> None:

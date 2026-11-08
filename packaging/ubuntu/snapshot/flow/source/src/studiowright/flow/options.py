@@ -31,6 +31,7 @@ class ImageModel(Enum):
 
 class VideoModel(Enum):
     OMNI_FLASH = "omni-flash"
+    OMNI_FLASH_2 = "omni-flash-2"
     VEO_LITE = "veo-lite"
     VEO_FAST = "veo-fast"
     VEO_QUALITY = "veo-quality"
@@ -39,6 +40,7 @@ class VideoModel(Enum):
     def label(self) -> str:
         return {
             VideoModel.OMNI_FLASH: "Omni 1.1 Flash",
+            VideoModel.OMNI_FLASH_2: "Omni 1.2 Flash",
             VideoModel.VEO_LITE: "Veo 3.1 - Lite",
             VideoModel.VEO_FAST: "Veo 3.1 - Fast",
             VideoModel.VEO_QUALITY: "Veo 3.1 - Quality",
@@ -47,7 +49,21 @@ class VideoModel(Enum):
     @property
     def has_length_and_resolution(self) -> bool:
         """Only Omni offers duration and resolution choices; Veo shows neither."""
-        return self is VideoModel.OMNI_FLASH
+        return self in (VideoModel.OMNI_FLASH, VideoModel.OMNI_FLASH_2)
+
+    @property
+    def duration_control(self) -> str:
+        """1.1 renders fixed duration chips; 1.2 exposes a continuous 3-15 s slider."""
+        return 'slider' if self is VideoModel.OMNI_FLASH_2 else 'radio'
+
+    @property
+    def duration_range(self) -> tuple[int, int] | None:
+        return (3, 15) if self is VideoModel.OMNI_FLASH_2 else None
+
+    @property
+    def offered(self) -> bool:
+        """Only the two Omni Flash tiers are offered; Veo stays page-only."""
+        return self in (VideoModel.OMNI_FLASH, VideoModel.OMNI_FLASH_2)
 
 
 class Aspect(Enum):
@@ -142,7 +158,11 @@ class VideoOptions:
         if model_.has_length_and_resolution:
             if resolution not in RESOLUTIONS:
                 raise OptionError(f"resolution must be one of {RESOLUTIONS}, got {resolution}")
-            if duration not in DURATIONS:
+            span = model_.duration_range
+            if span:
+                if not isinstance(duration, int) or not span[0] <= duration <= span[1]:
+                    raise OptionError(f"duration must be within {span[0]}..{span[1]} s for {model_.label}, got {duration}")
+            elif duration not in DURATIONS:
                 raise OptionError(f"duration must be one of {DURATIONS} s, got {duration}")
         else:
             resolution, duration = None, None

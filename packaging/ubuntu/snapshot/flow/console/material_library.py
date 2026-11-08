@@ -440,7 +440,7 @@ class Library(TagIndex):
 
     def reconcile(self, store, output):
         for row in store.rows(
-            "SELECT * FROM tasks WHERE kind IN ('image','video') AND result IS NOT NULL"
+            "SELECT * FROM flow_task_execution_rows WHERE kind IN ('image','video') AND result IS NOT NULL"
         ):
             task = store.decode(row)
             self.enqueue_task(task, store.account(task["profile"]), output)

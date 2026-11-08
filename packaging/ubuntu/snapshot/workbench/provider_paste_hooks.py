@@ -22,7 +22,26 @@ async def flow_submit(*, page, composer, submit_button, credits_warning,
         if on_submit:
             on_submit()
     async def submit():
-        await submit_button.click()
+        # An eased in-page trajectory instead of an instant synthetic teleport.
+        box = await submit_button.bounding_box()
+        if not box:
+            await submit_button.click()
+            return
+        import random
+        target_x = box['x'] + box['width'] * random.uniform(.4, .6)
+        target_y = box['y'] + box['height'] / 2
+        cursor_x = target_x - random.uniform(90, 160)
+        cursor_y = target_y - random.uniform(50, 110)
+        steps = random.randint(9, 14)
+        for index in range(1, steps + 1):
+            t = index / steps
+            ease = t * t * (3 - 2 * t)
+            await page.mouse.move(cursor_x + (target_x - cursor_x) * ease + random.uniform(-2, 2),
+                                  cursor_y + (target_y - cursor_y) * ease + random.uniform(-2, 2))
+            await asyncio.sleep(random.uniform(.02, .05))
+        await page.mouse.down()
+        await asyncio.sleep(random.uniform(.06, .14))
+        await page.mouse.up()
     kwargs = dict(driver=driver, page=page, composer=composer, target=target,
                   prompt=prompt, checkpoint=checkpoint, submit=submit)
     if reserved:

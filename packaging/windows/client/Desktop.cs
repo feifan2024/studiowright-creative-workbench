@@ -267,33 +267,39 @@ namespace StudioWrightDesktop
         readonly TextBox host = new TextBox { Left=150, Top=108, Width=275 };
         readonly TextBox user = new TextBox { Left=150, Top=146, Width=155 };
         readonly TextBox port = new TextBox { Left=375, Top=146, Width=50, Text="22" };
-        readonly Label state = new Label { Left=25, Top=244, Width=500, Height=65, Text="正在查找同一局域网内的 Ubuntu 工作台……" };
-        readonly Button connect = new Button { Left=25, Top=192, Width=142, Height=35, Text="连接工作台" };
-        readonly Button cancel = new Button { Left=180, Top=192, Width=100, Height=35, Text="取消" };
-        public Process NewTunnel;
+        readonly TextBox password = new TextBox { Left=150, Top=184, Width=275, UseSystemPasswordChar=true };
+        readonly Label state = new Label { Left=25, Top=309, Width=500, Height=65, Text="正在查找同一局域网内的 Ubuntu 工作台……" };
+        readonly Button connect = new Button { Left=25, Top=257, Width=142, Height=35, Text="连接工作台" };
+        readonly Button cancel = new Button { Left=180, Top=257, Width=100, Height=35, Text="取消" };
+        bool connecting;
+        public IConnectionTunnel NewTunnel;
 
         public ConnectDialog()
         {
-            Text="连接 Ubuntu 工作台"; Width=570; Height=360; StartPosition=FormStartPosition.CenterParent;
+            Text="连接 Ubuntu 工作台"; Width=570; Height=420; StartPosition=FormStartPosition.CenterParent;
+            AcceptButton=connect; CancelButton=cancel;
             Controls.Add(new Label { Left=25, Top=20, Width=500, Height=33, Text="自动发现只提供地址；首次连接需确认服务器身份。" });
             Controls.Add(new Label { Left=25, Top=69, Width=115, Text="发现的服务" });
             Controls.Add(new Label { Left=25, Top=111, Width=115, Text="Ubuntu 地址" });
             Controls.Add(new Label { Left=25, Top=149, Width=115, Text="Ubuntu 用户名" });
             Controls.Add(new Label { Left=320, Top=149, Width=50, Text="端口" });
+            Controls.Add(new Label { Left=25, Top=187, Width=115, Text="Ubuntu 密码" });
+            Controls.Add(new Label { Left=150, Top=217, Width=375, Text="密码仅用于本次连接；已配置 SSH 密钥可留空。" });
             Controls.Add(servers);Controls.Add(scan);Controls.Add(host);Controls.Add(user);Controls.Add(port);
+            Controls.Add(password);
             Controls.Add(connect);Controls.Add(cancel);Controls.Add(state);
             servers.SelectedIndexChanged += delegate { var offer=servers.SelectedItem as Offer; if (offer!=null) {
                 host.Text=offer.Address; user.Text=offer.User; port.Text=offer.SshPort.ToString(); } };
             scan.Click += delegate { Find(); }; connect.Click += delegate { Connect(); };
             cancel.Click += delegate { DialogResult=DialogResult.Cancel; Close(); };
-            FormClosed += delegate { if (DialogResult!=DialogResult.OK) StopTunnel(); };
+            FormClosed += delegate { password.Clear(); if (DialogResult!=DialogResult.OK) StopTunnel(); };
             Shown += delegate { Find(); };
         }
 
         void StopTunnel()
         {
             if(NewTunnel==null) return;
-            try { if(!NewTunnel.HasExited) NewTunnel.Kill(); } catch { }
+            NewTunnel.Dispose();
             NewTunnel=null;
         }
 
@@ -302,17 +308,32 @@ namespace StudioWrightDesktop
             scan.Enabled=false; state.Text="正在查找局域网中的工作台……";
             try {
                 var found=await Task.Run(() => Discovery.Scan());
-                if (IsDisposed) return;
+                if (IsDisposed || connecting) return;
                 servers.Items.Clear(); foreach (var offer in found) servers.Items.Add(offer);
                 if (servers.Items.Count==1) servers.SelectedIndex=0;
                 state.Text=servers.Items.Count==0 ? "未发现服务器，可输入地址，或检查两台设备是否在同一局域网。" :
                     "已发现 " + servers.Items.Count + " 台服务器。请选择后连接。";
-            } catch { if (!IsDisposed) state.Text="查找未完成，可以手动填写地址。"; }
-            finally { if (!IsDisposed) scan.Enabled=true; }
+            } catch { if (!IsDisposed && !connecting) state.Text="查找未完成，可以手动填写地址。"; }
+            finally { if (!IsDisposed && !connecting) scan.Enabled=true; }
+        }
+
+        bool ApproveHost(string endpoint, string fingerprint)
+        {
+            if (IsDisposed || !IsHandleCreated) return false;
+            try {
+                return (bool)Invoke((Func<bool>)delegate {
+                    return !IsDisposed && MessageBox.Show(this,
+                        "服务器：" + endpoint + "\n指纹：" + fingerprint +
+                        "\n\n请与 Ubuntu 管理员提供的指纹核对。确认一致后才发送密码。",
+                        "确认 Ubuntu 服务器身份", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                        MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                });
+            } catch (InvalidOperationException) { return false; }
         }
 
         async void Connect()
         {
+            if (connecting) return;
             IPAddress address; int sshPort;
             string h=host.Text.Trim(), u=user.Text.Trim();
             if (!IPAddress.TryParse(h,out address) || !Discovery.IsPrivate(address) ||
@@ -320,25 +341,58 @@ namespace StudioWrightDesktop
             { state.Text="请填写有效的内网地址、Ubuntu 用户名和端口。"; return; }
             if (Connection.PortOpen(18920) || Connection.PortOpen(18888) || Connection.PortOpen(18922))
             { state.Text="本机连接端口正在使用，请先确认现有工作台连接。"; return; }
+            h=address.ToString();
+            string secret=password.Text;
+            password.Clear();
             string ssh=Path.Combine(Environment.SystemDirectory,@"OpenSSH\ssh.exe");
-            if (!File.Exists(ssh)) { state.Text="Windows 未安装 OpenSSH 客户端。"; return; }
+            if (secret.Length==0 && !File.Exists(ssh)) { state.Text="密钥连接需要 Windows OpenSSH；也可在此填写 Ubuntu 密码连接。"; return; }
+            connecting=true;
             connect.Enabled=scan.Enabled=false;
-            state.Text="正在连接；首次使用请在 SSH 窗口核对服务器身份并登录。";
+            servers.Enabled=host.Enabled=user.Enabled=port.Enabled=password.Enabled=false;
+            state.Text="正在连接 Ubuntu 并检查工作台……";
             string forwards=" -L 127.0.0.1:18920:127.0.0.1:18920 -L 127.0.0.1:18888:127.0.0.1:18888 -L 127.0.0.1:18922:127.0.0.1:18922";
             try {
-                var start=new ProcessStartInfo(ssh,"-N -o StrictHostKeyChecking=ask -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -p " + sshPort + forwards + " " + u + "@" + h);
-                start.UseShellExecute=true; start.WindowStyle=ProcessWindowStyle.Normal;
-                NewTunnel=Process.Start(start);
-                bool ok=await Task.Run(() => {
-                    Process process=NewTunnel;
-                    for(int i=0;i<60;i++) { if (Connection.StackReady()) return true; if(process==null || process.HasExited) return false; Thread.Sleep(1000); }
-                    return false;
+                var ready=await Task.Run(() => {
+                    bool passwordLogin=secret.Length!=0;
+                    IConnectionTunnel candidate=null;
+                    try {
+                        if (passwordLogin) {
+                            int[] ports={18920,18888,18922};
+                            candidate=PanelSsh.Open(h,sshPort,u,secret,Path.Combine(Program.DataDir,"UbuntuHostKeys"),
+                                fingerprint => ApproveHost(h+":"+sshPort,fingerprint),ports,ports);
+                        } else {
+                            var start=new ProcessStartInfo(ssh,"-N -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -p " + sshPort + forwards + " " + u + "@" + h);
+                            start.UseShellExecute=false; start.CreateNoWindow=true;
+                            candidate=new OpenSshTunnel(Process.Start(start));
+                        }
+                        for(int i=0;i<15;i++) {
+                            if (IsDisposed) return null;
+                            if (!candidate.IsAlive) break;
+                            if (Connection.StackReady()) {
+                                var result=candidate; candidate=null; return result;
+                            }
+                            Thread.Sleep(400);
+                        }
+                        throw new InvalidDataException(passwordLogin ?
+                            "已尝试连接，但工作台服务未通过检查。请核对 Ubuntu 服务状态。" :
+                            "密钥连接未完成。请核对已信任的服务器和 SSH 密钥，或在面板中填写密码。");
+                    } finally { secret=null; if(candidate!=null) candidate.Dispose(); }
                 });
-                if (IsDisposed) return;
-                if (ok) { Connection.StartManager(); DialogResult=DialogResult.OK; Close(); return; }
-                StopTunnel(); state.Text="连接未完成，请检查服务器身份、SSH 登录和服务状态。";
-            } catch { StopTunnel(); state.Text="无法启动连接，请检查 Windows OpenSSH。"; }
-            connect.Enabled=scan.Enabled=true;
+                if (IsDisposed) { if(ready!=null) ready.Dispose(); return; }
+                if (ready!=null) { NewTunnel=ready; Connection.StartManager(); DialogResult=DialogResult.OK; Close(); }
+            } catch (Renci.SshNet.Common.SshAuthenticationException) {
+                if (!IsDisposed) state.Text="Ubuntu 拒绝了密码登录，请核对用户名、密码及服务器登录设置。";
+            } catch (InvalidDataException error) {
+                if (!IsDisposed) state.Text=error.Message;
+            } catch {
+                if (!IsDisposed) state.Text="无法建立连接，请核对 Ubuntu 地址、端口及本机网络。";
+            } finally {
+                connecting=false;
+                if (!IsDisposed) {
+                    connect.Enabled=scan.Enabled=true;
+                    servers.Enabled=host.Enabled=user.Enabled=port.Enabled=password.Enabled=true;
+                }
+            }
         }
     }
 
@@ -348,7 +402,7 @@ namespace StudioWrightDesktop
         readonly Label message = new Label { Dock=DockStyle.Fill, TextAlign=ContentAlignment.MiddleCenter, Text="正在连接创作工作台……" };
         readonly NotifyIcon tray;
         readonly ToolStripStatusLabel status = new ToolStripStatusLabel("正在连接…");
-        Process tunnel;
+        IConnectionTunnel tunnel;
         bool exiting;
 
         public DesktopWindow()
@@ -368,7 +422,7 @@ namespace StudioWrightDesktop
             FormClosing+=delegate(object sender, FormClosingEventArgs e) {
                 if (!exiting && e.CloseReason==CloseReason.UserClosing) { e.Cancel=true; Hide(); }
             };
-            FormClosed+=delegate { tray.Visible=false;tray.Dispose();if(tunnel!=null && !tunnel.HasExited) try { tunnel.Kill(); } catch { } };
+            FormClosed+=delegate { tray.Visible=false;tray.Dispose();if(tunnel!=null) tunnel.Dispose(); };
             Shown+=async delegate {
                 bool ready=await Task.Run(() => Connection.WorkbenchReady());
                 if (!ready) ready=await Task.Run(() => Connection.TryReuseConfiguredConnection());
@@ -382,8 +436,8 @@ namespace StudioWrightDesktop
         void OpenConnection()
         {
             using(var dialog=new ConnectDialog()) {
-                if(dialog.ShowDialog(this)==DialogResult.OK) { tunnel=dialog.NewTunnel; ShowWorkbench(); }
-                else { status.Text="尚未连接";message.Text="尚未连接。点击左下角“连接”重新查找。"; }
+                if(dialog.ShowDialog(this)==DialogResult.OK) { if(tunnel!=null) tunnel.Dispose(); tunnel=dialog.NewTunnel; ShowWorkbench(); }
+                else if (!Connection.WorkbenchReady()) { status.Text="尚未连接";message.Text="尚未连接。点击左下角“连接”重新查找。"; }
             }
         }
 

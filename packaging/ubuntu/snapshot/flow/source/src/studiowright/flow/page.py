@@ -639,13 +639,41 @@ class FlowPage:
         if options.resolution:
             await self._radio(pane, text=options.resolution)
         if options.duration:
-            await self._radio(pane, text=duration_pattern(options.duration))
+            if options.model.duration_control == 'slider':
+                await self._duration_slider(pane, options.duration)
+            else:
+                await self._radio(pane, text=duration_pattern(options.duration))
         await self._radio(pane, text=count_pattern(options.count))
         await self.page.wait_for_timeout(200)
         price = credit_price(await pane.inner_text())
         await self.page.keyboard.press("Escape")
         await self.page.wait_for_timeout(250)
         return price
+
+    async def _duration_slider(self, pane, seconds: int) -> None:
+        """Omni 1.2 exposes duration as an ARIA slider (3-15 s): focus it, step with
+        arrow keys, and confirm the value the control reports."""
+        try:
+            dump = await pane.evaluate('(el) => el.outerHTML')
+            (Path.home() / '.local/state/creative-unified-workbench/duration-pane-dump.html').write_text(dump, encoding='utf-8')
+        except Exception:
+            pass
+        handle = pane.locator('input[type=range]').first
+        try:
+            await handle.wait_for(state='visible', timeout=4000)
+        except Exception as exc:
+            raise FlowError('the duration slider was not found for this model') from exc
+        lo = int(await handle.get_attribute('min') or 0)
+        hi = int(await handle.get_attribute('max') or 12)
+        value = int(await handle.input_value() or lo)
+        match = re.search(r'(\d+)\s*秒', await pane.inner_text())
+        offset = (int(match.group(1)) - value) if match else 3
+        target = max(lo, min(hi, seconds - offset))
+        await handle.evaluate('(el, v) => { el.value = v; el.dispatchEvent(new Event("input", {bubbles: true})); el.dispatchEvent(new Event("change", {bubbles: true})); }', target)
+        await self.page.wait_for_timeout(250)
+        match = re.search(r'(\d+)\s*秒', await pane.inner_text())
+        if not match or int(match.group(1)) != seconds:
+            raise FlowError(f'the duration slider shows {(match.group(1) if match else "?")!r}, wanted {seconds} s')
 
     # --- media ------------------------------------------------------------------------
     async def _open_file_chooser(self) -> FileChooser:

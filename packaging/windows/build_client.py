@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import zipfile
+from fetch_ssh import prepare
 
 BASE = Path(__file__).resolve().parent
 PAYLOAD = BASE / 'client-payload'
@@ -24,13 +25,17 @@ def main():
     sdk = ['Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll', 'WebView2Loader.dll']
     if not all((PAYLOAD / name).is_file() for name in sdk):
         raise SystemExit('请先准备 WebView2 SDK。')
+    prepare(PAYLOAD)
     desktop = PAYLOAD / 'StudioWright.exe'
     compile_desktop = [str(CSC), '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/codepage:65001',
                        '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll',
                        *['/r:' + str(PAYLOAD / name) for name in sdk[:2]],
+                       '/r:' + str(PAYLOAD / 'Renci.SshNet.dll'),
+                       '/resource:' + str(BASE / 'studiowright.ico') + ',StudioWright.AppIcon.ico',
                        '/win32icon:' + str(BASE / 'studiowright.ico'), '/out:' + str(desktop),
-                       str(BASE / 'client/Desktop.cs')]
+                       str(BASE / 'client/Desktop.cs'), str(BASE / 'client/PanelSsh.cs')]
     subprocess.run(compile_desktop, check=True)
+    (PAYLOAD / 'StudioWright.exe.config').write_bytes((BASE / 'client/StudioWright.exe.config').read_bytes())
     count = 0
     with zipfile.ZipFile(payload_zip, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=5) as zipf:
         for path in sorted(PAYLOAD.rglob('*')):

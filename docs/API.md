@@ -85,9 +85,9 @@ print(call("/api/real-pool/image-analysis-validate", payload, rid))
 
 **`POST /api/real-pool/flow`** · 传 kind、confirm: true 和 params。返回 request_id、status、task_id；submitted 表示已排队。
 
-单图或单视频（`count: 1`，含参考素材）默认开启安全换号重试，最多换 3 个账号。图片仅在确认未发送时重试；视频沿用 `max_credits`。结果不明时暂停核对；传 `auto_retry: false` 可关闭。查询和下载始终使用原 `task_id`，每次尝试的账号、状态和失败原因在 `retry.attempts` 中记录。
+单图或单视频（`count: 1`，含参考素材）由平台统一管理失败后的重试，最多增加 3 次尝试。仅在后台确认符合重试条件时继续，结果不明时暂停核对。查询和下载始终使用原 `task_id`；每次尝试的账号、状态和失败原因在 `retry.attempts` 中记录。调用方不要传 `auto_retry`；当前实现忽略该字段，不能通过它关闭重试。
 
-在 `params` 里填写 `prompt`、`model`、`aspect`、`count`、`resolution`、`duration` 和 `max_credits`。模型 ID 从快照取；视频填写可接受的积分上限，图片填 0。账号和项目由工作台安排。
+在 `params` 里填写 `prompt`、`model`、`aspect`、`count`、`resolution` 和 `duration`。模型 ID 从快照取；账号和项目由工作台安排。积分按 Flow 实际报价计费，平台不设单笔积分上限。`max_credits` 可省略；旧调用携带该字段仍可兼容，但不会形成有效上限。
 
 **复制纯文字生成请求 · 实际提交**
 
@@ -95,11 +95,11 @@ print(call("/api/real-pool/image-analysis-validate", payload, rid))
 rid = str(uuid4())
 print("请求编号:", rid, flush=True)
 payload = {
-    "kind": "image",  # 生视频时改为 video，并填写对应模型、时长和积分上限
+    "kind": "image",  # 生视频时改为 video，并填写对应模型和时长
     "confirm": True,
     "params": {"prompt": "一张清晨海边的照片", "model": "填写快照中的模型 ID",
                "aspect": "16:9", "count": 1, "resolution": "720p",
-               "duration": 8, "max_credits": 0}
+               "duration": 8}
 }
 print(call("/api/real-pool/flow", payload, rid))
 ```
@@ -128,11 +128,11 @@ ref = call(f"/api/real-pool/flow-references/auto/{uuid4()}/{ext}",
 payload = {
     "kind": "video", "confirm": False,
     "params": {"prompt": "镜头平稳前推", "model": "veo-fast", "aspect": "16:9",
-               "count": 1, "resolution": "720p", "duration": 8, "max_credits": 0,
+               "count": 1, "resolution": "720p", "duration": 8,
                "mode": "frames", "start_reference_id": ref["reference_id"]}
 }
 print(call("/api/real-pool/flow-validate", payload, rid))
-# 正式提交：填写允许的积分上限，将 confirm 改成 True，再调用 /api/real-pool/flow。
+# 正式提交：将 confirm 改成 True，再调用 /api/real-pool/flow，可能消耗生成积分。
 ```
 
 ## 结果与下载

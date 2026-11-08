@@ -32,3 +32,5 @@ python-*-embed-amd64.zip
 /packaging/windows/client-payload/runtime/
 /packaging/windows/client-payload/*.dll
 /packaging/windows/client-payload/*.exe
+/packaging/windows/client-payload/StudioWright.exe.config
+/packaging/windows/client-payload/licenses/

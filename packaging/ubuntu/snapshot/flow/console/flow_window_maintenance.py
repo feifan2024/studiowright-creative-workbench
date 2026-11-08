@@ -21,7 +21,7 @@ def gate(account,*,manual=False,now=None):
     if account.get('state')!='verified':return 'account_not_verified'
     with closing(sqlite3.connect(F/'console-data/console.db')) as db:
         # Any queued user task has priority over idle interaction.
-        if db.execute("SELECT count(*) FROM tasks WHERE status IN ('queued','running')").fetchone()[0]:return 'tasks_have_priority'
+        if db.execute("SELECT count(*) FROM flow_task_execution_rows WHERE status IN ('queued','running')").fetchone()[0]:return 'tasks_have_priority'
         finished=db.execute('SELECT max(finished) FROM tasks WHERE profile=?',(profile,)).fetchone()[0] or 0
     with closing(sqlite3.connect(F/'data/studiowright.db')) as db:
         if db.execute("SELECT count(*) FROM jobs WHERE profile=? AND status IN ('queued','running')",(profile,)).fetchone()[0]:return 'account_busy'

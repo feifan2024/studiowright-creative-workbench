@@ -206,7 +206,11 @@ class OfficialRuntime:
         bad=terminal and not incomplete and generic_refusal(response)
         success=terminal and not incomplete and not bad
         provider_error=str((answer or {}).get('error') or '') if isinstance(answer,dict) else ''
-        reason=('verification_required' if re.search(r'verify your account|VALIDATION_REQUIRED',provider_error,re.I) else
+        print_timeout=(not terminal and isinstance(answer,dict) and
+                       (answer.get('finished_reason')=='print_timeout'
+                        or bool(re.match(r'^print timeout after\b',provider_error,re.I))))
+        reason=('timeout_unconfirmed' if print_timeout else
+                'verification_required' if re.search(r'verify your account|VALIDATION_REQUIRED',provider_error,re.I) else
                 'quota_or_rate_limit' if re.search(r'quota|rate.limit|RESOURCE_EXHAUSTED|\b429\b',provider_error,re.I) else
                 'provider_connection_failed' if re.search(r'ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|fetch failed|network error',provider_error,re.I) else
                 'provider_unavailable' if re.search(r'\b50[0234]\b|SERVICE_UNAVAILABLE|upstream unavailable',provider_error,re.I) else
@@ -214,11 +218,14 @@ class OfficialRuntime:
         if submitted and not error and first is None and auth_failure_proven(auth_markers,answer,stdout_lines):
             submitted=False;reason=AUTH_UNSENT
         if incomplete or bad:reason=INCOMPLETE_REPLY if incomplete else BAD_REPLY
-        explicit_failure=not error and isinstance(answer,dict) and answer.get('status')=='ERROR' and first is None and not nonempty
+        explicit_failure=not error and not print_timeout and isinstance(answer,dict) and answer.get('status')=='ERROR' and first is None and not nonempty
         result={'submitted':submitted,'status':'completed' if success else 'failed' if terminal or explicit_failure or not submitted else 'unknown',
                 'reason':reason,'response':response if nonempty else ''.join(chunks) or None,
                 'native':answer.get('conversation_id') if terminal else native,'first_text_ms':first,'total_ms':elapsed,
                 'token_count':(answer.get('usage') or {}).get('total_tokens') if isinstance(answer,dict) else None}
+        # Set only for a terminal CLI receipt, after that process has exited.
+        if print_timeout and not error and submitted:
+            result['cli_print_timeout']=True
         with (audit/'result.json').open('x',encoding='utf-8') as f:
             os.fchmod(f.fileno(),0o600);json.dump(result,f,ensure_ascii=False);f.flush();os.fsync(f.fileno())
         return result

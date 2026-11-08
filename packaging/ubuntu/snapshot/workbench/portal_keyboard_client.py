@@ -72,7 +72,7 @@ class PortalKeyboard:
             await asyncio.sleep(.2)
         raise RuntimeError('desktop_keyboard_authorization_timeout')
 
-    async def _send(self, action, **values):
+    async def _send(self, action, timeout=3, **values):
         if self.target is None:
             raise RuntimeError('desktop_keyboard_target_required')
         reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(self.path)), 3)
@@ -80,10 +80,14 @@ class PortalKeyboard:
             data = {'action':action, 'target':self.target, **values}
             writer.write((json.dumps(data, allow_nan=False)+'\n').encode())
             await asyncio.wait_for(writer.drain(), 3)
-            response = json.loads(await asyncio.wait_for(reader.readline(), 3))
+            response = json.loads(await asyncio.wait_for(reader.readline(), timeout))
             if response.get('ok') is not True: raise RuntimeError('desktop_keyboard_unavailable')
         finally:
             writer.close()
             await writer.wait_closed()
 
     async def paste(self): await self._send('paste')
+
+    async def type(self, text):
+        # The helper paces real keystrokes internally; the reply follows the last one.
+        await self._send('type', timeout=max(30.0, len(text) * 0.3), text=text)

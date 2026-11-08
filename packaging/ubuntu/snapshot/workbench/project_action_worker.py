@@ -123,7 +123,8 @@ async def delete_project(studio, data):
     try:
         q.execute('BEGIN IMMEDIATE');s.execute('BEGIN IMMEDIATE')
         if not q.execute('select 1 from projects where profile=? and id=?',(profile,project)).fetchone():raise SafeError('项目登记已变化。')
-        if q.execute("select 1 from tasks where profile=? and project=? and status in ('queued','running')",(profile,project)).fetchone():raise SafeError('项目有进行中的任务。')
+        queue = 'flow_task_execution_rows' if q.execute("SELECT 1 FROM sqlite_master WHERE name='flow_task_execution_rows' AND type='view'").fetchone() else 'tasks'
+        if q.execute(f"select 1 from {queue} where profile=? and project=? and status in ('queued','running')",(profile,project)).fetchone():raise SafeError('项目有进行中的任务。')
         if s.execute("select 1 from jobs where profile=? and project_id=? and status in ('queued','running')",(profile,project)).fetchone():raise SafeError('项目有进行中的任务。')
         if any('/project/'+project in p.url for p in studio.session.context.pages if p!=page):raise SafeError('项目正在其他窗口使用。')
         emit(phase='delete_submitted')

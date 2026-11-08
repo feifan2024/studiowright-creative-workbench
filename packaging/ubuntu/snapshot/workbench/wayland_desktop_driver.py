@@ -150,3 +150,22 @@ class WaylandDesktopDriver:
         await page.evaluate('(text) => navigator.clipboard.writeText(text)',prompt)
         if not await self.confirm_focus(target, page, composer): raise ValueError('focus_lost')
         await keyboard.paste()
+
+    async def copy_prompt_and_paste_chunks(self, page, composer, target, prompt, size=48):
+        """Real Ctrl+V per chunk; text arrives in several events, never one blob."""
+        import random
+        if not await self.confirm_focus(target, page, composer): raise ValueError('focus_lost')
+        from portal_keyboard_client import PortalKeyboard
+        keyboard = PortalKeyboard(target, gui_environment=self.env)
+        if not keyboard.ready():
+            from foreground_input import InputNotSubmitted
+            raise InputNotSubmitted('desktop_keyboard_not_ready')
+        chunks = [prompt[i:i + size] for i in range(0, len(prompt), size)]
+        for index, chunk in enumerate(chunks):
+            if not await self.confirm_focus(target, page, composer): raise ValueError('focus_lost')
+            await page.evaluate('(text) => navigator.clipboard.writeText(text)', chunk)
+            if not await self.confirm_focus(target, page, composer): raise ValueError('focus_lost')
+            await asyncio.sleep(random.uniform(.05, .18))
+            await keyboard.paste()
+            if index < len(chunks) - 1:
+                await asyncio.sleep(random.uniform(.12, .4))

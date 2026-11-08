@@ -134,6 +134,7 @@ class Studio:
         self.profile = profile
         # Only the console supplies this id; direct CLI/MCP jobs remain independent.
         self.console_task_id: str | None = None
+        self.console_attempt_ordinal = 0
         self.store = store or Store()
         self.governor = Governor(self.store, profile)
         self._playwright: Playwright | None = None
@@ -660,6 +661,7 @@ class Studio:
                 "count": request.options.count,
                 "refs": list(request.refs),
                 "origin_console_task": self.console_task_id,
+                "origin_console_attempt": self.console_attempt_ordinal,
             },
         )
         started = time.time()
@@ -739,6 +741,7 @@ class Studio:
                 "end": request.end,
                 "refs": list(request.refs),
                 "origin_console_task": self.console_task_id if not request.dry_run else None,
+                "origin_console_attempt": self.console_attempt_ordinal if not request.dry_run else None,
             },
         )
         started = time.time()

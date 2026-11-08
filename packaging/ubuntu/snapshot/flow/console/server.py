@@ -35,7 +35,7 @@ from remote_login import RemoteLogins
 HERE = Path(__file__).resolve().parent
 PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 KINDS = {"sync", "login", "media", "doctor", "quote", "image", "video"}
-RETRYABLE_INPUT_STOPS = frozenset(('pasted_text_mismatch', 'pre_submit_failed:pointer_not_over_input', 'pre_submit_failed:desktop_keyboard_authorization_timeout'))
+RETRYABLE_INPUT_STOPS = frozenset(('pasted_text_mismatch', 'pre_submit_failed:pointer_not_over_input', 'pre_submit_failed:desktop_keyboard_authorization_timeout', 'window_focus_lost', 'composer_unavailable', 'window_activation_unconfirmed'))
 
 
 def safe_error(exc):
@@ -90,20 +90,21 @@ class Console:
     async def execute(self, task):
         # This second check is before the adapter is called, so a racing restriction
         # can safely leave the existing task in the queue without resubmission.
+        ordinal = task.get('attempt_ordinal', 0)
         try:
             if task['kind'] in RETRY_KINDS and not self.desktop_keyboard_ready():
-                self.store.release_unsubmitted(task['id'])
+                self.store.release_unsubmitted(task['id'], task.get('attempt_ordinal', 0))
                 self.release_profile(task)
                 return
             database = self.root / 'data/studiowright.db'
             if task['kind'] in {'image', 'video'} and not (self.test and not database.exists()):
                 status = account_status([{'profile': task['profile']}], database)[0]
                 detail = self.store.retry_detail(task['id'])
-                switched = detail and detail['reason'] == 'switch_account'
+                switched = (task.get('retry_reason') or (detail or {}).get('reason')) == 'switch_account'
                 if (status['generation_state'] != 'not_cooling_down' or status['risk_paused'] is not False
                         or (switched and (task['profile'] not in self.switch_ready_profiles()
                                           or not self.retry_project_matches(task['profile'], task['project'])))):
-                    self.store.release_unsubmitted(task['id'])
+                    self.store.release_unsubmitted(task['id'], task.get('attempt_ordinal', 0))
                     self.release_profile(task)
                     return
         except Exception:
@@ -123,8 +124,8 @@ class Console:
                     self.store.project(task["profile"], project["id"], project["title"])
             if task['kind'] in ('image','video'):
                 from task_coordinator import Coordinator
-                result['self_recovery'] = Coordinator().events(task['id'])
-            self.store.finish(task["id"], result)
+                result['self_recovery'] = [e for e in Coordinator().events(task['id']) if e['created'] >= (task.get('started') or 0)]
+            self.store.finish(task["id"], result, attempt_ordinal=ordinal)
         except asyncio.CancelledError:
             # Leave running state for recovery. Never imply generation was cancelled.
             raise
@@ -133,7 +134,7 @@ class Console:
             retry_evidence = None
             with contextlib.suppress(Exception):
                 exact = getattr(self.adapter, 'source_jobs_for_task', None)
-                linked = list(exact(task['profile'], task['id'])) if exact and task['kind'] in ('image', 'video') else []
+                linked = self.source_receipts(task) if exact and task['kind'] in ('image', 'video') else []
                 rows = linked if task['kind'] in ('image', 'video') else self.adapter.source_jobs(task["profile"])
                 for r in rows:
                     r = dict(r)
@@ -185,8 +186,8 @@ class Console:
             result = {"source_jobs": provenance}
             if task['kind'] in ('image','video'):
                 from task_coordinator import Coordinator
-                result['self_recovery'] = Coordinator().events(task['id'])
-            self.store.finish(task["id"], result, safe_error(exc) or type(exc).__name__, retry_evidence)
+                result['self_recovery'] = [e for e in Coordinator().events(task['id']) if e['created'] >= (task.get('started') or 0)]
+            self.store.finish(task["id"], result, safe_error(exc) or type(exc).__name__, retry_evidence, attempt_ordinal=ordinal)
         finally:
             if task["kind"] == "session_import":
                 with contextlib.suppress(Exception):
@@ -198,6 +199,23 @@ class Console:
             await self.execute(task)
         finally:
             slot.close()
+            # A retryable completion selects directly from the current healthy
+            # pool after releasing this attempt's account and dispatch slot.
+            # The periodic scheduler only backs up tasks already waiting.
+            if task['kind'] in RETRY_KINDS:
+                info = self.store.retry_detail(task['id'])
+                if (info and info['state'] == 'pending_switch'
+                        and not self.dispatch_limit.marker.exists()
+                        and not self.dispatch_limit.marker.is_symlink()
+                        and not (self.dispatch_limit.root/'flow-stress-once.json').exists()
+                        and self.desktop_keyboard_ready()):
+                    with contextlib.suppress(Exception):
+                        self.schedule_pending_switches()
+
+    def source_receipts(self, task):
+        get = self.adapter.source_jobs_for_task
+        ordinal = task.get('attempt_ordinal', 0)
+        return list(get(task['profile'], task['id'], ordinal) if ordinal else get(task['profile'], task['id']))
 
     def reconcile_rejected_windows(self, coordinator=None):
         """A provider rejection is not an unknown result, if correlated to one failed attempt."""
@@ -209,12 +227,12 @@ class Console:
             if window['profile'] in self.busy:
                 continue
             with contextlib.suppress(OSError, ValueError, KeyError, TypeError, sqlite3.Error):
-                task = self.store.task(window['task_id'])
+                task = self.store.latest_execution(window['task_id'], profile=window['profile'])
                 if (not task or task['status'] != 'failed' or not task['finished']
                         or task['profile'] != window['profile'] or task['kind'] not in ('image', 'video')
                         or task['params'].get('count') != 1):
                     continue
-                linked = list(self.adapter.source_jobs_for_task(task['profile'], task['id']))
+                linked = self.source_receipts(task)
                 if len(linked) != 1:
                     continue
                 source = dict(linked[0])
@@ -267,7 +285,7 @@ class Console:
                 if self.keyboard_warmup and self.keyboard_warmup.done():
                     self.keyboard_warmup = None
             else:
-                demand = self.store.rows("""SELECT 1 FROM tasks WHERE status='queued' AND kind IN ('image','video')
+                demand = self.store.rows("""SELECT 1 FROM flow_task_execution_rows WHERE status='queued' AND kind IN ('image','video')
                     UNION ALL SELECT 1 FROM flow_retry_roots WHERE state='pending_switch' LIMIT 1""")
                 if demand and self.keyboard_warmup is None:
                     self.keyboard_warmup = asyncio.create_task(self.prepare_desktop_keyboard())
@@ -308,7 +326,7 @@ class Console:
                         slot.close()
                         break
                     if scope and not validate_task(task, scope, self.store):
-                        self.store.release_unsubmitted(task['id'])
+                        self.store.release_unsubmitted(task['id'], task.get('attempt_ordinal', 0))
                         slot.close()
                         break
                     self.busy.add(task["profile"])
@@ -366,10 +384,13 @@ class Console:
             attempts = info['attempts']
             used = {a['profile'] for a in attempts}
             ordinal = attempts[-1]['ordinal'] + 1
-            minimum = params['max_credits'] if original['kind'] == 'video' else 1
+            minimum = 1
             eligible = [p for p in projects if p[0] not in used and p[3] >= minimum]
             if not eligible:
-                if now - row['updated'] >= 900:
+                # Cooling, busy windows, stale credit or missing projects are
+                # temporary: keep the root queued until an account is usable.
+                pool = {account['profile'] for account in self.store.accounts()}
+                if pool and pool <= used:
                     self.store.stop_retry_wait(root, 'no_account')
                 continue
             source_account = self.store.account(original['profile'])
@@ -510,7 +531,7 @@ class Console:
                 raise ValueError("当前生成类型不支持这个画面比例。")
             if (
                 type(params["duration"]) is not int
-                or params["duration"] not in (4, 6, 8, 10)
+                or params["duration"] not in (tuple(range(3, 16)) if params.get("model") == "omni-flash-2" else (4, 6, 8, 10))
                 or params["resolution"] not in ("360p", "720p")
             ):
                 raise ValueError("视频时长或清晰度不正确。")
@@ -535,7 +556,9 @@ class Console:
             return out, retry
         latest = retry['attempts'][-1]
         state = retry['state']
-        current = row if latest['id'] == row['id'] else self.store.task(latest['id'])
+        ordinal = latest.get('attempt_ordinal', 0)
+        current = (row if latest['id'] == row['id'] and not ordinal else
+                   self.store.execution(latest['id'], ordinal))
         if current is None:
             out.update(status='interrupted',result=None,error='重试记录待核对。')
             return out, retry
@@ -829,23 +852,31 @@ def create_app(root, adapter, test=False):
                 c.vault.remove(row["params"]["bundle_id"])
         return JSONResponse({"ok": True})
 
+    def public_task_lookup(ident):
+        retry = c.store.retry_detail(ident)
+        root = retry['root_id'] if retry else ident
+        return c.store.task(root), root
+
     async def task_status(request):
-        row = c.store.task(request.path_params['ident'])
+        ident = request.path_params['ident']
+        row, root = public_task_lookup(ident)
         if not row:
             return JSONResponse({'error':'任务不存在。'}, status_code=404)
         public = c.public_task(row)
         data = {key:public[key] for key in ('id','kind','status','created','finished','downloads','retry')}
         # The API response omits prompts, reference IDs and internal error details.
         data['task_id'] = data['id']
+        if ident != root:
+            data['requested_task_id'] = ident
         data['downloads'] = [{'path':item['url'],'name':item['name']} for item in data['downloads']]
         if data['retry']:
             data['retry'] = dict(data['retry'], attempts=[
-                {key:a[key] for key in ('id','ordinal','status','started','finished')}
+                {key:a[key] for key in ('ordinal','reason','status','started','finished')}
                 for a in data['retry']['attempts']])
         return JSONResponse(data)
 
     async def download(request):
-        row = c.store.task(request.path_params["ident"])
+        row, _ = public_task_lookup(request.path_params["ident"])
         if row:
             row, _ = c.task_view(row)
             paths = []

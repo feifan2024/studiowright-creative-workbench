@@ -53,6 +53,7 @@ def read_status(database, runtime=None):
             controls = {r['account_key']: dict(r) for r in db.execute('SELECT account_key,gemini_enabled FROM account_preferences')}
             latest = {}
             latest_probes = {}
+            latest_successes = {}
             for row in db.execute('''SELECT r.request_id,r.account_key,r.status,r.created,r.finished,r.response,r.note,
                 t.conversation_id,m.first_text_ms,m.total_ms,am.model FROM requests r
                 JOIN conversation_turns t USING(request_id)
@@ -87,9 +88,16 @@ def read_status(database, runtime=None):
                     if row['readiness_probe'] and key not in latest_probes:
                         latest_probes[key]={'request_id':row['request_id'],'status':row['status'],'reason':row['reason'],
                                            'finished':number(row['finished']),'total_ms':number(row['total_ms'])}
+                    finished=number(row['finished'])
+                    if (row['status']=='completed' and isinstance(row['response'],str) and row['response'].strip()
+                            and finished is not None and finished>(latest_successes.get(key) or {}).get('finished',0)):
+                        latest_successes[key]={'request_id':row['request_id'],'finished':finished,'total_ms':number(row['total_ms'])}
                     previous=latest.get(key)
-                    if previous and (previous['created']>created or
-                                     previous['created']==created and previous['request_id']!=row['request_id']):continue
+                    event_at=finished if row['status']=='completed' and finished is not None else created
+                    previous_at=((previous.get('finished') or previous['created']) if previous.get('outcome')=='succeeded'
+                                 else previous['created']) if previous else 0
+                    if previous and (previous_at>event_at or
+                                     previous_at==event_at and previous['request_id']!=row['request_id']):continue
                     outcome,verification=classify(row['status'],row['response'],row['note'],row['blocked'])
                     model=row['model']
                     latest[key]={'request_id':row['request_id'],'conversation_id':row['conversation_id'],
@@ -108,6 +116,7 @@ def read_status(database, runtime=None):
                 call = latest.get(key)
                 result['accounts'].append({'account_key': key, 'paused': paused, 'pause_source': pause_source, 'latest_call': call,
                     'latest_probe': latest_probes.get(key),
+                    'latest_success': latest_successes.get(key),
                     'block_reason': runtime_accounts.get(key, {}).get('block_reason'),
                     'authorization': runtime_accounts.get(key, {}).get('authorization', 'not_connected'),
                     'dispatch_eligible': runtime_accounts.get(key, {}).get('dispatch_eligible', False),

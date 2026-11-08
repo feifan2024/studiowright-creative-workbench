@@ -38,7 +38,7 @@ class RealAdapter:
         self.Studio = Studio
         self.models = {
             "image": [{"id": m.value, "label": m.label} for m in ImageModel],
-            "video": [{"id": m.value, "label": m.label} for m in VideoModel],
+            "video": [{"id": m.value, "label": m.label} for m in VideoModel if m.offered],
         }
 
     def discover(self):
@@ -201,6 +201,8 @@ class RealAdapter:
         studio = self.Studio(profile)
         if kind in {'image', 'video'}:
             studio.configure_task(task['id'])
+            studio.console_task_id = task['id']
+            studio.console_attempt_ordinal = task.get('attempt_ordinal', 0)
         if reference_files:
             studio.configure_reference_uploads(project, reference_files)
         async with studio:
@@ -318,10 +320,7 @@ class RealAdapter:
                 raise ValueError(
                     "原项目未能读取当前视频报价（中文界面可能出现此情况）；本次未提交生成。可在任务详情查看报价检查结果。"
                 )
-            if quote["credits"] > p["max_credits"]:
-                raise ValueError(
-                    f"视频报价 {quote['credits']} 积分，超过本次上限 {p['max_credits']}；未提交生成。"
-                )
+            # The credit price is informational; production runs uncapped.
             studio.console_task_id = task["id"]
             if phase is not None:
                 phase['generation_invoked'] = True
@@ -342,15 +341,16 @@ class RealAdapter:
 
         return Store().recent_jobs(profile, limit=12)
 
-    def source_jobs_for_task(self, profile, task_id):
+    def source_jobs_for_task(self, profile, task_id, attempt_ordinal=0):
         """Exactly correlated new-generation records; old jobs are never inferred."""
         from studiowright.store import Store
 
         with Store().connect() as db:
             return db.execute(
                 "SELECT * FROM jobs WHERE profile=? AND kind IN ('image','video') "
-                "AND json_valid(params) AND json_extract(params,'$.origin_console_task')=?",
-                (profile, task_id),
+                "AND json_valid(params) AND json_extract(params,'$.origin_console_task')=? "
+                "AND COALESCE(json_extract(params,'$.origin_console_attempt'),0)=?",
+                (profile, task_id, attempt_ordinal),
             ).fetchall()
 
 

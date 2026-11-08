@@ -112,7 +112,8 @@ function safeRecordedNote(value) {
     .replace(/(?:access_token|refresh_token|authorization_code|code_verifier|cookie)\s*[:=]\s*[^\s,;]+/gi, '[授权信息已隐藏]');
 }
 function renderGeminiReply(record) {
-  if (record.status === 'dispatching' && record.attempts?.some(a => a.ordinal === 2 && a.status === 'running')) return '<p class="subtle">正在用原账号重试一次。</p>';
+  const retry=record.attempts?.find(a => a.ordinal > 1 && a.status === 'running');
+  if (record.status === 'dispatching' && retry) return `<p class="subtle">正在用原账号进行第 ${retry.ordinal-1} 次重试。</p>`;
   if (['queued','dispatching','running'].includes(record.status)) return `<p class="subtle">${record.status==='queued' ? '排队中，等待并发空位。' : '官方调用处理中。'} 不会重复提交。</p>`;
   const text=record.response ? `<p>${esc(record.response).replace(/\n/g,'<br>')}</p>` : '';
   const images=(record.images || []).filter(url=>/^\/api\/gemini-images\/[0-9a-f-]{36}\/[0-3]$/.test(url)).map(url=>`<a href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="历史生成图片" style="max-width:100%">查看或下载图片</a>`).join('');
@@ -145,11 +146,11 @@ function renderGeminiAttempts(attempts) {
     readiness_unexpected_reply:'云端验活回复与预期不符',
   };
   return attempts.map(attempt => {
-    const label = attempt.ordinal === 2 ? '自动重试（原账号）' : '首次尝试';
+    const label = attempt.ordinal > 1 ? `第 ${attempt.ordinal-1} 次重试（原账号）` : '首次尝试';
     const reason = attempt.reason ? reasons[attempt.reason] || '调用未完成' : attempt.status === 'failed' || attempt.status === 'unknown' ? '未收到可核对的结果' : '';
     const detail = [label, statuses[attempt.status] || '状态待核对', reason, attempt.submitted === 0 ? '未发送' : '', typeof attempt.total_ms === 'number' ? (attempt.total_ms / 1000).toFixed(2) + ' 秒' : ''].filter(Boolean).join(' · ');
-    const previous=attempt.ordinal===1 && attempts.length>1 && attempt.response
-      ? `<details><summary>查看首次回复</summary><p>${esc(attempt.response).replace(/\n/g,'<br>')}</p></details>` : '';
+    const previous=attempt!==attempts.at(-1) && attempt.response
+      ? `<details><summary>查看这次回复</summary><p>${esc(attempt.response).replace(/\n/g,'<br>')}</p></details>` : '';
     return `<small class="response-timing">${esc(detail)}</small>`+previous;
   }).join('');
 }
@@ -229,6 +230,9 @@ function accountIssues(account, snapshot = state.snapshot, geminiRow = null) {
   else if (['attention', 'unknown'].includes(account.flow_health))
     add('flow_unknown', 'Flow 状态待核对', '目前无法确认该账号的 Flow 是否可用。', '查看账号详情并核对 Flow 状态。');
 
+  const pageState = (flowReadinessObservation?.pageChecks?.accounts || {})[account.profile];
+  if (pageState && pageState !== 'ok')
+    add('flow_page_state', '页面未就绪：' + ({overlay:'页面有弹窗待关闭', binding:'窗口绑定待核对', project:'页面停在非标准项目', unconfirmed:'页面状态待确认', busy:'页面忙', draft:'有草稿待核对', login:'需要登录核验'}[pageState] || pageState), '点一键就绪，工作台会把页面带回标准项目并复查。', '使用一键就绪。');
   const windowIssue = flowWindowIssue(account.profile, snapshot);
   if (windowIssue) issues.push(windowIssue);
   for (const issue of geminiRow?.issues || []) add('gemini_'+(issue.key || 'blocked'),issue.title,'Gemini 当前就绪检查。',issue.action);
@@ -281,7 +285,7 @@ function renderGeminiAccountOptions(select, accounts) {
 }
 
 function syncQuickGeminiControls() {
-  $('geminiSend').disabled = true; // Legacy Gemini sender removed.
+  $('geminiSend').disabled = !geminiSelectionReady($('geminiAccount').value);
 }
 
 const workViews = new Set(["tasks", "conversations"]);
@@ -673,10 +677,10 @@ function renderTaskWindows() {
 function retryAttemptsMarkup(item, byProfile) {
   const attempts = item.retry?.attempts;
   if (!Array.isArray(attempts) || !attempts.length) return '';
-  return `<details class="task-recovery-record"><summary>原任务与换号记录（${attempts.length} 次尝试）</summary><ul>${attempts.map(a => {
+  return `<details class="task-recovery-record"><summary>原任务与重试记录（${attempts.length} 次尝试）</summary><ul>${attempts.map((a, index) => {
     const elapsed = a.started && a.finished ? ' · ' + (a.finished - a.started).toFixed(1) + ' 秒' : '';
     const reason = /PUBLIC_ERROR_UNUSUAL_ACTIVITY/i.test(a.failure_reason || '') ? 'Flow 检测到异常活动' : a.failure_reason;
-    return `<li>${a.ordinal ? '换号重试 ' + a.ordinal + '/3' : '原尝试'} · ${esc(byProfile.get(a.profile) || a.profile || '账号待核对')} · ${esc(labels.status[a.status] || a.status)}${esc(elapsed)}${reason ? ' · 失败原因：' + esc(reason) : ''}</li>`;
+    return `<li>${a.ordinal ? (a.profile === attempts[index - 1]?.profile ? '原账号重试 ' : '换号重试 ') + a.ordinal : '原尝试'} · ${esc(byProfile.get(a.profile) || a.profile || '账号待核对')} · ${esc(labels.status[a.status] || a.status)}${esc(elapsed)}${reason ? ' · 失败原因：' + esc(reason) : ''}</li>`;
   }).join('')}</ul></details>`;
 }
 
@@ -821,7 +825,7 @@ function renderTasks() {
   const accounts = new Map((snapshot.real_accounts?.items || []).map(a => [a.profile, a]));
   const reasons = new Map(tasks.map(item => [item.source_id, flowQueueReason(item, snapshot, accounts.get(item.source_profile))]));
   const taskMarkup = `<table><thead><tr><th>任务类型</th><th>项目 / 账号</th><th>状态</th><th>提交时间</th><th>任务编号</th><th>结果</th><th>来源</th></tr></thead><tbody>${tasks.map((item) => `
-    <tr class="task-kind-${["image", "video", "quote", "sync", "session_import", "check"].includes(item.kind) ? item.kind : "other"}"><td><strong>${esc(kindLabel(item.kind))}</strong>${item.retry ? `<br><span class="subtle">${item.retry.attempts?.length > 1 ? `已换号 ${item.retry.attempts.length - 1} 次` : "原任务"}</span>` : ''}</td><td class="table-title">${esc(item.project_title)}<br><span class="subtle">${esc(byProfile.get(item.source_profile) || item.source_profile)}</span></td><td>${flowTaskStatusBadge(item)}${reasons.get(item.source_id) ? '<br><span class="subtle">' + esc(reasons.get(item.source_id)) + '</span>' : ''}${item.note ? `<br><span class="subtle">${esc(item.note)}</span>` : ""}</td><td>${esc(dateTime(item.created))}</td><td><code title="${esc(item.source_id)}">${esc(shortId(item.source_id))}</code>${item.retry && item.retry.ordinal ? `<br><span class="subtle" title="${esc(item.retry.root_id)}">原任务 ${esc(shortId(item.retry.root_id))}</span>` : ''}</td><td>${taskFailureMarkup(item)}${retryAttemptsMarkup(item, byProfile)}${(item.downloads || []).map((file, index) => `<a class="text-link" href="http://127.0.0.1:18888${esc(file.path)}" target="_blank" rel="noopener noreferrer">下载${index + 1}</a>`).join(" ")}${item.recovered_path ? `<a class="text-link" href="${esc(item.recovered_path)}" target="_blank" rel="noopener noreferrer">打开已找回图片</a>` : ""}${item.recoverable ? `<button class="text-link" type="button" data-recover-flow="${esc(item.source_id)}">找回已生成图片</button>` : ""}${item.status !== "failed" && !(item.downloads || []).length && !item.recovered_path && !item.recoverable ? "—" : ""}</td><td><span class="source-chip">Flow</span></td></tr>`).join("")}</tbody></table>`;
+    <tr class="task-kind-${["image", "video", "quote", "sync", "session_import", "check"].includes(item.kind) ? item.kind : "other"}"><td><strong>${esc(kindLabel(item.kind))}</strong>${item.retry ? `<br><span class="subtle">${item.retry.attempts?.length > 1 ? `已重试 ${item.retry.attempts.length - 1} 次` : "原任务"}</span>` : ''}</td><td class="table-title">${esc(item.project_title)}<br><span class="subtle">${esc(byProfile.get(item.source_profile) || item.source_profile)}</span></td><td>${flowTaskStatusBadge(item)}${reasons.get(item.source_id) ? '<br><span class="subtle">' + esc(reasons.get(item.source_id)) + '</span>' : ''}${item.note ? `<br><span class="subtle">${esc(item.note.replace('换号重试已完成','重试已完成'))}</span>` : ""}</td><td>${esc(dateTime(item.created))}</td><td><code title="${esc(item.source_id)}">${esc(shortId(item.source_id))}</code>${item.retry && item.retry.ordinal ? `<br><span class="subtle" title="${esc(item.retry.root_id)}">原任务 ${esc(shortId(item.retry.root_id))}</span>` : ''}</td><td>${taskFailureMarkup(item)}${retryAttemptsMarkup(item, byProfile)}${(item.downloads || []).map((file, index) => `<a class="text-link" href="http://127.0.0.1:18888${esc(file.path)}" target="_blank" rel="noopener noreferrer">下载${index + 1}</a>`).join(" ")}${item.recovered_path ? `<a class="text-link" href="${esc(item.recovered_path)}" target="_blank" rel="noopener noreferrer">打开已找回图片</a>` : ""}${item.recoverable ? `<button class="text-link" type="button" data-recover-flow="${esc(item.source_id)}">找回已生成图片</button>` : ""}${item.status !== "failed" && !(item.downloads || []).length && !item.recovered_path && !item.recoverable ? "—" : ""}</td><td><span class="source-chip">Flow</span></td></tr>`).join("")}</tbody></table>`;
   // Keep opened task details and keyboard focus during an unchanged refresh.
   const table = $("taskTable");
   if (lastTaskMarkup !== taskMarkup || !table.querySelector('table')) {
@@ -894,7 +898,7 @@ function flowGovernance(snapshot, fresh = state.snapshotFresh, verifiedEmpty = n
     if (!window || !['idle','preparing','submitting','submitted','generated','downloading','blocked_draft','result_unknown','needs_verification'].includes(window.state))
       add('flow_binding','任务窗口运行状态待核对','打开调度中心核对固定窗口。');
     if (window?.state==='blocked_draft' && !(verifiedEmpty.has(account.profile) && window.updated <= probeStartedAt))
-      add('flow_draft','任务窗口有保留草稿','在对应 Ubuntu 窗口保存或处理草稿，再核对任务窗口。');
+      add('flow_draft','固定任务窗口有草稿或附件','点 Flow 一键就绪，工作台会刷新固定任务页并复查。');
     if (!issues.some(issue=>issue.key.startsWith('flow_window_') || issue.key==='flow_draft')) {
       const life=lifecycle.get(account.profile);
       if (c?.window_lifecycle_available!==true || life?.unique_ok!==1)
@@ -909,12 +913,12 @@ function flowGovernance(snapshot, fresh = state.snapshotFresh, verifiedEmpty = n
   return {rows,shared,eligible,ready:known ? eligible.length : null};
 }
 
-let flowReadinessObservation=null, flowReadinessReadAt=0;
+let flowReadinessObservation=null, flowReadinessReadAt=0, lastFlowReadiness=null;
 
 function rememberFlowReadiness(pageChecks,dispatch) {
   if (!pageChecks?.accounts || !Number.isFinite(pageChecks.checked_at) || dispatch?.available!==true) return;
   if (flowReadinessObservation?.pageChecks.checked_at>pageChecks.checked_at) return;
-  flowReadinessObservation={pageChecks,dispatch};
+  flowReadinessObservation={pageChecks,dispatch,receivedAt:performance.now()};
 }
 
 async function refreshFlowReadinessStatus() {
@@ -942,20 +946,34 @@ function readinessBadge(row) {
 
 function flowReadiness(snapshot) {
   const obs=flowReadinessObservation;
-  const age=obs ? Date.now()/1000-obs.pageChecks.checked_at : Infinity;
-  const fresh=state.snapshotFresh && snapshot?.real_accounts?.available===true && age>=-5 && age<=90;
-  const rows=fresh ? auditFlowAccounts(snapshot,obs.dispatch,obs.pageChecks,obs.pageChecks.checked_at) : [];
+  // Use time since receipt in this client; Windows and Ubuntu clocks may differ.
+  const now=performance.now();
+  const age=obs ? (now-obs.receivedAt)/1000 : Infinity;
+  const fresh=state.snapshotFresh && snapshot?.real_accounts?.available===true && age<=90;
+  const accounts=snapshot?.real_accounts?.items || [];
+  const signature=JSON.stringify(accounts.map(account=>account.key).sort());
+  if (!fresh) {
+    if (lastFlowReadiness?.signature===signature && now-lastFlowReadiness.receivedAt<=180000)
+      return {...lastFlowReadiness.result,stale:true};
+    return {ready:null,usableBalance:null,rows:new Map(),stale:false};
+  }
+  const rows=auditFlowAccounts(snapshot,obs.dispatch,obs.pageChecks,obs.pageChecks.checked_at);
   const eligible=rows.filter(countsAsReady).map(row=>row.account);
-  return {ready:fresh ? eligible.length : null,
-    usableBalance:fresh ? eligible.reduce((sum,account)=>sum+account.flow_balance,0) : null,
-    rows:new Map(rows.map(row=>[row.account.profile,row]))};
+  const result={ready:eligible.length,
+    usableBalance:eligible.reduce((sum,account)=>sum+account.flow_balance,0),
+    rows:new Map(rows.map(row=>[row.account.profile,row])),stale:false};
+  lastFlowReadiness={signature,receivedAt:obs.receivedAt,result};
+  return result;
 }
 
 function geminiReadiness(snapshot) {
   const known=snapshot?.real_accounts?.available===true && state.channelStatus?.available && !channelReadFailed;
   const rows=known ? auditGeminiAccounts(snapshot,state.channelStatus,officialQuotaReadFailed ? null : officialQuotaData) : [];
-  const checked=known && rows.some(row=>row.status!=='unknown' || row.checking);
-  return {ready:checked ? rows.filter(countsAsReady).length : null,
+  const ready=rows.filter(countsAsReady).length;
+  const checked=known && rows.length>0 && (ready>0 || rows.every(row=>accountReadinessStatus(row)==='blocked'));
+  return {ready:checked ? ready : null,
+    blocked:rows.filter(row=>accountReadinessStatus(row)==='blocked').length,
+    pending:rows.filter(row=>['unknown','checking'].includes(accountReadinessStatus(row))).length,
     rows:new Map(rows.map(row=>[row.account.key,row]))};
 }
 
@@ -974,10 +992,10 @@ function renderAccountInsights(snapshot, target) {
   const accounts = snapshot?.real_accounts?.items || [];
   const records = accounts.map(officialAccount);
   const officialKnown = state.channelStatus?.available && !channelReadFailed;
-  const succeeded = records.filter(r=>r.outcome==='succeeded');
-  const timing = succeeded.map(r=>r.call?.total_ms).filter(n=>typeof n==='number' && Number.isFinite(n));
+  const timing = records.map(r=>r.data?.latest_success?.total_ms ?? (r.outcome==='succeeded' ? r.call?.total_ms : null))
+    .filter(n=>typeof n==='number' && Number.isFinite(n));
   const latency = officialKnown && timing.length ? (timing.reduce((a,b)=>a+b,0)/timing.length/1000).toFixed(1) : '—';
-  const {ready:flowReady,usableBalance}=flowReadiness(snapshot);
+  const {ready:flowReady,usableBalance,stale:flowStale}=flowReadiness(snapshot);
   const health = flowReady!=null && accounts.length ? flowReady/accounts.length*100 : null;
   const healthCounts = flow?.health_counts;
   const flowCurrent = healthCounts && ['ready','cooling','attention','empty','paused'].every(k=>Number.isInteger(healthCounts[k]))
@@ -987,16 +1005,16 @@ function renderAccountInsights(snapshot, target) {
   const coverage = !yesterday || yesterday.coverage==='not_recorded' ? '昨日暂无覆盖记录'
     : `${yesterday.completed ?? '—'} 个完成 · ${yesterday.unpriced ?? '—'} 个未记价格${yesterday.unresolved ? ` · ${yesterday.unresolved} 个待确认` : ''}${yesterday.coverage==='partial' ? ' · 数据不完整' : ''}`;
   const dispatch = state.channelStatus?.dispatch;
-  const {ready:eligible}=geminiReadiness(snapshot);
-  const ring = (service,ready)=>{
+  const {ready:eligible,blocked:geminiBlocked,pending:geminiPending}=geminiReadiness(snapshot);
+  const ring = (service,ready,override)=>{
     const total=accounts.length;
     const known=ready!=null && total>0;
     const rest=known ? total-ready : null;
-    const label=rest==null ? '状态待核对' : rest>0 ? `${amount(rest)} 个未就绪` : '';
+    const label=override ?? (rest==null ? '状态待核对' : rest>0 ? `${amount(rest)} 个未就绪` : '');
     const buttonLabel='一键就绪';
     return `<button type="button" class="dashboard-ring-item governance-entry" data-governance="${service.toLowerCase()}" aria-controls="governanceDialog" aria-label="${service} ${buttonLabel}，${known ? `就绪 ${amount(ready)} / ${total}` : '状态待核对'}"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${total || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-entry-label">${buttonLabel} →</span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></button>`;
   };
-  target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady)}${ring('GEMINI',eligible)}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${accounts.length} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
+  target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiPending ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending+' 个待确认'].filter(Boolean).join(' · ') : null)}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${accounts.length} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
   <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-runtime-activate="flow">检查授权与额度</button><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话轮询分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
   $('dashboardRuntime').replaceChildren(scope.querySelector('[data-dashboard-running]'));
   scope.querySelector('[data-dashboard-ring="FLOW"]').style.setProperty('--fill',`${health ?? 0}%`);
@@ -1122,13 +1140,17 @@ function auditFlowAccounts(snapshot, dispatch, pageChecks, probeStartedAt) {
       unique:['发现多窗口或任务页数量不符','保留手工页面和草稿，核对哪一个是固定任务窗口。'],
       project:['任务窗口不在该账号的已登记项目','核对对应项目与固定窗口绑定。'],
       login:['任务页登录身份未通过','在原账号的 Ubuntu 浏览器核对登录。'],
-      draft:['发现草稿或参考附件，已保留','需要使用该窗口时，先保存或处理草稿。'],
+      draft:repair?.actions?.includes('reload')
+        ? ['刷新后仍检测到草稿或附件','工作台暂不派发该账号。']
+        : ['固定任务窗口有草稿或附件','点 Flow 一键就绪，工作台会刷新固定任务页并复查。'],
       overlay:['任务页有弹窗挡住输入','在原窗口核对提示；如需验证，请按官方提示完成。'],
       editor:['任务页未确认可用的输入框','核对页面是否加载完成或是否需要更新。']};
     if (pageIssues[page]) {
       const [title,action]=pageIssues[page];
-      if (!blocked.some(i=>i.title===title || (page==='draft' && i.key==='flow_draft')))
-      blocked.push({key:page==='draft' ? 'flow_draft' : 'flow_binding',title,action});
+      const issue={key:page==='draft' ? 'flow_draft' : 'flow_binding',title,action};
+      const existing=blocked.findIndex(i=>i.title===title || (page==='draft' && i.key==='flow_draft'));
+      if (existing<0) blocked.push(issue);
+      else if (page==='draft') blocked[existing]=issue;
     }
     const busy=page==='busy' || ['preparing','submitting','submitted','generated','downloading'].includes(windowStates.get(profile));
     const proven=page==='ok' || evidence==='generating' || (evidence==='recent_success' && !busy && (page==='unconfirmed'||!page));
@@ -1184,11 +1206,13 @@ function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
       issues.push({key:'confirmed_verification',title:'Google 要求本人验证',action:'在 Google 验证页完成后重新检查。'});
     if (fresh && quota.status==='ok' && values.includes(0)) add('官方额度已用尽','等待对应周期恢复。');
     const raw=current?.latest_probe;
-    const active=raw && ['queued','dispatching'].includes(raw.status);
-    const probe=raw && (expected ? expected.get(key)===raw.request_id :
-      active || ['failed','unknown'].includes(raw.status) ||
-      Number.isFinite(raw.finished) && Date.now()/1000-raw.finished>=0 && Date.now()/1000-raw.finished<=600) ? raw : null;
-    if (probe?.status==='failed' || probe?.status==='unknown') {
+    // Show the last cloud check until a newer result or dispatch restriction
+    // supersedes it. A manual check still displays only its own requests.
+    const probe=raw && (!expected || expected.get(key)===raw.request_id) ? raw : null;
+    const latestSuccess=current?.latest_success;
+    const confirmedAfterProbe=!expected && current?.dispatch_eligible===true && Number.isFinite(latestSuccess?.finished) &&
+      (!probe || (['failed','unknown'].includes(probe.status) && Number.isFinite(probe.finished) && latestSuccess.finished>probe.finished));
+    if (!confirmedAfterProbe && (probe?.status==='failed' || probe?.status==='unknown')) {
       const code=probe.reason;
       issues.push({key:code==='verification_required' ? 'confirmed_verification' :
         code==='readiness_authorization_required' ? 'confirmed_reauth' : 'cloud_probe',
@@ -1200,9 +1224,10 @@ function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
       paused:shared.paused,queued:channel.dispatch.queued} : null;
     const busy=current?.busy===true;
     const status=auditDispatchState({issues,busy,
-      dispatch:current ? dispatch : null,gemini:true,quota:probe?.status==='completed'?'ok':null});
+      dispatch:current ? dispatch : null,gemini:true,quota:probe?.status==='completed' || confirmedAfterProbe ? 'ok' : null});
     const timing=Number.isFinite(probe?.total_ms) ? `，耗时 ${(probe.total_ms/1000).toFixed(1)} 秒` : '';
-    const note=probe?.status==='completed' ? 'Gemini 云端已正确回应'+timing+'。' :
+    const note=confirmedAfterProbe ? '最近的真实请求已成功回复 · '+dateTime(latestSuccess.finished)+'。' :
+      probe?.status==='completed' ? '上次云端验活通过'+(Number.isFinite(probe.finished) ? ' · '+dateTime(probe.finished) : '')+timing+'。' :
       probe?.status==='queued' ? '云端验活排队中。' : probe?.status==='dispatching' ? '等待 Gemini 云端回应。' :
       probe ? (timing ? '本次验活'+timing.slice(1)+'。' : '') : !issues.length ? '尚无本轮云端验活结果。' : '';
     return {account,status,checking:probe?.status==='queued'||probe?.status==='dispatching',
@@ -1335,8 +1360,7 @@ function renderGovernanceGuidance(service, audit) {
       if (review) {
         instruction='上次任务结果未确认。先按原编号核对 Flow 回执或产物；确认不再需要保留执行现场后，才能放行这个账号。放行不会重发原任务。';
         button=`<div class="governance-row-actions"><button type="button" class="button button-light" data-govern-destination="records" data-govern-task="${esc(review)}">查看原任务</button><button type="button" class="button button-primary" data-govern-review="${esc(review)}" data-review-account="${esc(account.key)}">已核对，放行账号</button></div>`;
-      } else if (page==='draft') instruction='固定任务窗口有草稿或附件。到 Ubuntu 打开这个账号的 Flow 固定任务窗口，把草稿和附件另存后清空输入区，别点发送。完成后点下方「重新检查」。';
-      else if (page==='login') instruction='固定任务页未能确认登录。到 Ubuntu 打开这个账号的 Flow 窗口，核对页面邮箱；如果 Google 提示登录或验证，请用这个账号完成，再点下方「重新检查」。';
+      } else if (page==='login') instruction='固定任务页未能确认登录。到 Ubuntu 打开这个账号的 Flow 窗口，核对页面邮箱；如果 Google 提示登录或验证，请用这个账号完成，再点下方「重新检查」。';
       return instruction ? [`<article class="governance-row"><div><strong>${name}</strong><p>${instruction}</p></div>${button}</article>`] : [];
     });
     const internal=blocked.length-actions.length;
@@ -1424,6 +1448,13 @@ async function handleGovernanceClick(event) {
   } else if (button.dataset.governService) {
     openGovernance(button.dataset.governService);
   } else if (button.id === 'governanceCheck') {
+    button.disabled = true;
+    governanceError = '';
+    try {
+      // 重新检查现在会执行真正的修复：重开缺失窗口、把页面带回标准项目、重建绑定。
+      await postJson('/api/flow-readiness', {});
+    } catch (error) { governanceError = error.message || '检查未完成，请稍后重试。'; }
+    finally { button.disabled = false; }
     openGovernance(governanceService);
   } else if (button.hasAttribute('data-govern-close')) {
     governanceDialog.hidden=true;
@@ -1585,7 +1616,7 @@ function renderAccounts() {
   const automatic = accounts.filter((item) => geminiAccountAvailability(item).auto);
   const paused = accounts.filter((item) => item.gemini_enabled === false).length;
   const balanceSummary=flowReadinessNow.usableBalance==null ? '' : `（就绪积分 ${flowReadinessNow.usableBalance.toLocaleString('zh-CN')}）`;
-  $("realAccountsSummary").textContent = `共 ${accounts.length} 个账号 · Flow 就绪 ${ready} / ${accounts.length}${balanceSummary} · Gemini 就绪 ${geminiReadinessNow.ready ?? '—'} / ${accounts.length}`;
+  $("realAccountsSummary").textContent = `共 ${accounts.length} 个账号 · Flow 就绪 ${ready} / ${accounts.length}${balanceSummary}${flowReadinessNow.stale ? '（同步暂缓，显示上次结果）' : ''} · Gemini 就绪 ${geminiReadinessNow.ready ?? '—'} / ${accounts.length}`;
   for (const select of [$("geminiAccount"), $("chatAccount")]) {
     renderGeminiAccountOptions(select, accounts);
   }
@@ -1642,9 +1673,16 @@ function renderAccounts() {
     const keepaliveWarn = item.keepalive_enabled === false || item.gemini_enabled === false || ['blocked_result', 'paused'].includes(item.keepalive_state);
     const cooling = item.flow_cooling === true || item.flow_health === 'cooling';
     const flowPaused = item.flow_risk_paused === true;
-    // Derive each service's presentation from its own recorded state only.
+    const flowReady = flowRow?.status === 'ready' || flowRow?.status === 'queue';
+    const geminiReady = geminiRow?.status === 'ready' || geminiRow?.status === 'queue';
     const flowIssues = flowRow?.issues || [];
     const geminiIssues = issues.filter(issue => !issue.key.startsWith('flow_') && issue.key !== 'quota_stale');
+    const windowIssue = flowWindowIssue(item.profile, state.snapshot);
+    const flowFallback = (!flowReady && !cooling && !flowPaused && !windowIssue && !flowIssues.length)
+      ? ({blocked:'账号处于不可派发状态，等待就绪核对通过。', unknown:'账号状态尚未完成核对，等待下次检查。', checking:'正在验活，请稍候。'}[flowRow?.status] || '账号状态待核对，等待下次检查。') : '';
+    const geminiFallback = (!geminiReady && !geminiIssues.length && !(geminiRow?.checking))
+      ? ({blocked:'Gemini 处于不可派发状态，等待就绪核对通过。', unknown:'Gemini 状态尚未完成核对，等待下次检查。'}[geminiRow?.status] || 'Gemini 状态待核对，等待下次检查。') : '';
+    // Derive each service's presentation from its own recorded state only.
     const flowNeedsAttention = flowRow?.status==='blocked' && !cooling;
     const geminiNeedsAttention = geminiRow?.status==='blocked';
     const needsAttention = flowNeedsAttention || geminiNeedsAttention;
@@ -1653,7 +1691,6 @@ function renderAccounts() {
     const flowIssueTitle = flowIssues.map(issue => issue.title).join('；');
     const geminiIssueTitle = geminiIssues.map(issue => issue.title).join('；');
     const cardState = (flowPaused ? ' is-flow-paused' : cooling ? ' is-flow-cooling' : '') + (needsAttention ? ' is-account-issue' : '');
-    const windowIssue = flowWindowIssue(item.profile, state.snapshot);
     const flowStatusText = readinessBadge(flowRow);
     const cooldownSeconds = typeof item.flow_cooldown_seconds === 'number' && Number.isFinite(item.flow_cooldown_seconds) && item.flow_cooldown_seconds > 0 ? item.flow_cooldown_seconds : null;
     const cooldownEnd = cooldownSeconds === null ? null : (state.snapshotReceivedAt || Date.now()) + cooldownSeconds * 1000;
@@ -1672,7 +1709,7 @@ function renderAccounts() {
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
       <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div><span>${hasBalance && !item.flow_balance_fresh ? '上次积分余额' : '积分余额'}</span><strong>${esc(balance)}</strong></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
       <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText)}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${countsAsReady(geminiRow) ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${accountOfficialQuotaMarkup(item.key.slice('flow-account-'.length))}</div></div></div>
-      <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}</div>
+      <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${flowFallback ? `<span class="account-mini-status is-attention">Flow · ${esc(flowFallback)}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}${geminiFallback ? `<span class="account-mini-status is-attention">Gemini · ${esc(geminiFallback)}</span>` : ''}</div>
       <details><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>
       <div class="account-card-actions">${authControl}${flowPaused ? `<button class="button button-light" type="button" data-resume-flow="${accountKey}">已核查，恢复 Flow</button>` : ''}</div></article>`;
   }).join("")}</div>`;
@@ -2168,7 +2205,7 @@ async function observeGeminiRequest(id, attempts = 0) {
     if (!response.ok) throw new Error("not available");
     const record = await response.json();
     showGeminiRecord(record);
-    if (record.status === "dispatching" && attempts < 80) setTimeout(() => observeGeminiRequest(id, attempts + 1), 3000);
+    if (record.status === "dispatching" && attempts < 300) setTimeout(() => observeGeminiRequest(id, attempts + 1), 3000);
     else if (record.status === "dispatching") showGeminiRecord({status: "unknown"});
   } catch (_) {
     showGeminiRecord({status: "unknown"});
@@ -2235,7 +2272,7 @@ $("geminiSend").addEventListener("click", async () => {
   const id = crypto.randomUUID();
   sessionStorage.setItem("geminiRequest", id);
   state.geminiBusy = true;
-  $("geminiSend").disabled = true; // Legacy Gemini sender removed.
+  $("geminiSend").disabled = true;
   $("geminiFiles").disabled = true;
   $("geminiReply").textContent = "";
   $("geminiMessage").textContent = "正在提交真实请求，请不要重复发送。";
@@ -2254,7 +2291,7 @@ $("geminiSend").addEventListener("click", async () => {
     chatStarted = true;
     const response = await fetch("/api/real-pool/chat", {method: "POST", credentials: "same-origin",
       headers: {"Content-Type": "application/json", "X-Workbench-Request": "1", "Idempotency-Key": id},
-      body: JSON.stringify({account, prompt, attachments})});
+      body: JSON.stringify({method: "gemini.chat", account, prompt, attachments})});
     const record = await response.json();
     if (response.status === 400 || response.status === 403) {
       sessionStorage.removeItem("geminiRequest");
@@ -2537,7 +2574,7 @@ function syncConversationControls(announce = false) {
   $('chatModel').disabled=true;
   $('chatModelNote').textContent=imageAnalysis ? 'API 识图记录 · 每次识图独立提问。' : archived ? '历史归档只读；原问答与草稿保留，请新建官方对话。' : '官方调用 · 同一对话固定账号与模型，不依赖网页常驻。';
   $('chatSend').disabled=!ready || !item || archived || pending || chatSending || !!item.hidden || !geminiSelectionReady(select.value);
-  if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理，系统只查询结果，不重新发送。' : !ready ? '官方调用暂不可用，草稿保留。' : '新对话轮询分配；多轮固定账号。确认未发送且遇到临时故障时，用原账号重试一次。';
+  if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理；可在原消息下查看处理和重试进度。' : !ready ? '官方调用暂不可用，草稿保留。' : '新对话轮询分配；多轮固定账号。单条新文字对话确认超时后，最多用原账号重试三次。';
 }
 
 function renderRealTurnAccountLabels() {
@@ -3492,13 +3529,12 @@ $("flowSend").addEventListener("click", async () => {
   const kind = $("flowKind").value;
   const params = {prompt: $("flowPrompt").value, model: $("flowModel").value, aspect: $("flowAspect").value,
     count: Number($("flowCount").value), resolution: $("flowResolution").value,
-    duration: Number($("flowDuration").value), max_credits: Number($("flowBudget").value)};
+    duration: Number($("flowDuration").value)};
   if (!params.prompt.trim() || !$("flowConfirm").checked) {
     $("flowMessage").textContent = "请填写提示词并确认可能的积分消耗。"; return;
   }
   const id = crypto.randomUUID();
-  const autoRetry = params.count === 1 && $("flowAutoRetry").checked;
-  const payload = {method: "flow.generate", kind, params, confirm: true, auto_retry: autoRetry};
+  const payload = {method: "flow.generate", kind, params, confirm: true};
   if (project_key && project_key !== "auto") payload.project_key = project_key;
   $("flowAutoRetry").disabled = true;
   sessionStorage.setItem("flowRequest", id);
@@ -3708,7 +3744,7 @@ $('overviewApiCopy').addEventListener('click', () => copyCompleteApiDocument($('
 let dispatchConcurrencySaving = false;
 let dispatchConcurrencySequence = 0;
 let dispatchConcurrencyMaximum = null;
-function dispatchStateText(paused) { return state.channelStatus?.production_send_available ? '官方调用已接入 · 新对话轮询，多轮固定账号，仅确认未发送的临时故障可用原账号重试一次。' : '官方调用暂不可用；消息不会自动改走旧通道。'; }
+function dispatchStateText(paused) { return state.channelStatus?.production_send_available ? '官方调用已接入 · 新对话轮询，多轮固定账号，单条新文字对话确认超时后，最多用原账号重试三次。' : '官方调用暂不可用；消息不会自动改走旧通道。'; }
 function updateDispatchState(paused) {
   state.dispatchPaused = typeof paused === 'boolean' ? paused : null;
   const detail = document.querySelector('[data-gemini-dispatch-state]');

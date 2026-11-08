@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1125" width="1600" height="1125" role="img" aria-labelledby="title desc">
+<title id="title">StudioWright 创作工作台全项目运行拓扑</title>
+<desc id="desc">Windows、外部 API、Flow 工具进入 Ubuntu；工作台只按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow。账号治理、恢复、对话、任务和素材入库形成回路。</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#617a92"/></marker></defs>
+<g font-family="Microsoft YaHei, Noto Sans CJK SC, PingFang SC, sans-serif">
+<rect x="0" y="0" width="1600" height="1125" rx="0" fill="#f7fafc" stroke="none"/>
+<text x="46" y="54" font-size="35" fill="#182f45" font-weight="700">StudioWright  /  创作工作台全项目运行拓扑</text>
+<text x="46" y="88" font-size="19" fill="#33465a" font-weight="400">入口与部署  →  Ubuntu 受理和调度  →  Gemini / Flow 执行  →  结果回传、恢复和素材入库</text>
+<rect x="46" y="119" width="478" height="88" rx="12" fill="#fff" stroke="#c7d5e1"/>
+<text x="64" y="146" font-size="19" fill="#25486b" font-weight="700">01  Windows 客户端 / 浏览器</text>
+<text x="64" y="170" font-size="15" fill="#33465a" font-weight="400">发现 Ubuntu 或手填地址；SSH 转发连接</text>
+<text x="64" y="192" font-size="15" fill="#33465a" font-weight="400">总览、账号、项目、任务、对话、素材、API 文档</text>
+<rect x="561" y="119" width="478" height="88" rx="12" fill="#fff" stroke="#c7d5e1"/>
+<text x="579" y="146" font-size="19" fill="#25486b" font-weight="700">02  外部管线：TrendPilot 等</text>
+<text x="579" y="170" font-size="15" fill="#33465a" font-weight="400">工作台统一密钥 + 请求编号</text>
+<text x="579" y="192" font-size="15" fill="#33465a" font-weight="400">按接口提交对话、推理、识图、生图或生视频</text>
+<rect x="1076" y="119" width="478" height="88" rx="12" fill="#fff" stroke="#c7d5e1"/>
+<text x="1094" y="146" font-size="19" fill="#25486b" font-weight="700">03  已连接的 Flow 工具</text>
+<text x="1094" y="170" font-size="15" fill="#33465a" font-weight="400">Flow MCP 入口</text>
+<text x="1094" y="192" font-size="15" fill="#33465a" font-weight="400">调用同一套 Flow 能力；以实际连接为准</text>
+<path d="M285 207 V257" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M800 207 V257" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="30" y="223" width="1540" height="780" rx="15" fill="#edf3f8" stroke="#cbd7e2"/>
+<text x="48" y="246" font-size="14" fill="#31536e" font-weight="700">UBUNTU  /  服务端</text>
+<path d="M285 223 V257" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M800 223 V257" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="46" y="257" width="478" height="88" rx="12" fill="#fff" stroke="#c7d5e1"/>
+<text x="64" y="284" font-size="19" fill="#25486b" font-weight="700">创作工作台  ·  18920</text>
+<text x="64" y="308" font-size="15" fill="#33465a" font-weight="400">受理任务、维护记录、展示状态</text>
+<text x="64" y="330" font-size="15" fill="#33465a" font-weight="400">只按请求类型分流；不按正文改派、不自动串联</text>
+<rect x="561" y="257" width="478" height="88" rx="12" fill="#fff" stroke="#c7d5e1"/>
+<text x="579" y="284" font-size="19" fill="#25486b" font-weight="700">统一 API  ·  18922</text>
+<text x="579" y="308" font-size="15" fill="#33465a" font-weight="400">校验密钥；代转工作台请求</text>
+<text x="579" y="330" font-size="15" fill="#33465a" font-weight="400">Flow 原任务查询 / 文件下载可直接转给 Flow</text>
+<rect x="1076" y="257" width="478" height="88" rx="12" fill="#fff" stroke="#c7d5e1"/>
+<text x="1094" y="284" font-size="19" fill="#25486b" font-weight="700">Flow 后台  ·  18888</text>
+<text x="1094" y="308" font-size="15" fill="#33465a" font-weight="400">浏览器生成、项目、原任务与文件</text>
+<text x="1094" y="330" font-size="15" fill="#33465a" font-weight="400">工作台生成请求也经此服务执行</text>
+<path d="M561 285 H524" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M1039 319 H1076" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M285 345 V369 H799 V401" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M285 369 V401" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M1315 345 V401" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M430 345 V358 H1180 V345" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="718" y="347" width="164" height="19" rx="5" fill="#edf3f8"/>
+<text x="728" y="361" font-size="13" fill="#31536e" font-weight="400">工作台派发 Flow 生成</text>
+<text x="553" y="389" font-size="14" fill="#31536e" font-weight="400">调度前检查可用账号与执行条件</text>
+<rect x="46" y="401" width="478" height="442" rx="12" fill="#e8f0ff" stroke="none"/>
+<text x="65" y="434" font-size="23" fill="#2452a4" font-weight="700">A  Gemini · 对话、推理与识图</text>
+<rect x="561" y="401" width="478" height="442" rx="12" fill="#fcf2df" stroke="none"/>
+<text x="580" y="434" font-size="23" fill="#81511c" font-weight="700">B  账号与调度治理</text>
+<rect x="1076" y="401" width="478" height="442" rx="12" fill="#e5f3ec" stroke="none"/>
+<text x="1095" y="434" font-size="23" fill="#20644f" font-weight="700">C  Flow · 图片与视频生成</text>
+<rect x="63" y="451" width="444" height="80" rx="12" fill="#fff" stroke="#b9ccef"/>
+<text x="81" y="478" font-size="19" fill="#2452a4" font-weight="700">选账号、固定会话</text>
+<text x="81" y="502" font-size="15" fill="#33465a" font-weight="400">新会话分配可用账号；续聊锁定原账号</text>
+<path d="M285 531 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="63" y="547" width="444" height="80" rx="12" fill="#fff" stroke="#b9ccef"/>
+<text x="81" y="574" font-size="19" fill="#2452a4" font-weight="700">官方 Antigravity CLI</text>
+<text x="81" y="598" font-size="15" fill="#33465a" font-weight="400">按模型执行推理 / 对话 / 识图；无须网页常驻</text>
+<path d="M285 627 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="63" y="643" width="444" height="80" rx="12" fill="#fff" stroke="#b9ccef"/>
+<text x="81" y="670" font-size="19" fill="#2452a4" font-weight="700">保存回复与原消息</text>
+<text x="81" y="694" font-size="15" fill="#33465a" font-weight="400">保存账号、耗时、失败原因及每次尝试</text>
+<path d="M285 723 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="63" y="739" width="444" height="80" rx="12" fill="#fff" stroke="#b9ccef"/>
+<text x="81" y="766" font-size="19" fill="#2452a4" font-weight="700">失败后核对</text>
+<text x="81" y="790" font-size="15" fill="#33465a" font-weight="400">确认未发出才按规则原号补发一次；未知不重发</text>
+<rect x="578" y="451" width="444" height="80" rx="12" fill="#fffdf8" stroke="#e2cda7"/>
+<text x="596" y="478" font-size="19" fill="#81511c" font-weight="700">仪表盘圆环：查看与治理</text>
+<text x="596" y="502" font-size="15" fill="#33465a" font-weight="400">分别核对授权、额度、积分、登录和阻断</text>
+<path d="M800 531 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="578" y="547" width="444" height="80" rx="12" fill="#fffdf8" stroke="#e2cda7"/>
+<text x="596" y="574" font-size="19" fill="#81511c" font-weight="700">提交前排队与核对</text>
+<text x="596" y="598" font-size="15" fill="#33465a" font-weight="400">按各执行入口领取名额；Flow 同账号串行输入</text>
+<path d="M800 627 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="578" y="643" width="444" height="80" rx="12" fill="#fffdf8" stroke="#e2cda7"/>
+<text x="596" y="670" font-size="19" fill="#81511c" font-weight="700">窗口与桌面管理</text>
+<text x="596" y="694" font-size="15" fill="#33465a" font-weight="400">固定任务窗口；核对账号、项目和前台焦点</text>
+<path d="M800 723 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="578" y="739" width="444" height="80" rx="12" fill="#fffdf8" stroke="#e2cda7"/>
+<text x="596" y="766" font-size="19" fill="#81511c" font-weight="700">恢复与隔离</text>
+<text x="596" y="790" font-size="15" fill="#33465a" font-weight="400">安全弹窗可处理；需验证或有草稿时保留现场</text>
+<rect x="1093" y="451" width="444" height="80" rx="12" fill="#fff" stroke="#b2d4c4"/>
+<text x="1111" y="478" font-size="19" fill="#20644f" font-weight="700">确定账号和项目</text>
+<text x="1111" y="502" font-size="15" fill="#33465a" font-weight="400">自动选账号 / 自有项目；绑定同项目参考素材</text>
+<path d="M1315 531 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="1093" y="547" width="444" height="80" rx="12" fill="#fff" stroke="#b2d4c4"/>
+<text x="1111" y="574" font-size="19" fill="#20644f" font-weight="700">前台一次性提交</text>
+<text x="1111" y="598" font-size="15" fill="#33465a" font-weight="400">激活固定窗口 → 核对输入 → 发送 → 释放前台</text>
+<path d="M1315 627 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="1093" y="643" width="444" height="80" rx="12" fill="#fff" stroke="#b2d4c4"/>
+<text x="1111" y="670" font-size="19" fill="#20644f" font-weight="700">后台等结果、取回原文件</text>
+<text x="1111" y="694" font-size="15" fill="#33465a" font-weight="400">生成与取回分开；下载失败先恢复原下载</text>
+<path d="M1315 723 v16" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<rect x="1093" y="739" width="444" height="80" rx="12" fill="#fff" stroke="#b2d4c4"/>
+<text x="1111" y="766" font-size="19" fill="#20644f" font-weight="700">失败分支</text>
+<text x="1111" y="790" font-size="15" fill="#33465a" font-weight="400">已知失败按规则换号，最多三次；未知先查原任务</text>
+<path d="M285 835 V872" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M800 835 V872" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M1315 835 V872" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M1510 207 V215 H1562 V488 H1537" stroke="#617a92" stroke-width="2.5" fill="none" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<rect x="46" y="872" width="478" height="106" rx="12" fill="#fff" stroke="#b9ccef"/>
+<text x="64" y="899" font-size="19" fill="#2452a4" font-weight="700">对话管理</text>
+<text x="64" y="923" font-size="15" fill="#33465a" font-weight="400">原消息、回复、账号和耗时</text>
+<text x="64" y="945" font-size="15" fill="#33465a" font-weight="400">后续查询或接着对话</text>
+<rect x="561" y="872" width="478" height="106" rx="12" fill="#fffdf8" stroke="#e2cda7"/>
+<text x="579" y="899" font-size="19" fill="#81511c" font-weight="700">任务与调度记录</text>
+<text x="579" y="923" font-size="15" fill="#33465a" font-weight="400">原编号贯穿提交、尝试、失败和下载</text>
+<text x="579" y="945" font-size="15" fill="#33465a" font-weight="400">任务自动更新；账号同步属于调度记录</text>
+<rect x="1076" y="872" width="478" height="106" rx="12" fill="#fff" stroke="#b2d4c4"/>
+<text x="1094" y="899" font-size="19" fill="#20644f" font-weight="700">素材库与下载</text>
+<text x="1094" y="923" font-size="15" fill="#33465a" font-weight="400">保留原文件、来源、账号和项目</text>
+<text x="1094" y="945" font-size="15" fill="#33465a" font-weight="400">按设置交 Gemini 分析，写回标签和镜头说明</text>
+<path d="M1076 920 H1039" stroke="#617a92" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+<path d="M1368 978 V1037 H1039" stroke="#617a92" stroke-width="2.5" fill="none" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<path d="M1039 1053 H1450 V978" stroke="#617a92" stroke-width="2.5" fill="none" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
+<rect x="561" y="1021" width="478" height="47" rx="12" fill="#e8f0ff" stroke="#b9ccef"/>
+<text x="580" y="1050" font-size="17" fill="#2452a4" font-weight="700">Gemini 多模态：自动分析 / 手动补打 → 写回素材库</text>
+<text x="46" y="1094" font-size="17" fill="#33465a" font-weight="400">返回方式：Windows 工作台读取任务事件和状态；外部系统按原请求 / 任务编号查询或下载。</text>
+</g></svg>

@@ -2,9 +2,13 @@
 
 一个连接 Flow 创作服务和 Gemini 对话服务的工作台，包含 Ubuntu 服务端和 Windows 桌面操作端。Windows 端使用独立窗口，支持系统托盘和局域网发现。
 
+当前源码版本：**v0.2.2**。见 [版本记录](CHANGELOG.md) 与 [验证说明](docs/RELEASE-v0.2.2.md)。此源码版本未重新发布安装包。
+
 ## 安装使用
 
 Windows 和 Ubuntu 安装包在本仓库的「Releases」下载。见 [安装说明](docs/安装说明.md) 与 [API 接入说明](docs/API.md)。Ubuntu 可复用已运行的服务，Windows 安装时可选择创建桌面快捷方式。
+
+Windows、Ubuntu、统一 API、账号治理、Gemini、Flow 与素材库的关系见 [全项目工作拓扑](docs/WORKFLOW.md)，含调度、恢复及内容交接分图。
 
 ## 项目内容
 

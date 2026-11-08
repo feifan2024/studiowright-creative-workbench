@@ -1,4 +1,4 @@
-"""Recover idle Flow task pages without typing, generating, or discarding drafts."""
+"""Recover idle Flow task pages without typing or generating."""
 import asyncio
 import json
 import re
@@ -124,15 +124,53 @@ def guard_live(account):
     return projects, standard
 
 
+def _discover_chrome(profile):
+    """Dynamic window discovery: scan /proc for this profile's main chrome with a
+    debugging port, replacing a stale or missing registry binding."""
+    import shlex
+    best = None
+    for proc in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            args = [a.decode(errors='replace') for a in proc.read_bytes().split(b'\0') if a]
+        except OSError:
+            continue
+        if len(args) == 1:
+            try: args = shlex.split(args[0])
+            except ValueError: continue
+        if any(x.startswith('--type=') for x in args):
+            continue
+        profiles = [x.split('=', 1)[1] for x in args if x.startswith('--user-data-dir=')]
+        ports = [x.split('=', 1)[1] for x in args if x.startswith('--remote-debugging-port=')]
+        if len(profiles) != 1 or len(ports) != 1 or Path(profiles[0]).name != profile:
+            continue
+        best = (int(proc.parts[-2]), int(ports[0]))
+    return best
+
+
 async def candidate(account):
     key = account['key'].removeprefix('flow-account-')
+    profile = account['profile']
     r = await asyncio.to_thread(registration,key)
+    pid = port = stamp = None
+    if r:
+        pid,port = r['pid'],r['port']
+        try:
+            profile_check,stamp = process_identity(pid,key,port)
+        except ValueError:
+            profile_check = None
+        if profile_check != profile:
+            r = None
     if not r:
-        raise ValueError('binding')
-    pid,port = r['pid'],r['port']
-    profile,stamp = process_identity(pid,key,port)
-    if profile != account['profile']:
-        raise ValueError('binding')
+        # Stale or missing registry binding (window stopped/reopened): discover
+        # the account's current window dynamically. The user-data-dir basename
+        # is the account identity, so no registry entry is needed to re-attach.
+        found = await asyncio.to_thread(_discover_chrome, profile)
+        if not found:
+            raise ValueError('binding')
+        pid,port = found
+        profile_check,stamp = process_identity(pid,key,port)
+        if profile_check != profile:
+            raise ValueError('binding')
     pages = await asyncio.to_thread(_pages,key,pid,port)
     windows = await asyncio.to_thread(focus_call,'List',pid)
     if len(pages) != 1 or len(windows) != 1:
@@ -179,6 +217,32 @@ def restart_managed(binding):
     subprocess.run(systemctl+['restart',unit],check=True,capture_output=True,timeout=12)
 
 
+def _rebuild_standard(account):
+    """Recreate the account's standard FLOW+ project after deletion or rename
+    loss, then register it so guard_live and the switch worker can find it."""
+    import secrets
+    profile = account['profile']
+    key = account['key'].removeprefix('flow-account-')
+    script = Path(__file__).resolve().parent / 'create_flow_project.py'
+    process = subprocess.run([sys.executable, '-B', str(script)],
+                             input=json.dumps({'profile': profile}).encode(),
+                             capture_output=True, timeout=150)
+    if process.returncode or len(process.stdout) > 4096:
+        raise ValueError('project_create_unconfirmed')
+    result = json.loads(process.stdout)
+    project = result.get('project') if isinstance(result, dict) else None
+    if not isinstance(project, str) or len(project) != 36:
+        raise ValueError('project_create_unconfirmed')
+    request = urllib.request.Request('http://127.0.0.1:18888/api/projects',
+        data=json.dumps({'profile': profile, 'id': project,
+                         'title': 'FLOW+' + account['email'].split('@', 1)[0]}).encode(),
+        method='POST', headers={'Content-Type': 'application/json', 'X-Console-Request': '1'})
+    with build_opener(ProxyHandler({})).open(request, timeout=8) as response:
+        if response.status != 200:
+            raise ValueError('project_register_failed')
+    return project
+
+
 async def repair(account, initial, actions):
     import websockets
     from flow_window_policy import Lifecycle
@@ -196,15 +260,69 @@ async def repair(account, initial, actions):
         return 'project',None
     desired = project if same else canonical_project_url('https://flow.google.com/project/'+next(iter(standard)))
     restart_safe = False
+    navigated_once = False
     try:
         async with websockets.connect(endpoint,open_timeout=2,close_timeout=1,max_size=65536) as ws:
             current['chrome_window'] = (await command(ws,'Browser.getWindowForTarget',{'targetId':current['page_target']}))['windowId']
             before = await evaluate(ws,expected)
+            if (not before.get('origin') or not before.get('account')) and not navigated_once:
+                # Auto-navigation: a stray interstitial (Google bar, account picker)
+                # is brought back to the canonical project once per pass.
+                navigated_once = True
+                await asyncio.to_thread(guard_live,account)
+                frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
+                await command(ws,'Page.navigate',{'url':desired,'frameId':frame['id']})
+                await asyncio.sleep(3)
+                for _ in range(10):
+                    await asyncio.sleep(.5)
+                    frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
+                    if urlsplit(frame['url']).path == urlsplit(desired).path:
+                        break
+                before = await evaluate(ws,expected)
             if not before.get('origin') or not before.get('account'):
                 return 'login',None
-            if before.get('draft'):
+            # Refresh drafts only on the account's verified fixed task page.
+            if initial == 'draft' and before.get('draft'):
+                if (not same or not old or old.get('binding_state') != 'verified'
+                        or old.get('project_url') != project or any(old.get(k)!=v for k,v in current.items())):
+                    return 'draft',None
+                if before.get('busy'):
+                    return 'busy',None
+                live_projects, _ = await asyncio.to_thread(guard_live,account)
+                if project is None or project.rsplit('/',1)[1] not in live_projects:
+                    # The standard project can be deleted or lose its name; rebuild
+                    # it on the open window instead of stranding the account.
+                    await asyncio.to_thread(_rebuild_standard, account)
+                    live_projects, standard = await asyncio.to_thread(guard_live,account)
+                    if len(standard) == 0:
+                        return 'project',None
+                    if len(standard) > 1:
+                        return 'duplicate_projects',None
+                    frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
+                    project = canonical_project_url('https://flow.google.com/project/'+next(iter(standard)))
+                    await command(ws,'Page.navigate',{'url':project,'frameId':frame['id']})
+                    await asyncio.sleep(3)
+                frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
+                latest = await evaluate(ws,expected)
+                if (canonical_project_url(frame['url']) != project or not latest.get('origin')
+                        or not latest.get('account') or latest.get('busy')
+                        or latest.get('path') != urlsplit(frame['url']).path):
+                    return 'unconfirmed',None
+                if latest.get('draft'):
+                    actions.append('reload')
+                    await asyncio.wait_for(command(ws,'Page.reload',{'loaderId':frame['loaderId']}),timeout=3)
+                    for _ in range(12):
+                        await asyncio.sleep(.25)
+                        loaded = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
+                        if loaded['loaderId'] != frame['loaderId']:
+                            if canonical_project_url(loaded['url']) != project:
+                                return 'project',None
+                            break
+                    else:
+                        return 'unconfirmed',None
+            elif before.get('draft'):
                 return 'draft',None
-            if before.get('overlay') and not before.get('busy'):
+            if initial != 'draft' and before.get('overlay') and not before.get('busy'):
                 await asyncio.to_thread(guard_live,account)
                 latest = await evaluate(ws,expected)
                 if (latest.get('account') and latest.get('path')==before.get('path') and not latest.get('draft')
@@ -212,11 +330,19 @@ async def repair(account, initial, actions):
                     actions.append('dismiss_update')
                     await asyncio.sleep(.3)
                     before = await evaluate(ws,expected)
-            if before.get('overlay') or before.get('busy'):
-                return ('overlay' if before.get('overlay') else 'busy'),None
-            if not before.get('account') or before.get('draft'):
+            if initial != 'draft' and (before.get('overlay') or before.get('busy')):
+                if not navigated_once:
+                    navigated_once = True
+                    await asyncio.to_thread(guard_live,account)
+                    frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
+                    await command(ws,'Page.navigate',{'url':desired,'frameId':frame['id']})
+                    await asyncio.sleep(3)
+                    before = await evaluate(ws,expected)
+                if before.get('overlay') or before.get('busy'):
+                    return ('overlay' if before.get('overlay') else 'busy'),None
+            if initial != 'draft' and (not before.get('account') or before.get('draft')):
                 return ('draft' if before.get('draft') else 'login'),None
-            if not same or not before.get('editor'):
+            if initial != 'draft' and (not same or not before.get('editor')):
                 if same and initial == 'after_restart':
                     return 'editor',None
                 await asyncio.to_thread(guard_live,account)
@@ -290,6 +416,14 @@ async def repair(account, initial, actions):
     life.observe(account['profile'],1,1)
     coordinator = Coordinator()
     coordinator.release_verified(account['profile'])
+    # Clear only the stale draft hold for the exact page that passed inspection.
+    # Keep its previous task identifier and never release an unknown result.
+    import time
+    from contextlib import closing
+    with closing(coordinator.connect()) as db, db:
+        db.execute("""UPDATE windows SET state='idle',updated=?
+            WHERE profile=? AND target_id=? AND state='blocked_draft' AND stage='preparing'""",
+                   (time.time(),account['profile'],current['page_target']))
     coordinator.event(account['profile'],None,'readiness_recovered',actions=actions)
     return 'ok',provisional
 
@@ -339,7 +473,8 @@ async def recover(payload):
                     before = await asyncio.wait_for(inspect_page(account,bindings.get(p,{})),timeout=5)
                 except (OSError,ValueError,TimeoutError):
                     before = 'binding'
-                if (before in {'binding','project','editor','overlay'} or
+                old_draft = before == 'ok' and (Coordinator().window(p) or {}).get('state') == 'blocked_draft'
+                if (before in {'binding','project','editor','overlay','draft'} or old_draft or
                         (before == 'ok' and lifecycle.get(p,{}).get('unique_ok') != 1)):
                     verdict,_ = await asyncio.wait_for(repair(account,before,actions),timeout=16)
                 else:

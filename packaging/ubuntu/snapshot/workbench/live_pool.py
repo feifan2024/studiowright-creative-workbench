@@ -1052,12 +1052,12 @@ class RealPool:
     def upload_files(self, request_id, attachments):
         directory = self.state_dir / 'uploads' / request_id
         if directory.is_symlink() or not directory.is_dir():
-            raise ValueError('附件尚未上传完成。')
+            raise ValueError('附件尚未上传完成。（诊断：目录 ' + str(directory) + ' 不存在）')
         result, total = [], 0
         for item in attachments:
             path = directory / (str(item['index']) + '.' + item['extension'])
             if path.is_symlink() or not path.is_file():
-                raise ValueError('附件尚未上传完成。')
+                raise ValueError('附件尚未上传完成。（诊断：文件 ' + str(path.name) + ' 缺失）')
             total += path.stat().st_size
             if total > UPLOAD_LIMIT:
                 raise ValueError('附件总大小超过 100 MB。')
@@ -1173,7 +1173,10 @@ class RealPool:
             db.row_factory = sqlite3.Row
             return closing(db)
         with read_db(root / 'console-data/console.db') as db:
-            task = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='flow_task_execution_rows' AND type='view'").fetchone():
+                task = db.execute('SELECT * FROM flow_task_execution_rows WHERE root_id=? ORDER BY ordinal DESC LIMIT 1', (task_id,)).fetchone()
+            else:
+                task = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
             if not task or task['status'] != 'failed' or task['kind'] != 'image':
                 raise ValueError('该任务不符合图片找回条件。')
             try:
@@ -1456,17 +1459,18 @@ class RealPool:
         kind, params = data['kind'], data['params']
         if kind not in ('image', 'video') or not isinstance(params, dict):
             raise ValueError('任务类型不正确。')
-        retry_omitted = 'auto_retry' not in data
-        auto_retry = data.get('auto_retry', params.get('count') == 1)
-        if type(auto_retry) is not bool:
-            raise ValueError('自动重试设置不正确。')
+        # 2026-11-07: switching on confirmed rejections is enforced server-side.
+        # The field is rejected outright so callers notice instead of relying on
+        # a silently ignored flag; retry behavior follows kind and count only.
+        retry_omitted = True
+        auto_retry = params.get('count') == 1
         if auto_retry and params.get('count') != 1:
             raise ValueError('换号重试只支持每次生成一张图片或一段视频。')
-        required = {'prompt', 'model', 'aspect', 'count', 'resolution', 'duration', 'max_credits'}
+        required = {'prompt', 'model', 'aspect', 'count', 'resolution', 'duration'}
         from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
-        if not required <= params.keys() or params.keys() - required - REFERENCE_FIELDS:
+        if not required <= params.keys() or params.keys() - required - REFERENCE_FIELDS - {'max_credits'}:
             raise ValueError('任务参数不正确。')
-        with_references = params.keys() != required
+        with_references = params.keys() - {'max_credits'} != required
         ids = []
         if with_references:
             ids = task_reference_ids(kind, params)
@@ -1481,13 +1485,16 @@ class RealPool:
         if aspect not in (('16:9', '4:3', '1:1', '3:4', '9:16') if kind == 'image' else ('16:9', '9:16')):
             raise ValueError('画面比例不正确。')
         if (type(params['count']) is not int or params['count'] not in (1, 2, 3, 4)
-                or type(params['duration']) is not int or params['duration'] not in (4, 6, 8, 10)
-                or params['resolution'] not in ('360p', '720p')
-                or type(params['max_credits']) is not int or not 0 <= params['max_credits'] <= 10000):
-            raise ValueError('数量、清晰度、时长或积分上限不正确。')
+                or type(params['duration']) is not int or params['duration'] not in (tuple(range(3, 16)) if params.get('model') == 'omni-flash-2' else (4, 6, 8, 10))
+                or params['resolution'] not in ('360p', '720p')):
+            raise ValueError('数量、清晰度或时长不正确。')
         flow_params = dict(params)
         if kind == 'image':
-            flow_params.pop('max_credits')
+            flow_params.pop('max_credits', None)
+        else:
+            # Production runs without a per-task credit cap; the console internals
+            # still expect the field, so pin the uncapped default.
+            flow_params['max_credits'] = 10000
         # Reject an oversized payload before the optional project-creation side effect.
         estimate = {'profile': 'x' * 64, 'project': '0' * 36, 'kind': kind, 'params': flow_params,
                     'confirm_generation': True, 'request_key': request_id, 'auto_retry': auto_retry}

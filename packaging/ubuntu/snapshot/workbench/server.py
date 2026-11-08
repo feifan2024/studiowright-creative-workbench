@@ -341,7 +341,9 @@ def task_rows(state, projects):
                     for a in (raw_retry.get('attempts') or [])[:4] if isinstance(a,dict)
                     and type(a.get('ordinal')) is int and 0 <= a['ordinal'] <= 3]
                 if not note and retry['state'] in ('needs_review','interrupted'):
-                    note = '原结果需核对，已停止重试。'
+                    note = ('Flow 拒绝生成并提示异常活动，已暂停；未换号重发。'
+                            if 'PUBLIC_ERROR_UNUSUAL_ACTIVITY' in str(row.get('error') or '')
+                            else '原结果需核对，已停止重试。')
                 if not note and retry['state'] == 'succeeded' and len(retry['attempts']) > 1:
                     note = '换号重试已完成，仍用原任务编号查询和下载。'
                 if not note and retry['state'] == 'pending_switch':
@@ -594,7 +596,7 @@ class Sources:
 
     def read(self, service, path):
         if service == "gemini":
-            return None, '已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'
+            return None, 'Gemini 使用官方 CLI 通道，由工作台直接调用；不探测独立后台。'
         if service not in self.PATHS or path not in self.PATHS[service]:
             raise ValueError("路径不在只读清单内")
         url = f"http://127.0.0.1:{self.ports[service]}{path}"
@@ -659,7 +661,15 @@ class Sources:
             if len(raw) > 65536:
                 return 503, {'error':'任务状态暂不可读取。'}
             task = json.loads(raw)
-            if not isinstance(task,dict) or task.get('task_id') != ident:
+            if not isinstance(task,dict):
+                return 503, {'error':'任务状态暂不可读取。'}
+            canonical = task.get('task_id')
+            retry = task.get('retry')
+            alias = (task.get('requested_task_id') == ident and isinstance(canonical, str)
+                     and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', canonical)
+                     and isinstance(retry, dict) and retry.get('root_id') == canonical
+                     and retry.get('ordinal') == 0)
+            if canonical != ident and not alias:
                 return 503, {'error':'任务状态暂不可读取。'}
             return 200, task
         except HTTPError as exc:
@@ -799,8 +809,8 @@ class Sources:
     def status(self):
         flow, flow_error = self.read("flow", "/health")
         gemini, gemini_error = self.read("gemini", "/health")
-        gemini_name = "Gemini CLI（独立运行）"
-        gemini_description = '已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'
+        gemini_name = "Gemini · 官方 CLI 通道"
+        gemini_description = '官方 Antigravity CLI 通道；发送入口在对话页与 Gemini 页快捷发送。'
         return {
             "checked_at": time.time(),
             "flow": {"connected": bool(flow and flow.get("ok") is True), "message": flow_error},
@@ -1273,6 +1283,16 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 result = {"application": "unified-workbench", "version": 1, "deployment": deployment}
             elif self.path == "/api/status":
                 result = sources.status()
+                if real_pool:
+                    official = getattr(real_pool, 'official', None)
+                    try:
+                        ready = bool(official and any(official.runtime.inventory().values()))
+                    except (OSError, ValueError, TypeError, AttributeError):
+                        ready = False
+                    result["gemini"] = {"connected": ready,
+                                        "message": None if ready else '官方 CLI 通道尚未就绪；请到账号页核对授权。',
+                                        "name": "Gemini · 官方 CLI 通道",
+                                        "description": '官方 Antigravity CLI 通道；发送入口在对话页与 Gemini 页快捷发送。'}
             elif self.path == "/api/recent-tasks":
                 result, error = task_snapshot()
                 if result is None:
