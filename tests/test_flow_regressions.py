@@ -56,3 +56,34 @@ class ImageCreditCompatibility(unittest.TestCase):
                         self.assertNotIn('max_credits', calls[0]['params'])
             finally:
                 pool.close()
+
+
+class VideoAutoDispatchCompatibility(unittest.TestCase):
+    def test_original_video_format_and_idempotency_without_provider(self):
+        with fixture_directory() as directory:
+            (directory / 'state').mkdir()
+            pool = RealPool(directory / 'state', directory, execute=lambda *args: None)
+            project = str(uuid.uuid4())
+            chosen = dict(key='project-key', source_profile='account-1', source_id=project)
+            pool._auto_flow_project = lambda *args: chosen
+            snapshot = {'flow_models': {'video': [{'id':'omni-flash'}]}}
+            payload = dict(kind='video', confirm=True, params=dict(prompt='Local fixture only',
+                model='omni-flash', aspect='16:9', count=1, resolution='720p', duration=10))
+            calls=[]
+            def send(body):
+                calls.append(body)
+                return dict(id='fixture-video', profile='account-1', project=project, kind='video')
+            try:
+                rid=str(uuid.uuid4())
+                first,created=pool.submit_flow(payload,rid,snapshot,send)
+                repeated,created_again=pool.submit_flow(payload,rid,snapshot,send)
+                self.assertTrue(created)
+                self.assertFalse(created_again)
+                self.assertEqual(first['task_id'],repeated['task_id'])
+                self.assertEqual(first['status'],'submitted')
+                self.assertEqual(len(calls),1)
+                self.assertEqual(calls[0]['params']['duration'],10)
+                self.assertEqual(calls[0]['params']['model'],'omni-flash')
+                self.assertEqual(calls[0]['request_key'],rid)
+            finally:
+                pool.close()

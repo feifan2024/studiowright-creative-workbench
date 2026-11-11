@@ -189,7 +189,41 @@ function flowWindowIssue(profile, snapshot) {
   };
 }
 
+function flowAccountReason(account, snapshot, row, pageState) {
+  if (row?.recovering) return {label:'自动修复中',text:'正在重新核对窗口、现有项目和输入框；完成后自动更新状态。'};
+  const window = (snapshot?.flow_coordination?.windows || []).find(w => w.profile === account.profile);
+  const tasks = (snapshot?.tasks || []).filter(t => ['image','video'].includes(t.kind) &&
+    (t.source_profile === account.profile || (t.retry?.attempts || []).some(a => a.profile === account.profile)));
+  const linked = window?.task_id && tasks.find(t => t.source_id === window.task_id || t.retry?.root_id === window.task_id ||
+    (t.retry?.attempts || []).some(a => a.id === window.task_id));
+  const active = tasks.find(t => ['queued','running'].includes(t.status) && t.source_profile === account.profile);
+  if (!active && row?.status === 'ready' && !row?.issues?.length && pageState !== 'busy') return null;
+  const task = active || linked;
+  const attempts = (task?.retry?.attempts || []).filter(a => !a.profile || a.profile === account.profile);
+  const latest = attempts.at(-1);
+  const failure = latest?.failure_reason || task?.failure_reason;
+  if (task && (['failed','interrupted'].includes(task.status) || latest?.status === 'failed') &&
+      !['active','pending_switch'].includes(task.retry?.state)) {
+    const reason = failure || '后台未返回具体错误，原因待核对。';
+    return {label:'失败原因',text:reason.replace(/PUBLIC_ERROR_UNUSUAL_ACTIVITY/gi,'Google 提示异常活动') + `（任务 ${task.source_id}）`};
+  }
+  if (active || (task && ['queued','running'].includes(task.status))) {
+    const current = active || task;
+    const stage = {preparing:'准备输入',submitting:'提交中，等待服务方回执',submitted:'等待生成结果',
+      generated:'结果已生成，正在整理',downloading:'下载结果'}[window?.stage] || (current.status === 'queued' ? '排队中' : '处理中');
+    return {label:'当前占用原因',text:`任务 ${current.source_id}：${stage}；尚未收到失败回执。`};
+  }
+  if (pageState === 'busy') return {label:'暂不可用原因',text:'后台标记页面被占用，但未查到关联的进行中任务，需核对窗口状态。'};
+  if (row?.issues?.length) return {label:'暂不可用原因',text:row.issues.map(i => i.title).join('；')};
+  if (row?.status === 'blocked') return {label:'暂不可用原因',text:'就绪检查未通过，但后台未提供具体原因，待核对。'};
+  return null;
+}
+
 function flowTaskStatusBadge(item) {
+  if (['image','video'].includes(item.kind) && ['failed','interrupted'].includes(item.status) &&
+      !['active','pending_switch'].includes(item.retry?.state) &&
+      (item.retry?.attempts || []).some(a => /no image reply within \d+ s, and no new image is in the project/.test(a.failure_reason || '')))
+    return statusBadge('failed');
   if (!['image', 'video'].includes(item.kind) || item.status !== 'failed') return statusBadge(item.status);
   const retry = item.retry;
   const failedRounds = new Set((retry?.attempts || [])
@@ -231,7 +265,9 @@ function accountIssues(account, snapshot = state.snapshot, geminiRow = null) {
     add('flow_unknown', 'Flow 状态待核对', '目前无法确认该账号的 Flow 是否可用。', '查看账号详情并核对 Flow 状态。');
 
   const pageState = (flowReadinessObservation?.pageChecks?.accounts || {})[account.profile];
-  if (pageState && pageState !== 'ok')
+  const activeFlow = (snapshot?.tasks || []).some(t => t.source_profile === account.profile &&
+    ['image','video'].includes(t.kind) && ['queued','running'].includes(t.status));
+  if (pageState && pageState !== 'ok' && !(pageState === 'busy' && activeFlow))
     add('flow_page_state', '页面未就绪：' + ({overlay:'页面有弹窗待关闭', binding:'窗口绑定待核对', project:'页面停在非标准项目', unconfirmed:'页面状态待确认', busy:'页面忙', draft:'有草稿待核对', login:'需要登录核验'}[pageState] || pageState), '点一键就绪，工作台会把页面带回标准项目并复查。', '使用一键就绪。');
   const windowIssue = flowWindowIssue(account.profile, snapshot);
   if (windowIssue) issues.push(windowIssue);
@@ -393,8 +429,8 @@ function followWorkbenchReleases() {
   function applyWhenSafe() {
     notice.hidden = !pending;
     if (!pending || reloading || document.hidden || !document.hasFocus() ||
-        location.hash || state.view !== 'overview' || document.querySelector('dialog[open]') ||
-        insightActivationPosting ||
+        !['overview','accounts','projects','records'].includes(state.view) || document.querySelector('dialog[open]') ||
+        insightActivationPosting || accountActionsInFlight.size || dispatchPolicyDirty ||
         ['flowPrompt', 'chatPrompt', 'geminiPrompt', 'apiKeyName'].some(id => $(id)?.value) ||
         ['chatFiles', 'geminiFiles'].some(id => $(id)?.files?.length)) return;
     reloading = true;
@@ -928,8 +964,35 @@ async function refreshFlowReadinessStatus() {
     getJson('/api/flow-readiness',{timeoutMs:14000}),getJson('/api/dispatch/concurrency',{timeoutMs:8000})
   ]);
   rememberFlowReadiness(pageChecks,dispatch);
+  autoRecoverFlowPages(pageChecks);
   if (state.view==='overview' && state.snapshot) renderAccountInsights(state.snapshot,$('overviewInsights'));
   if (state.view==='accounts') renderAccounts();
+}
+
+let autoFlowRecovery = null;
+let autoFlowRecoveryAfter = 0;
+let autoFlowRecoveryProfiles = new Set();
+function autoRecoverFlowPages(pageChecks) {
+  if (autoFlowRecovery || Date.now() < autoFlowRecoveryAfter || !state.snapshotFresh) return;
+  const candidates = Object.entries(pageChecks?.accounts || {}).filter(([profile, value]) => {
+    const account = state.snapshot?.real_accounts?.items?.find(a => a.profile === profile);
+    return ['binding','project','editor','overlay','unconfirmed','draft'].includes(value) && !pageChecks?.review?.[profile] &&
+      account?.flow_login === 'verified' && account?.flow_risk_paused !== true && account?.flow_cooling !== true;
+  });
+  if (!candidates.length) return;
+  autoFlowRecoveryProfiles = new Set(candidates.map(([profile]) => profile));
+  autoFlowRecoveryAfter = Date.now() + 300000;
+  autoFlowRecovery = postJson('/api/flow-readiness/auto', {}).then(result => {
+    if (!result || !result.accounts) return;
+    rememberFlowReadiness(result, flowReadinessObservation?.dispatch);
+    if (state.view === 'accounts') renderAccounts();
+  }).catch(() => {
+    // Preserve the failure reason and wait for the bounded next recovery pass.
+  }).finally(() => {
+    autoFlowRecovery = null;
+    autoFlowRecoveryProfiles.clear();
+    if (state.view === 'accounts') renderAccounts();
+  });
 }
 
 function accountReadinessStatus(row) {
@@ -1154,9 +1217,10 @@ function auditFlowAccounts(snapshot, dispatch, pageChecks, probeStartedAt) {
     }
     const busy=page==='busy' || ['preparing','submitting','submitted','generated','downloading'].includes(windowStates.get(profile));
     const proven=page==='ok' || evidence==='generating' || (evidence==='recent_success' && !busy && (page==='unconfirmed'||!page));
-    const status=blocked.length || review ? 'blocked' : proven && dispatch?.available===true ? 'ready' : 'unknown';
+    const active=(snapshot.tasks || []).some(t=>t.source_profile===profile && ['image','video'].includes(t.kind) && ['queued','running'].includes(t.status));
+    const status=blocked.length || review ? 'blocked' : page==='busy' && active && dispatch?.available===true ? 'queue' : proven && dispatch?.available===true ? 'ready' : 'unknown';
     const history=(repair?.actions || []).map(action=>flowRecoveryLabels[action]).filter(Boolean);
-    let note=status==='ready' ? (evidence==='generating' ? 'Flow 已接收，正在生成。' : evidence==='recent_success' ? '最近 10 分钟已生成产物。' : '输入框和发送入口已核对。') :
+    let note=status==='queue' ? '已有任务正在处理，新任务等待账号空闲。' : status==='ready' ? (evidence==='generating' ? 'Flow 已接收，正在生成。' : evidence==='recent_success' ? '最近 10 分钟已生成产物。' : '输入框和发送入口已核对。') :
       status==='unknown' ? (busy ? '任务处理中，尚未确认 Flow 已接收。' : '实际页面或派发服务尚未核对通过。') : '';
     if (status==='ready' && (dispatch.paused || busy || dispatch.active>=dispatch.maximum)) note+=' 新任务可接收，等调度放行或空出名额。';
     if (history.length) note+=` 本轮处理：${history.join('、')}。${status==='ready' ? '复查通过。' : '复查未通过。'}`;
@@ -1303,6 +1367,22 @@ async function startGovernanceAudit(service, repair = true) {
       if (quota) {officialQuotaData=quota;officialQuotaReadFailed=false;}
       if (currentChannel?.available) {state.channelStatus=currentChannel;channelReadFailed=false;}
       await refreshGovernanceCases();
+      if (repair) {
+        audit.authorization=await postJson('/api/official-reauth/activate',{});
+        while (['starting','waiting'].includes(audit.authorization.state)) {
+          renderGovernance();
+          await new Promise(resolve=>setTimeout(resolve,2000));
+          audit.authorization=await getJson('/api/official-reauth/activate',{timeoutMs:8000});
+        }
+        if (audit.authorization.state==='stopped') audit.error=audit.authorization.message;
+        if (audit.authorization.completed) {
+          audit.checkAfterAuthorization=true;
+          const [updated,channel]=await Promise.all([getJson('/api/snapshot',{timeoutMs:10000}),
+            getJson('/api/channel-status',{timeoutMs:8000})]);
+          audit.rows=auditGeminiAccounts(updated,channel,quota,expected);
+          if (channel.available) {state.channelStatus=channel;channelReadFailed=false;}
+        }
+      }
     }
     audit.checkedAt=Date.now()/1000;
   } catch (error) {
@@ -1313,6 +1393,7 @@ async function startGovernanceAudit(service, repair = true) {
     delete audit.snapshot;
     renderGovernance();
     if (audit.repairNext) void startGovernanceAudit(service);
+    else if (audit.checkAfterAuthorization) void startGovernanceAudit(service,false);
   }
 }
 
@@ -1363,12 +1444,14 @@ function renderGovernanceGuidance(service, audit) {
       } else if (page==='login') instruction='固定任务页未能确认登录。到 Ubuntu 打开这个账号的 Flow 窗口，核对页面邮箱；如果 Google 提示登录或验证，请用这个账号完成，再点下方「重新检查」。';
       return instruction ? [`<article class="governance-row"><div><strong>${name}</strong><p>${instruction}</p></div>${button}</article>`] : [];
     });
+    const keyboard=blocked.some(row=>row.issues?.some(issue=>issue.title==='Ubuntu 桌面键盘未就绪'));
     const internal=blocked.length-actions.length;
-    body=`<strong>Flow：${actions.length ? '账号授权与处理' : audit.error ? '本轮检查未完成，你暂时不用操作' : '本轮无需你操作'}</strong>`+
-      actions.join('')+(internal ? `<p>另有 ${internal} 个账号需由工作台侧核对，你不用操作。</p>` : '')+
+    body=`<strong>Flow：${keyboard ? '需要一次 Ubuntu 桌面授权' : actions.length ? '账号授权与处理' : audit.error ? '本轮检查未完成，你暂时不用操作' : '本轮无需你操作'}</strong>`+
+      (keyboard ? '<p>在 Ubuntu 的远程交互弹窗中，开启「允许远程交互」并点击「分享」。这是所有账号共用的一次授权。</p>' : '')+
+      actions.join('')+(!keyboard && internal ? `<p>另有 ${internal} 个账号需由工作台侧核对，你不用操作。</p>` : '')+
       (audit.error ? `<p>${esc(audit.error)}</p>` : '')+
       (governanceError ? `<p>${esc(governanceError)}</p>` : '')+
-      (actions.length || audit.error ? '<button type="button" class="insight-account-link" data-govern-recheck="flow">重新检查 →</button>' : '');
+      (keyboard || actions.length || audit.error ? '<button type="button" class="insight-account-link" data-govern-recheck="flow">重新检查 →</button>' : '');
   }
   if (panel.dataset.rendered===body) return;
   panel.innerHTML=body;
@@ -1405,7 +1488,11 @@ function renderGovernance() {
   const slots=!isGemini && Number.isInteger(dispatch?.active) && Number.isInteger(dispatch?.maximum)
     ? ` · 执行 ${dispatch.active} / ${dispatch.maximum}${dispatch.paused ? ' · 调度已暂停' : ''}` : '';
   const summary=rows.length ? [`${isGemini ? '可立即派发' : '就绪'} ${counts.ready} / ${rows.length}`, ...['queue','blocked','unknown'].filter(key=>counts[key]).map(key=>governanceAuditLabels[key]+' '+counts[key])].join(' · ')+slots : '';
-  const status = governanceError || (audit?.running ? '正在自动检查全部账号…' : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
+  const authorization=audit?.authorization;
+  const authProgress=isGemini && authorization?.state==='waiting'
+    ? `请在 Ubuntu 完成 ${authorization.email} 的 Google 授权（${authorization.completed+1}/${authorization.total}）。确认后自动打开下一个。`
+    : isGemini && authorization?.completed ? `已完成 ${authorization.completed}/${authorization.total} 个账号授权。 ` : '';
+  const status = governanceError || authProgress+(audit?.running ? (authorization?.state==='waiting' ? '' : '正在自动检查全部账号…') : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
     (audit.probes ? ` · 云端验活 ${audit.probes} 个账号` : '') : '') +
     (audit?.error ? ' '+audit.error : '');
   if ($('governanceStatus').textContent !== status) $('governanceStatus').textContent = status;
@@ -1696,6 +1783,8 @@ function renderAccounts() {
     const cooldownEnd = cooldownSeconds === null ? null : (state.snapshotReceivedAt || Date.now()) + cooldownSeconds * 1000;
     const coolingInfo = cooling ? (cooldownSeconds === null ? '本地冷却中，剩余时间待核对。' : '圆圈内为上次读取后估算的本地冷却剩余时间；到时后请刷新核对，服务方是否恢复以实际状态为准。') : '';
     const accountKey = esc(item.key.slice("flow-account-".length));
+    const flowReason = flowAccountReason(item, state.snapshot, {...flowRow,recovering:autoFlowRecoveryProfiles.has(item.profile)},
+      flowReadinessObservation?.pageChecks?.accounts?.[item.profile]);
     const accountProjects = (state.snapshot?.projects || []).filter(p => p.source_profile === item.profile);
     const selectedRetryProject = retryProjectDrafts.get(accountKey) ?? state.snapshot?.retry_projects?.[item.profile] ?? '';
     const ownFlow = flowTasks.filter(t => t.source_profile === item.profile);
@@ -1707,9 +1796,10 @@ function renderAccounts() {
     return `<article class="account-card${cardState}">
       <div class="account-card-heading"><div class="account-avatar" aria-hidden="true">${esc(String(identity).slice(0, 1).toUpperCase())}</div><div class="account-identity"><span class="account-alias">${esc(item.label || item.profile)}</span><h3 title="${esc(identity)}">${esc(identity)}</h3></div><span class="account-login ${item.flow_login === 'verified' ? 'is-ready' : ''}">${esc(login)}</span>
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
-      <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div><span>${hasBalance && !item.flow_balance_fresh ? '上次积分余额' : '积分余额'}</span><strong>${esc(balance)}</strong></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
+      <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div><span>${hasBalance && !item.flow_balance_fresh ? '上次积分余额' : '积分余额'}</span><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账：${esc(item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : "暂未读取")}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
       <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText)}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${countsAsReady(geminiRow) ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${accountOfficialQuotaMarkup(item.key.slice('flow-account-'.length))}</div></div></div>
       <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${flowFallback ? `<span class="account-mini-status is-attention">Flow · ${esc(flowFallback)}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}${geminiFallback ? `<span class="account-mini-status is-attention">Gemini · ${esc(geminiFallback)}</span>` : ''}</div>
+      ${flowReason ? `<p class="account-flow-reason"><strong>${esc(flowReason.label)}：</strong>${esc(flowReason.text)}</p>` : ''}
       <details><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>
       <div class="account-card-actions">${authControl}${flowPaused ? `<button class="button button-light" type="button" data-resume-flow="${accountKey}">已核查，恢复 Flow</button>` : ''}</div></article>`;
   }).join("")}</div>`;

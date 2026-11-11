@@ -95,6 +95,31 @@ class Store:
             (profile,) if profile else (),
         )
 
+    def sync_observed_project_names(self, database=None):
+        """Repair only unnamed, already-owned projects from verified name observations."""
+        database = Path(database) if database else Path.home()/'.local/state/creative-unified-workbench/project-names.sqlite3'
+        if database.is_symlink() or not database.is_file():
+            return 0
+        try:
+            with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro',uri=True,timeout=2)) as source:
+                observed = {(p,i):t for p,i,t in source.execute(
+                    "SELECT profile,project,title FROM names WHERE source IN ('open_flow_tab','browser_history')")}
+        except (OSError,sqlite3.Error):
+            return 0
+        changed = 0
+        with closing(self.connect()) as db, db:
+            for row in db.execute("SELECT p.profile,p.id,a.email FROM projects p JOIN accounts a ON a.profile=p.profile "
+                                  "WHERE a.state='verified' AND p.title IN ('','未命名项目')").fetchall():
+                email = row['email'] or ''
+                if '@' not in email:
+                    continue
+                expected = 'FLOW+' + email.split('@',1)[0]
+                title = observed.get((row['profile'],row['id']))
+                if isinstance(title,str) and title.strip().casefold()==expected.casefold():
+                    changed += db.execute("UPDATE projects SET title=? WHERE profile=? AND id=? AND title IN ('','未命名项目')",
+                                          (expected,row['profile'],row['id'])).rowcount
+        return changed
+
     @staticmethod
     def decode(row):
         for key in ("params", "result"):
@@ -236,6 +261,8 @@ class Store:
             root, ordinal = attempt["root_id"], attempt["ordinal"]
             if not error:
                 state = 'succeeded' if result and result.get('files') else 'needs_review'
+            elif retry_evidence == 'confirmed_before_submit':
+                state = 'manual_failed'
             elif attempt['reason'] == 'same_account':
                 state = 'manual_failed' if retry_evidence in SAFE_VIDEO_RETRY else 'needs_review'
             elif retry_evidence != 'transient_before_submit' and retry_evidence != 'provider_rejected_unusual':

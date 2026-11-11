@@ -65,3 +65,80 @@ test('account cards render fallback states without aborting the account list', (
     assert.equal(Boolean(result.geminiFallback), status !== 'ready');
   }
 });
+
+test('account reason identifies running work without inventing a failure', () => {
+  const context = vm.createContext({});
+  load('flowAccountReason', context);
+  context.account = {profile:'a'};
+  context.snapshot = {flow_coordination:{windows:[{profile:'a',task_id:'current',stage:'preparing'}]},
+    tasks:[{source_id:'current',source_profile:'a',kind:'image',status:'running',retry:{state:'active',attempts:[]}}]};
+  const reason = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'busy')", context);
+  assert.equal(reason.label, '当前占用原因');
+  assert.match(reason.text, /current.*准备输入/);
+  assert.match(reason.text, /尚未收到失败回执/);
+});
+
+test('account reason exposes the original task failure and handles missing detail honestly', () => {
+  const context = vm.createContext({});
+  load('flowAccountReason', context);
+  context.account = {profile:'a'};
+  context.snapshot = {flow_coordination:{windows:[{profile:'a',task_id:'stopped',stage:'submitting'}]},
+    tasks:[{source_id:'stopped',source_profile:'a',kind:'image',status:'interrupted',
+      retry:{state:'needs_review',attempts:[{profile:'a',status:'failed',failure_reason:'等待图片回执超时，结果未确认'}]}}]};
+  const reason = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'busy')", context);
+  assert.equal(reason.label, '失败原因');
+  assert.match(reason.text, /等待图片回执超时.*stopped/);
+  context.snapshot.tasks[0].retry.attempts[0].failure_reason = '';
+  const unknown = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'busy')", context);
+  assert.match(unknown.text, /未返回具体错误/);
+});
+
+test('unlinked busy state cannot be described as a confirmed failure', () => {
+  const context = vm.createContext({});
+  load('flowAccountReason', context);
+  const reason = vm.runInContext("flowAccountReason({profile:'a'},{tasks:[]},{status:'blocked'},'busy')", context);
+  assert.equal(reason.label, '暂不可用原因');
+  assert.match(reason.text, /未查到关联/);
+});
+
+test('a running account is queued rather than marked failed, while real blockers remain', () => {
+  const account = {profile:'a'};
+  const context = vm.createContext({
+    flowReadinessObservation:{pageChecks:{accounts:{a:'busy'}}},
+    flowWindowIssue:()=>null, flowRecoveryLabels:{},
+    flowGovernance:()=>({shared:[],rows:[{account,issues:[]}]}),
+  });
+  load('accountIssues', context);
+  load('auditFlowAccounts', context);
+  context.account = account;
+  context.snapshot = {real_accounts:{items:[account]},tasks:[{kind:'image',source_profile:'a',status:'running'}],
+    flow_coordination:{windows:[{profile:'a',state:'submitted'}]}};
+  assert.equal(vm.runInContext('accountIssues(account,snapshot).length',context),0);
+  const rows=vm.runInContext("auditFlowAccounts(snapshot,{available:true,active:1,maximum:3},{accounts:{a:'busy'}},0)",context);
+  assert.equal(rows[0].status,'queue');
+  context.flowGovernance=()=>({shared:[],rows:[{account,issues:[{title:'Google 要求验证'}]}]});
+  assert.equal(vm.runInContext("auditFlowAccounts(snapshot,{available:true},{accounts:{a:'busy'}},0)[0].status",context),'blocked');
+});
+
+test('a finished no-image lookup is failed while an active attempt remains active', () => {
+  const context=vm.createContext({statusBadge:value=>value});
+  load('flowTaskStatusBadge',context);
+  context.item={kind:'image',status:'interrupted',retry:{state:'needs_review',attempts:[{
+    failure_reason:'no image reply within 240 s, and no new image is in the project'}]}};
+  assert.equal(vm.runInContext('flowTaskStatusBadge(item)',context),'failed');
+  context.item.status='running';context.item.retry.state='active';
+  assert.equal(vm.runInContext('flowTaskStatusBadge(item)',context),'running');
+});
+
+
+test('ready account clears historical failure but preserves task history and current blockers', () => {
+  const context=vm.createContext({});
+  load('flowAccountReason',context);
+  context.account={profile:'a'};
+  context.snapshot={flow_coordination:{windows:[{profile:'a',task_id:'old'}]},tasks:[{
+    kind:'image',source_profile:'a',source_id:'old',status:'failed',failure_reason:'Google 提示异常活动'}]};
+  const original=JSON.stringify(context.snapshot);
+  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{status:'ready',issues:[]},'ready')",context),null);
+  assert.equal(JSON.stringify(context.snapshot),original);
+  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked',issues:[{title:'风控暂停'}]},'ready').label",context),'失败原因');
+});

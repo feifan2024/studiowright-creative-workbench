@@ -18,6 +18,20 @@ READ_STATE = r"""() => {
 }"""
 
 
+class PreSubmissionFailure(RuntimeError):
+    """Preparation failed before any generation operation was invoked."""
+
+
+def browser_profile_matches(args, target):
+    directories = []
+    for i, arg in enumerate(args):
+        if arg.startswith("--user-data-dir="):
+            directories.append(arg.split("=",1)[1])
+        elif arg == "--user-data-dir" and i+1 < len(args):
+            directories.append(args[i+1])
+    return len(directories)==1 and Path(directories[0]).resolve()==Path(target).resolve()
+
+
 class PreSubmissionTransient(RuntimeError):
     """A temporary error occurred before the generation operation was invoked."""
 
@@ -86,10 +100,10 @@ class RealAdapter:
                     continue
                 if (
                     any(a == f"--remote-debugging-port={port}" for a in args)
-                    and f"--user-data-dir={target}" not in args
+                    and not browser_profile_matches(args,target)
                 ):
                     raise ValueError("调试端口属于其他浏览器，已停止连接，避免串号。")
-                if f"--user-data-dir={target}" in args:
+                if browser_profile_matches(args,target):
                     args_for_profile = args
             except (OSError, UnicodeError):
                 continue
@@ -161,6 +175,10 @@ class RealAdapter:
             except (PlaywrightTimeout, TimeoutError, ConnectionError) as exc:
                 if not phase['generation_invoked']:
                     raise PreSubmissionTransient(str(exc)) from exc
+                raise
+            except Exception as exc:
+                if not phase["generation_invoked"]:
+                    raise PreSubmissionFailure(str(exc)) from exc
                 raise
         if task["kind"] not in {"sync", "login", "session_import"}:
             return await self._run(task, account)

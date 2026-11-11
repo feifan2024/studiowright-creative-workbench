@@ -40,8 +40,9 @@ async def inspect_page(account, binding):
     if process_identity(pid, key, port) != (profile, binding['process_start']):
         return 'binding'
     pages = await asyncio.to_thread(_pages, key, pid, port)
+    pages = [page for page in pages if page.get('id') == binding['page_target']]
     if len(pages) != 1:
-        return 'unique'
+        return 'binding'
     page = pages[0]
     if page['id'] != binding['page_target']:
         return 'binding'

@@ -468,21 +468,45 @@ class RealPool:
         return {'source': 'workbench', 'items': [dict(row) for row in rows]}
 
     def dialogue_statistics(self):
-        """Aggregate this workbench's dialogue records, excluding material analysis."""
-        fields = """COUNT(*) AS total,
-            SUM(CASE WHEN r.status='completed' THEN 1 ELSE 0 END) AS completed,
-            SUM(CASE WHEN r.status='failed' THEN 1 ELSE 0 END) AS failed,
-            SUM(CASE WHEN r.status='unknown' THEN 1 ELSE 0 END) AS unresolved,
-            SUM(CASE WHEN r.status='dispatching' THEN 1 ELSE 0 END) AS processing,
-            AVG(CASE WHEN r.status='completed' THEN m.first_text_ms END) AS avg_first_ms,
-            COUNT(CASE WHEN r.status='completed' THEN m.first_text_ms END) AS first_samples,
-            AVG(CASE WHEN r.status='completed' AND r.finished>=r.created THEN (r.finished-r.created)*1000 END) AS avg_total_ms,
-            COUNT(CASE WHEN r.status='completed' AND r.finished>=r.created THEN 1 END) AS total_samples"""
-        base = """ FROM requests r LEFT JOIN request_metrics m USING(request_id)
-                   WHERE NOT EXISTS(SELECT 1 FROM material_analyses a WHERE a.request_id=r.request_id)"""
+        """Aggregate this workbench's dialogue records, excluding material analysis.
+
+        Rolling 7-day window: stale failures age out instead of polluting the UI.
+        """
+        cutoff = time.time() - 7 * 86400
         with self.connection() as db:
-            totals=dict(db.execute('SELECT '+fields+base).fetchone())
-            accounts={r['account_key']:dict(r) for r in db.execute('SELECT r.account_key,'+fields+base+' GROUP BY r.account_key')}
+            totals = dict(db.execute(
+                "SELECT COUNT(*) AS total,"
+                " SUM(CASE WHEN r.status='completed' THEN 1 ELSE 0 END) AS completed,"
+                " SUM(CASE WHEN r.status='failed' THEN 1 ELSE 0 END) AS failed,"
+                " SUM(CASE WHEN r.status='unknown' THEN 1 ELSE 0 END) AS unresolved,"
+                " SUM(CASE WHEN r.status='dispatching' THEN 1 ELSE 0 END) AS processing,"
+                " AVG(CASE WHEN r.status='completed' THEN m.first_text_ms END) AS avg_first_ms,"
+                " COUNT(CASE WHEN r.status='completed' THEN m.first_text_ms END) AS first_samples,"
+                " AVG(CASE WHEN r.status='completed' AND r.finished>=r.created"
+                " THEN (r.finished-r.created)*1000 END) AS avg_total_ms,"
+                " COUNT(CASE WHEN r.status='completed' AND r.finished>=r.created THEN 1 END)"
+                " AS total_samples"
+                " FROM requests r LEFT JOIN request_metrics m USING(request_id)"
+                " WHERE NOT EXISTS(SELECT 1 FROM material_analyses a WHERE a.request_id=r.request_id)"
+                " AND r.created >= ?", (cutoff,)).fetchone())
+            accounts = {}
+            for row in db.execute(
+                "SELECT r.account_key,"
+                " COUNT(*) AS total,"
+                " SUM(CASE WHEN r.status='completed' THEN 1 ELSE 0 END) AS completed,"
+                " SUM(CASE WHEN r.status='failed' THEN 1 ELSE 0 END) AS failed,"
+                " SUM(CASE WHEN r.status='unknown' THEN 1 ELSE 0 END) AS unresolved,"
+                " SUM(CASE WHEN r.status='dispatching' THEN 1 ELSE 0 END) AS processing,"
+                " AVG(CASE WHEN r.status='completed' THEN m.first_text_ms END) AS avg_first_ms,"
+                " COUNT(CASE WHEN r.status='completed' THEN m.first_text_ms END) AS first_samples,"
+                " AVG(CASE WHEN r.status='completed' AND r.finished>=r.created"
+                " THEN (r.finished-r.created)*1000 END) AS avg_total_ms,"
+                " COUNT(CASE WHEN r.status='completed' AND r.finished>=r.created THEN 1 END)"
+                " AS total_samples"
+                " FROM requests r LEFT JOIN request_metrics m USING(request_id)"
+                " WHERE NOT EXISTS(SELECT 1 FROM material_analyses a WHERE a.request_id=r.request_id)"
+                " AND r.created >= ? GROUP BY r.account_key", (cutoff,)):
+                accounts[row['account_key']] = dict(row)
         for record in [totals,*accounts.values()]:
             for field in ('total','completed','failed','unresolved','processing','first_samples','total_samples'):
                 record[field]=record[field] or 0

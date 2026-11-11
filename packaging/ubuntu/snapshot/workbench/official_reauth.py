@@ -30,6 +30,43 @@ TOKEN = Path('home/.gemini/antigravity-cli/antigravity-oauth-token')
 PROBE_AUTH='readiness_authorization_required'
 
 
+def close_authorization_tab(stage, account_key):
+    """Close only this login's recorded tab, after its token was saved."""
+    from urllib.parse import urlsplit
+    from urllib.request import build_opener, ProxyHandler
+    from task_window_registry import TaskWindowRegistry, process_identity
+    try:
+        target = private_bytes(stage/'browser-target', 128).decode('ascii')
+        binding = TaskWindowRegistry().get(account_key)
+        if (not binding or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', target)
+                or target == binding['page_target']):
+            return False
+        pid, port = binding['browser_pid'], binding['port']
+        if process_identity(pid, account_key, port) != (binding['profile'], binding['process_start']):
+            return False
+        opener = build_opener(ProxyHandler({}))
+        base = f'http://127.0.0.1:{port}'
+        with opener.open(base+'/json/list', timeout=2) as response:
+            raw = response.read(4*1024*1024+1)
+        if len(raw) > 4*1024*1024:
+            return False
+        pages = [page for page in json.loads(raw) if page.get('type') == 'page']
+        if not any(page['id'] == binding['page_target'] and
+                   page.get('url', '').startswith('https://flow.google.com/') for page in pages):
+            return False
+        tab = next((page for page in pages if page['id'] == target), None)
+        if tab is None:
+            return True
+        url = urlsplit(tab.get('url', ''))
+        if url.scheme != 'https' or not (url.netloc == 'accounts.google.com'
+                or (url.netloc == 'antigravity.google' and url.path == '/oauth-callback')):
+            return False
+        with opener.open(base+'/json/close/'+target, timeout=2):
+            return True
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return False
+
+
 def private_bytes(path, limit):
     if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
         raise ValueError('授权资料不可读取。')
@@ -66,6 +103,8 @@ class Reauthorization:
         self.official=official
         self.pool=official.pool
         self.runtime=official.runtime
+        from gemini_authorization import GeminiAuthorization
+        self.activation=GeminiAuthorization(self)
 
     def evidence(self, row, attempts):
         if (row['status']!='failed' or row['response'] or row['first_text_ms'] is not None
@@ -148,7 +187,7 @@ class Reauthorization:
         key=row['account_key']
         pref=db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?',(key,)).fetchone()
         if (self.pool.maintenance() or row['hidden'] or (pref and not pref[0])
-                or busy_official(db,key) or unresolved_official(db,key)):
+                or busy_official(db,key) or (not row['readiness_probe'] and unresolved_official(db,key))):
             return False
         if row['readiness_probe']:
             return not db.execute("""SELECT 1 FROM official_jobs p JOIN requests r USING(request_id)
@@ -160,14 +199,18 @@ class Reauthorization:
                 and row['block_reason'] in (AUTH_UNSENT,'provider_error')
                 and row['block_created']==row['finished'])
 
-    def start(self,rid):
+    def start(self,rid,*,login_only=False):
+        if not login_only and self.activation.status()['state'] in ('starting','waiting'):
+            raise ValueError('Gemini 正在按顺序授权，请先完成当前账号。')
         self.pool.conversation_id(rid)
         with self.pool.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            row=self.row(db,rid)
+            if login_only and (not row or not row['readiness_probe']):
+                raise ValueError('自动授权不处理业务请求。')
             existing=db.execute('SELECT state FROM official_reauth WHERE request_id=?',(rid,)).fetchone()
             if existing and existing[0]=='waiting':
                 return {'state':'waiting'}
-            row=self.row(db,rid)
             check_evidence=self.probe_evidence if row and row['readiness_probe'] else self.evidence
             if (existing and existing[0] not in REDO_STATES or not row
                     or not check_evidence(row,self.attempts(db,rid)) or not self.check(db,row)):
@@ -303,6 +346,8 @@ class Reauthorization:
                                    (rid,AUTH_UNSENT,row['started'] or row['created'],row['finished'],row['total_ms']))
                     db.execute("UPDATE requests SET status='queued',finished=NULL,note='原账号已重新授权，原消息等待补发一次。' WHERE request_id=?",(rid,))
                     state='queued'
+            if state in ('completed','queued'):
+                close_authorization_tab(stage, auth['account_key'])
             db.execute("UPDATE official_reauth SET state=?,stage=NULL,token_before=NULL WHERE request_id=?",(state,rid))
             db.execute('COMMIT')
         self.clean(stage)

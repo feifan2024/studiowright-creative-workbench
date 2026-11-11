@@ -36,7 +36,7 @@ def reference_mode(kind, model, mode, ids):
     return reference_ids(ids)
 
 
-FRAME_MODELS = ('veo-lite', 'veo-fast', 'veo-quality', 'omni-flash')
+FRAME_MODELS = ('veo-lite', 'veo-fast', 'veo-quality', 'omni-flash', 'omni-flash-2')
 REFERENCE_FIELDS = {'mode', 'reference_ids', 'start_reference_id', 'end_reference_id'}
 
 

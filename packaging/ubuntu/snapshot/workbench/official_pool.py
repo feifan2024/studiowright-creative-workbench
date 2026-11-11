@@ -161,14 +161,14 @@ class OfficialPool:
                     restored+=1
         return restored
 
-    def reason(self,db,key,available,allowed_block=None):
+    def reason(self,db,key,available,allowed_block=None,*,readiness_probe=False):
         if not available.get(key):return 'authorization_not_ready'
         pref=db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?',(key,)).fetchone()
         if pref and pref[0]==0:return 'dispatch_paused'
         if db.execute("""SELECT 1 FROM official_reauth a JOIN official_jobs j USING(request_id)
                         WHERE a.account_key=? AND a.state='waiting' AND j.readiness_probe=1""",(key,)).fetchone():
             return 'authorization_in_progress'
-        if unresolved_official(db,key):return 'unresolved_request'
+        if not readiness_probe and unresolved_official(db,key):return 'unresolved_request'
         block=db.execute('SELECT reason,created FROM official_account_blocks WHERE account_key=?',(key,)).fetchone()
         if block and tuple(block)!=allowed_block and block[0] not in QUOTA_CHECK_ONLY_BLOCKS:return 'official_call_blocked'
         return None
@@ -176,7 +176,13 @@ class OfficialPool:
     @staticmethod
     def readiness_block(db,key):
         row=db.execute('SELECT reason,created FROM official_account_blocks WHERE account_key=?',(key,)).fetchone()
-        return tuple(row) if row and row[0] in READINESS_RECOVERABLE_BLOCKS else None
+        if not row:return None
+        if row[0] in READINESS_RECOVERABLE_BLOCKS:return tuple(row)
+        if db.execute("""SELECT 1 FROM requests r JOIN official_jobs j USING(request_id)
+                        WHERE r.account_key=? AND r.status='unknown' AND r.finished=?
+                        AND j.reason=? AND j.readiness_probe=0""",(key,row[1],row[0])).fetchone():
+            return tuple(row)
+        return None
 
     def public_status(self):
         available=self.runtime.inventory()
@@ -208,7 +214,7 @@ class OfficialPool:
             candidates=[]
             for key in inventory:
                 block=self.readiness_block(db,key)
-                if (not blocked_only or block) and self.reason(db,key,inventory,block) is None:
+                if (not blocked_only or block) and self.reason(db,key,inventory,block,readiness_probe=True) is None:
                     candidates.append(key)
         queued=[]
         now=time.time()
@@ -216,7 +222,7 @@ class OfficialPool:
             row=quotas.get(key,{})
             checked=row.get('checked_at')
             if type(checked) in (int,float) and 0<=now-checked<=600:
-                if row.get('status') in ('authorization_required','verification_required'):
+                if row.get('status') == 'verification_required':
                     continue
                 if row.get('status')=='ok' and any(row.get(w,{}).get('remaining_percent')==0 for w in ('five_hour','weekly')):
                     continue
@@ -278,7 +284,8 @@ class OfficialPool:
                         if not native:raise Conflict('原生上下文尚未确认，不能重新提交。')
                     if db.execute("SELECT 1 FROM conversation_turns t JOIN requests r USING(request_id) WHERE t.conversation_id=? AND r.status IN ('queued','dispatching')",(conversation_id,)).fetchone():raise Conflict('该对话还有一轮正在等待或执行，请等待完成。')
                 eligible=sorted(k for k in available if k in permitted and self.reason(
-                    db,k,available,self.readiness_block(db,k) if readiness_probe and k==account else None) is None)
+                    db,k,available,self.readiness_block(db,k) if readiness_probe and k==account else None,
+                    readiness_probe=readiness_probe and k==account) is None)
                 if account=='auto':
                     if not eligible:raise Conflict('没有允许派发且授权就绪的账号；暂停和未确认限制均保留。')
                     row=db.execute('SELECT last_account FROM official_pool_cursor WHERE id=1').fetchone();last=row[0] if row else ''
@@ -320,7 +327,8 @@ class OfficialPool:
                     timeout_block=('timeout_unconfirmed',row['finished']) if timed_out else None
                     ordinal=2 if resumed else 1
                     reason=self.reason(db,row['account_key'],available,
-                                       (row['block_reason'],row['block_created']) if resumed else timeout_block or recovery)
+                                       (row['block_reason'],row['block_created']) if resumed else timeout_block or recovery,
+                                       readiness_probe=bool(row['readiness_probe']))
                     if timed_out:
                         previous=db.execute("""SELECT ordinal,status,reason,submitted FROM official_attempts
                             WHERE request_id=? ORDER BY ordinal DESC LIMIT 1""",(row['request_id'],)).fetchone()
@@ -459,6 +467,14 @@ class OfficialPool:
                         and (result.get('response') or '').strip()==READINESS_REPLY):
                     db.execute("DELETE FROM official_account_blocks WHERE account_key=? AND reason=? AND created=?",
                                (job['account_key'],*recovered))
+                if (job.get('readiness_probe') and status=='completed'
+                        and (result.get('response') or '').strip()==READINESS_REPLY):
+                    db.execute("""INSERT OR IGNORE INTO account_unknown_release(request_id,released,reason)
+                        SELECT r.request_id,?,'independent_readiness_verified'
+                        FROM requests r JOIN official_jobs j USING(request_id)
+                        WHERE r.account_key=? AND r.status='unknown' AND j.readiness_probe=0
+                        AND r.finished <= (SELECT created FROM requests WHERE request_id=?)""",
+                        (now,job['account_key'],job['request_id']))
                 if job.get('reauth_state')=='queued':
                     db.execute("UPDATE official_reauth SET state=? WHERE request_id=? AND state='resending'",
                                ('completed' if status=='completed' else 'stopped',job['request_id']))

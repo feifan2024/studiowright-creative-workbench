@@ -745,3 +745,5 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .governance-result[data-state="ready"] { background: #dceee2; color: #235a3e; }
 .governance-result[data-state="queue"] { background: #e0edf7; color: #2c5273; }
 .governance-result[data-state="blocked"] { background: #f5e5d9; color: #854620; }
+
+.account-flow-reason { margin: 10px 0; padding: 9px 11px; border-left: 3px solid #bf8651; border-radius: 5px; background: #fff5e7; color: #704f2b; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }

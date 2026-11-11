@@ -425,6 +425,7 @@ def account_rows(state):
                      "profile": profile, "label": clean_text(row.get("label"), 120), "email": email,
                      "flow_login": "verified" if row.get("state") == "verified" else "unknown",
                      "flow_health": health, "flow_balance": balance,
+                     "flow_next_credit_date": info.get("next_credit_date"),
                      "flow_balance_fresh": info.get("balance_fresh") is True,
                      "flow_balance_observed": numeric_time(info.get("balance_observed")),
                      "flow_cooldown_seconds": max(0, numeric_time(row.get("cooldown_remaining")) or 0),
@@ -830,7 +831,7 @@ class Sources:
         return {"checked_at": time.time(), "flow_state": {"available": True, "skipped_tasks": len(state['tasks']) - len(tasks)},
                 "tasks": tasks, "flow_coordination": state.get('coordination'), "real_accounts": {"items": accounts or []}}, None
 
-    def flow_readiness(self, repair=False, manual_review=None):
+    def flow_readiness(self, repair=False, manual_review=None, automatic=False):
         """Read current pages; only the explicit POST may repair or release a hold."""
         from flow_readiness_recovery import generation_evidence
         state, _ = self.read("flow", "/api/state")
@@ -865,6 +866,11 @@ class Sources:
             raise ValueError('flow_runtime_unavailable')
         repairs = {}
         if repair:
+            if automatic:
+                if time.monotonic() < getattr(self, '_automatic_recovery_after', 0):
+                    return self.flow_readiness()
+                self._automatic_recovery_after = time.monotonic() + 300
+                payload['safe_only'] = True
             recovery = ROOT/'flow_readiness_recovery.py'
             if recovery.is_symlink() or not recovery.is_file():
                 raise ValueError('recovery_helper_unavailable')
@@ -1124,6 +1130,10 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(200,sources.flow_readiness())
                 except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
                     return self.json_response(503,{'error':'Flow 实际任务窗口暂不可核对。'})
+            if self.path == '/api/official-reauth/activate':
+                if not real_pool:
+                    return self.json_response(503, {'error':'账号治理暂不可用。'})
+                return self.json_response(200, real_pool.official.reauth.activation.status())
             if self.path == '/api/official-reauth':
                 if not real_pool:
                     return self.json_response(503, {'error':'账号治理暂不可用。'})
@@ -1336,7 +1346,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             return self.json_response(200, result)
 
         def do_POST(self):
-            if self.path in ('/api/flow-readiness','/api/flow-readiness/review') and deployment == 'ubuntu':
+            if self.path in ('/api/flow-readiness','/api/flow-readiness/review','/api/flow-readiness/auto') and deployment == 'ubuntu':
                 if not self.valid(mutation=True):
                     return self.json_response(403,{'error':'请从工作台发起 Flow 就绪检查。'})
                 length = self.headers.get_all('Content-Length',[])
@@ -1360,7 +1370,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 if not real_pool or real_pool.maintenance() or not FLOW_READINESS_LOCK.acquire(blocking=False):
                     return self.json_response(409,{'error':'工作台正在维护或已有一轮就绪检查，请稍后再试。'})
                 try:
-                    result = sources.flow_readiness(repair=True,manual_review=(raw['account'],raw['task']) if manual else None)
+                    result = sources.flow_readiness(repair=True,manual_review=(raw['account'],raw['task']) if manual else None,
+                        automatic=self.path.endswith('/auto'))
                     if manual and not result.get('released'):
                         return self.json_response(409,{'error':'原任务或账号状态已变化，未放行；请重新检查。'})
                     return self.json_response(200,result)
@@ -1368,6 +1379,12 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(503,{'error':'本轮 Flow 就绪治理未完成，请重新检查当前状态。'})
                 finally:
                     FLOW_READINESS_LOCK.release()
+            if self.path == '/api/official-reauth/activate':
+                if not real_pool or not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台发起授权。'})
+                if self.headers.get('Transfer-Encoding') or self.headers.get_all('Content-Length',[]) != ['2'] or self.rfile.read(2) != b'{}':
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                return self.json_response(202, real_pool.official.reauth.activation.start())
             reauth = re.fullmatch(r'/api/official-reauth/([0-9a-f-]{36})', self.path)
             if reauth:
                 if not real_pool or not self.valid(mutation=True):
@@ -1732,7 +1749,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         if self.path.endswith('-validate'):
                             if account != 'auto':
                                 real_pool.allowed(account, account_data['items'])
-                            vision.prompt_parts(prompt, attachments, vision.files_for(real_pool, request_id, attachments))
+                            attachments, paths = vision.files_for(real_pool, request_id, attachments)
+                            vision.prompt_parts(prompt, attachments, paths)
                             return self.json_response(200, {'valid': True, 'submitted': False, 'image_count': len(attachments)})
                         record, created = real_pool.official.generate(
                             account, prompt, request_id, account_data['items'], attachments, image_analysis=True)
@@ -1928,6 +1946,26 @@ def main():
                     pass
                 stop_monitor.wait(60)
         threading.Thread(target=recover_new_images, name='flow-recovery', daemon=True).start()
+        def recover_idle_flow_pages():
+            # Repairs run independently of the open UI. The shared lock,
+            # five-minute cooldown and live account guards bound every pass.
+            while not stop_monitor.wait(60):
+                if args.deployment != 'ubuntu' or real_pool.maintenance():
+                    continue
+                if not FLOW_READINESS_LOCK.acquire(blocking=False):
+                    continue
+                try:
+                    result = sources.flow_readiness(repair=True, automatic=True)
+                    repairs = result.get('repairs', {})
+                    real_pool.monitor_heartbeat['flow_auto_recovery'] = {
+                        'status':'completed', 'checked_at':time.time(),
+                        'repaired':sum(bool(r.get('actions')) for r in repairs.values())}
+                except Exception as error:
+                    real_pool.monitor_heartbeat['flow_auto_recovery'] = {
+                        'status':'failed', 'checked_at':time.time(), 'reason':type(error).__name__}
+                finally:
+                    FLOW_READINESS_LOCK.release()
+        threading.Thread(target=recover_idle_flow_pages, name='flow-page-auto-recovery', daemon=True).start()
         def analyze_new_materials():
             if stop_monitor.wait(15):
                 return

@@ -20,7 +20,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 
 from account_pacing import account_status, resume_after_review
-from adapter import AccountWindowBusy, PreSubmissionTransient
+from adapter import AccountWindowBusy, PreSubmissionTransient, PreSubmissionFailure
 from api_keys import APIKeys
 from account_insights import Insights
 from console_store import RETRY_KINDS, Store
@@ -184,6 +184,9 @@ class Console:
                     task["profile"], account["email"], "attention", safe_error(exc)
                 )
             result = {"source_jobs": provenance}
+            if isinstance(exc, PreSubmissionFailure) and not provenance:
+                result["submission"] = {"status":"not_submitted","stage":"preparing"}
+                retry_evidence = "confirmed_before_submit"
             if task['kind'] in ('image','video'):
                 from task_coordinator import Coordinator
                 result['self_recovery'] = [e for e in Coordinator().events(task['id']) if e['created'] >= (task.get('started') or 0)]
@@ -340,6 +343,7 @@ class Console:
             await asyncio.sleep(0.2)
 
     def retry_project_matches(self, profile, project):
+        self.store.sync_observed_project_names()
         account = self.store.account(profile)
         email = (account or {}).get('email') or ''
         return ('@' in email and account['state'] == 'verified' and
@@ -352,6 +356,7 @@ class Console:
         roots = self.store.pending_retry_roots()
         if not roots:
             return
+        self.store.sync_observed_project_names()
         from task_coordinator import Coordinator
         states = account_status(self.store.accounts(), self.root / 'data/studiowright.db', now)
         allowed = {a['profile'] for a in states if a['state'] == 'verified'
@@ -457,8 +462,8 @@ class Console:
                         # account queued while the balance reader owns its window.
                         self.balance_busy.add(profile)
                         try:
-                            balance = await asyncio.wait_for(read_balance(account, pw), timeout=12)
-                            self.insights.record(profile, balance)
+                            balance = await asyncio.wait_for(read_balance(account, pw, include_details=True), timeout=12)
+                            self.insights.record(profile, balance["balance"], next_credit_date=balance.get("next_credit_date"))
                         except Exception as exc:
                             message = str(exc) if isinstance(exc, ValueError) else '余额读取暂未完成，保留上次记录。'
                             self.insights.record(profile, error=message)
@@ -562,6 +567,7 @@ class Console:
         if current is None:
             out.update(status='interrupted',result=None,error='重试记录待核对。')
             return out, retry
+        out['submission'] = (current.get('result') or {}).get('submission')
         out.update(effective_profile=current['profile'], effective_project=current['project'],
                    result=current['result'],error=current['error'],finished=current['finished'])
         if state == 'pending_switch':
@@ -572,7 +578,10 @@ class Console:
         elif state == 'succeeded' and latest['status'] == 'succeeded':
             out.update(status='succeeded',error=None)
         elif state in ('interrupted', 'needs_review') or state == 'succeeded':
-            out.update(status='interrupted',result=None,error='原结果需核对，已停止重试。')
+            not_submitted = (current.get('result') or {}).get('submission',{}).get('status') == 'not_submitted'
+            no_result = re.search(r'no image reply within \d+ s, and no new image is in the project', str(current.get('error') or ''))
+            out.update(status='failed' if no_result or not_submitted else 'interrupted',result=None,
+                       error=current.get('error') or '原结果需核对，已停止重试。')
         elif state == 'cancelled':
             out.update(status='cancelled',result=None,error=None)
         else:
@@ -868,6 +877,8 @@ def create_app(root, adapter, test=False):
         data['task_id'] = data['id']
         if ident != root:
             data['requested_task_id'] = ident
+        if public.get('error'): data['failure_reason'] = public['error']
+        data['submission'] = public.get('submission')
         data['downloads'] = [{'path':item['url'],'name':item['name']} for item in data['downloads']]
         if data['retry']:
             data['retry'] = dict(data['retry'], attempts=[

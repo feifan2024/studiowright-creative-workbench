@@ -67,7 +67,39 @@ def verify_identity(state, email):
     return bool(email and state.get('signed_in') and emails == [email])
 
 
-async def read_balance(account, playwright):
+def parse_credit_renewal(text, now=None):
+    """Read explicit credit reset text, including Google's yearless Chinese format."""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone(timedelta(hours=8)))
+    lines = str(text).splitlines()
+    values = set()
+    for i, line in enumerate(lines):
+        context = ' '.join(lines[max(0,i-1):i+2])
+        if not re.search(r'积分|点数|點數|credits?', context, re.I):
+            continue
+        if not re.search(r'重置时间|重置時間|补充|到账|refresh|reset|refill|replenish', line, re.I):
+            continue
+        match = re.search(r'(?:(20\d{2})[年/.-]\s*)?(\d{1,2})[月/.-]\s*(\d{1,2})日?(?:\s*(\d{1,2}):(\d{2}))?', line)
+        try:
+            if match:
+                y,mo,day,hour,minute=match.groups()
+                year=int(y) if y else now.year
+                value=datetime(year,int(mo),int(day),int(hour or 0),int(minute or 0),tzinfo=now.tzinfo)
+                if not y and value.date()<now.date():
+                    value=value.replace(year=year+1)
+                values.add(value.strftime('%Y-%m-%d %H:%M') if hour else value.strftime('%Y-%m-%d'))
+            else:
+                match=re.search(r'([A-Za-z]+ \d{1,2},? 20\d{2}|\d{1,2} [A-Za-z]+ 20\d{2})',line)
+                if not match:continue
+                for fmt in ('%B %d %Y','%b %d %Y','%d %B %Y','%d %b %Y'):
+                    try:values.add(datetime.strptime(match[0].replace(',',''),fmt).strftime('%Y-%m-%d'));break
+                    except ValueError:pass
+        except ValueError:
+            continue
+    return next(iter(values)) if len(values)==1 else None
+
+
+async def read_balance(account, playwright, include_details=False):
     from filelock import FileLock,Timeout
     from playwright.async_api import TimeoutError as BrowserTimeout
     from studiowright import chrome,paths
@@ -114,11 +146,23 @@ async def read_balance(account, playwright):
         for _ in range(12):
             if page.url!=checked_url:
                 raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
-            value=parse_balance(await body.inner_text(timeout=750),branded_only=True)
+            panel_text=await body.inner_text(timeout=750)
+            value=parse_balance(panel_text,branded_only=True)
             if value is not None:
+                if include_details and parse_credit_renewal(panel_text) is None:
+                    credit_label=page.get_by_text(re.compile(r'^[\d,\s]+个?\s*Google\s*Flow\s*(?:点数|积分|點數|credits?)$',re.I)).filter(visible=True)
+                    if await credit_label.count()==1:
+                        try:
+                            await credit_label.hover(timeout=750)
+                            for _ in range(5):
+                                panel_text=await body.inner_text(timeout=750)
+                                if parse_credit_renewal(panel_text):break
+                                await asyncio.sleep(.15)
+                        except BrowserTimeout:
+                            pass
                 if not verify_identity(await page.evaluate(READ_STATE),email) or page.url!=checked_url:
                     raise ValueError('Flow 页面或账号发生变化，未保存余额。')
-                return value
+                return {"balance":value,"next_credit_date":parse_credit_renewal(panel_text)} if include_details else value
             await asyncio.sleep(.25)
         raise ValueError('页面没有明确显示积分数，未估算余额。')
     finally:

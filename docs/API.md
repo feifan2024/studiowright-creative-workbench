@@ -111,7 +111,7 @@ print(call("/api/real-pool/flow", payload, rid))
 | 模式 | 在 params 中添加 |
 | --- | --- |
 | 图生图 | `mode: "image-to-image"` 和 `reference_ids`（图片编号数组） |
-| Veo / Omni 首帧或首尾帧 | `mode: "frames"`、`start_reference_id`，可选 `end_reference_id`（图片编号） |
+| Veo / Omni 1.1、1.2 首帧或首尾帧 | `mode: "frames"`、`start_reference_id`，可选 `end_reference_id`（图片编号） |
 | Omni 混合参考 | `model: "omni-flash"`、`mode: "ingredients"` 和 `reference_ids`（图片、MP4 编号数组） |
 
 参考文件支持 JPG、PNG、WebP 和上述模式允许的 MP4，不接收独立音频。单文件最多 8 MiB、合计 64 MiB，编号 24 小时有效。只校验时发送 `POST /api/real-pool/flow-validate` 并设 `confirm: false`，返回 `valid`、`submitted: false` 和 `reference_count`。

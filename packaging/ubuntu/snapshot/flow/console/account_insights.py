@@ -24,13 +24,15 @@ class Insights:
         store.execute("""CREATE TABLE IF NOT EXISTS account_balances(
             profile TEXT PRIMARY KEY,balance REAL,observed REAL,checked REAL,
             status TEXT,error TEXT)""")
+        store.execute("CREATE TABLE IF NOT EXISTS account_credit_renewals(profile TEXT PRIMARY KEY,next_date TEXT,observed REAL)")
 
-    def record(self, profile, balance=None, error=None, now=None):
+    def record(self, profile, balance=None, error=None, now=None, next_credit_date=None):
         now = time.time() if now is None else now
         if error is None and number(balance) is None:
             raise ValueError('余额不正确。')
         if error is None:
             self.store.execute("INSERT INTO account_balances VALUES(?,?,?,?,'ready',NULL) ON CONFLICT(profile) DO UPDATE SET balance=excluded.balance,observed=excluded.observed,checked=excluded.checked,status='ready',error=NULL", (profile, balance, now, now))
+            self.store.execute("INSERT INTO account_credit_renewals VALUES(?,?,?) ON CONFLICT(profile) DO UPDATE SET next_date=excluded.next_date,observed=excluded.observed", (profile,next_credit_date,now))
         else:
             self.store.execute("INSERT INTO account_balances VALUES(?,NULL,NULL,?,'unknown',?) ON CONFLICT(profile) DO UPDATE SET checked=excluded.checked,status='unknown',error=excluded.error", (profile, now, error))
 
@@ -53,6 +55,7 @@ class Insights:
         now=time.time() if now is None else now
         jobs,cached,source_readable=self.source_data()
         balances={r['profile']:r for r in self.store.rows('SELECT * FROM account_balances')}
+        renewals={r['profile']:r for r in self.store.rows('SELECT * FROM account_credit_renewals')}
         rows=[]
         for a in accounts:
             b=balances.get(a['profile']) or cached.get(a['profile']) or {}
@@ -70,6 +73,7 @@ class Insights:
             else:health,reason='ready','最近登录已核对、未冷却且有余额'
             rows.append({'profile':a['profile'],'email':a.get('email'), 'health':health,'reason':reason,
                          'balance':value,'balance_observed':observed,'balance_checked':b.get('checked'),
+                         'next_credit_date':renewals.get(a['profile'],{}).get('next_date'),
                          'balance_fresh':fresh,'balance_error':b.get('error')})
         profiles={a['profile'] for a in accounts}
         jobs=[j for j in jobs if j['profile'] in profiles]

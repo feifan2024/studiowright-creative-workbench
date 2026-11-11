@@ -60,6 +60,18 @@ def successful_output(task):
                 for j in result.get('source_jobs',[]) if isinstance(j,dict)))
 
 
+def failed_without_result(task):
+    """A bounded reply wait AND project lookup found no image; never authorizes replay."""
+    if not task or task.get('status') != 'failed':
+        return False
+    if not re.search(r'no image reply within \d+ s, and no new image is in the project',str(task.get('error') or '')):
+        return False
+    result = task.get('result') or {}
+    jobs = result.get('source_jobs') or []
+    return bool(jobs) and not result.get('files') and all(
+        j.get('status') == 'failed' and not j.get('media_ids') and not j.get('files') for j in jobs)
+
+
 def review_hold(account, task_id, manual=False):
     import time
     from task_coordinator import Coordinator
@@ -72,7 +84,18 @@ def review_hold(account, task_id, manual=False):
     task = next((t for t in s['tasks'] if t.get('id') == task_id),None)
     if task and (task.get('effective_profile') or task.get('profile')) != p:
         return False
-    if not manual and not (task and successful_output(task)):
+    closed_without_result = failed_without_result(task)
+    if not closed_without_result and task:
+        database = Path.home()/'.local/share/studiowright-evaluation/console-data/console.db'
+        with sqlite3.connect(database.as_uri()+'?mode=ro',uri=True,timeout=2) as source:
+            source.row_factory = sqlite3.Row
+            row = source.execute('SELECT profile,status,error,result FROM flow_task_execution_rows WHERE root_id=? ORDER BY ordinal DESC LIMIT 1',
+                                 (task_id,)).fetchone()
+        if row and row['profile'] == p:
+            raw = dict(row)
+            raw['result'] = json.loads(raw['result'] or '{}')
+            closed_without_result = failed_without_result(raw)
+    if not manual and not (task and (successful_output(task) or closed_without_result)):
         return False
     if (STATE/'maintenance').exists():
         return False
@@ -83,7 +106,8 @@ def review_hold(account, task_id, manual=False):
             WHERE profile=? AND task_id=? AND state='result_unknown'""", (now,p,task_id)).rowcount
         if changed:
             db.execute('INSERT INTO events(profile,task_id,action,detail,created) VALUES(?,?,?,?,?)',
-                       (p,task_id,'readiness_hold_reviewed_by_operator' if manual else 'readiness_output_verified','{}',now))
+                       (p,task_id,'readiness_hold_reviewed_by_operator' if manual else
+                        'readiness_no_result_closed' if closed_without_result else 'readiness_output_verified','{}',now))
     return changed == 1
 
 
@@ -174,7 +198,13 @@ async def candidate(account):
     pages = await asyncio.to_thread(_pages,key,pid,port)
     windows = await asyncio.to_thread(focus_call,'List',pid)
     if len(pages) != 1 or len(windows) != 1:
-        raise ValueError('unique')
+        known = TaskWindowRegistry().get(key)
+        if (not known or known.get('browser_pid')!=pid or known.get('process_start')!=stamp or known.get('port')!=port):
+            raise ValueError('unique')
+        pages = [p for p in pages if p.get('id')==known.get('page_target')]
+        windows = [w for w in windows if w.get('id')==known.get('window_id') and w.get('workspace')==known.get('workspace')]
+        if len(pages)!=1 or len(windows)!=1:
+            raise ValueError('unique')
     page,win = pages[0],windows[0]
     endpoint = urlsplit(page.get('webSocketDebuggerUrl',''))
     if (endpoint.scheme,endpoint.netloc,endpoint.path,endpoint.query,endpoint.fragment) != (
@@ -199,7 +229,7 @@ async def evaluate(ws, expression):
     return raw.get('result',{}).get('value',{})
 
 
-def restart_managed(binding):
+def restart_managed(binding, allow_responsive=False):
     """Never stop a process just because its port stopped answering."""
     p = binding['profile']
     unit = 'studiowright-browser-'+p+'.service'
@@ -213,7 +243,14 @@ def restart_managed(binding):
     except (OSError,TimeoutError):
         pass
     else:
-        raise ValueError('browser_still_responding')
+        if not allow_responsive:
+            raise ValueError('browser_still_responding')
+        with build_opener(ProxyHandler({})).open(f"http://127.0.0.1:{binding['port']}/json/list",timeout=2) as response:
+            tabs = [x for x in json.load(response) if x.get('type') == 'page']
+        windows = focus_call('List',binding['browser_pid'])
+        if (len(tabs)!=1 or tabs[0].get('id')!=binding['page_target'] or len(windows)!=1
+                or windows[0].get('id')!=binding['window_id']):
+            raise ValueError('restart_not_safe')
     subprocess.run(systemctl+['restart',unit],check=True,capture_output=True,timeout=12)
 
 
@@ -243,7 +280,7 @@ def _rebuild_standard(account):
     return project
 
 
-async def repair(account, initial, actions):
+async def repair(account, initial, actions, safe_only=False):
     import websockets
     from flow_window_policy import Lifecycle
     from task_coordinator import Coordinator
@@ -265,6 +302,10 @@ async def repair(account, initial, actions):
         async with websockets.connect(endpoint,open_timeout=2,close_timeout=1,max_size=65536) as ws:
             current['chrome_window'] = (await command(ws,'Browser.getWindowForTarget',{'targetId':current['page_target']}))['windowId']
             before = await evaluate(ws,expected)
+            if safe_only and (not before.get('origin') or not before.get('account') or before.get('busy')):
+                return ('draft' if before.get('draft') else 'busy' if before.get('busy') else 'login'),None
+            if before.get('draft'):
+                initial = 'draft'
             if (not before.get('origin') or not before.get('account')) and not navigated_once:
                 # Auto-navigation: a stray interstitial (Google bar, account picker)
                 # is brought back to the canonical project once per pass.
@@ -283,9 +324,13 @@ async def repair(account, initial, actions):
                 return 'login',None
             # Refresh drafts only on the account's verified fixed task page.
             if initial == 'draft' and before.get('draft'):
-                if (not same or not old or old.get('binding_state') != 'verified'
-                        or old.get('project_url') != project or any(old.get(k)!=v for k,v in current.items())):
-                    return 'draft',None
+                if not same:
+                    return 'project',None
+                if (not old or old.get('binding_state') != 'verified' or old.get('project_url') != project
+                        or any(old.get(k)!=v for k,v in current.items())):
+                    await asyncio.to_thread(guard_live,account)
+                    TaskWindowRegistry().bind(**current,project_url=project)
+                    actions.append('rebind')
                 if before.get('busy'):
                     return 'busy',None
                 live_projects, _ = await asyncio.to_thread(guard_live,account)
@@ -384,7 +429,7 @@ async def repair(account, initial, actions):
             return 'binding',None
         # The restarted browser may reopen the homepage. Reuse the same safety
         # checks in a second round; never perform a second reload or restart.
-        return await repair(account,'after_restart',actions)
+        return await repair(account,'after_restart',actions,safe_only=safe_only)
     provisional = dict(current,project_url=desired,binding_state='verified')
     account = dict(account,projects=projects)
     verdict = 'unconfirmed'
@@ -406,6 +451,25 @@ async def repair(account, initial, actions):
                 if (now.get('account') and 'https://flow.google.com'+now.get('path','').rstrip('/')==desired
                         and not now.get('draft') and not now.get('busy') and await evaluate(ws,DISMISS_UPDATE) is True):
                     actions.append('dismiss_update')
+    if (verdict in {'draft','editor','project','binding','unconfirmed'} and 'restart' not in actions
+            and any(action in actions for action in ('reload','open_project'))):
+        # The operator authorized refresh/restart of this exact idle task window.
+        # Recheck the live account and page before escalating beyond a refresh.
+        await asyncio.to_thread(guard_live,account)
+        async with websockets.connect(endpoint,open_timeout=2,close_timeout=1,max_size=65536) as ws:
+            last = await evaluate(ws,expected)
+        if not last.get('account') or not last.get('origin') or last.get('busy'):
+            return verdict,None
+        await asyncio.to_thread(restart_managed,current,allow_responsive=True)
+        actions.append('restart')
+        for _ in range(12):
+            await asyncio.sleep(.5)
+            try:
+                await candidate(account)
+                return await repair(account,'after_restart',actions,safe_only=safe_only)
+            except (OSError,ValueError):
+                continue
+        return 'binding',None
     if verdict != 'ok':
         return verdict,None
     await asyncio.to_thread(guard_live,account)
@@ -438,11 +502,16 @@ async def recover(payload):
     bindings = {b['profile']:b for b in payload['bindings']}
     lifecycle = {w['profile']:w for w in Lifecycle().status()}
     out = {}
+    deadline = asyncio.get_running_loop().time() + 140
     for account in payload['accounts']:
+        if asyncio.get_running_loop().time() >= deadline - 2:
+            break
         p = account['profile']
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',p):
             continue
         if p in busy:
+            continue
+        if payload.get('safe_only') and not account.get('repairable'):
             continue
         actions = []
         try:
@@ -474,9 +543,13 @@ async def recover(payload):
                 except (OSError,ValueError,TimeoutError):
                     before = 'binding'
                 old_draft = before == 'ok' and (Coordinator().window(p) or {}).get('state') == 'blocked_draft'
+                if payload.get('safe_only') and before not in {'binding','project','editor','overlay','draft'} and not old_draft:
+                    out[p] = {'page':before,'actions':[]}
+                    continue
                 if (before in {'binding','project','editor','overlay','draft'} or old_draft or
                         (before == 'ok' and lifecycle.get(p,{}).get('unique_ok') != 1)):
-                    verdict,_ = await asyncio.wait_for(repair(account,before,actions),timeout=16)
+                    verdict,_ = await asyncio.wait_for(repair(account,before,actions,safe_only=payload.get('safe_only') is True),
+                        timeout=min(45,max(1,deadline-asyncio.get_running_loop().time())))
                 else:
                     verdict = before
         except Timeout:

@@ -205,12 +205,36 @@ class MixedReferencePage:
         await self.flow._wait_attachments(before + 1)
 
 
+def offered_model_pattern(label):
+    import re
+    return re.compile(re.escape(label) + r"(?=\s*(?:$|将于|將於|Retir|Discontinu|Deprecat))",re.I)
+
+
+async def select_offered_model(self, pane, label):
+    from studiowright.flow import selectors as selectors
+    from studiowright.flow.page import FlowError
+    button=pane.locator(selectors.MODEL_MENU_BUTTON).first
+    current=" ".join((await button.inner_text()).replace("arrow_drop_down", "").split())
+    if current.endswith(label):return
+    await button.click()
+    item=self.page.locator(selectors.MENU_ITEM).filter(has_text=offered_model_pattern(label))
+    try:
+        await item.first.wait_for(state="visible",timeout=5000)
+    except Exception as exc:
+        await self.page.keyboard.press("Escape")
+        raise FlowError(f"the model {label!r} is not offered on this account") from exc
+    await item.first.click()
+    await self.page.wait_for_timeout(200)
+
+
 class RenderingStudio(Studio):
     def configure_reference_uploads(self, project, files):
         self._scoped_references = (project, tuple(files))
 
     async def _generation_page(self, project_id):
         lease, flow = await super()._generation_page(project_id)
+        from types import MethodType
+        flow._model = MethodType(select_offered_model,flow)
         scope = getattr(self, '_scoped_references', None)
         if scope and any(path.endswith('.mp4') for path in scope[1]):
             flow = MixedReferencePage(flow)
