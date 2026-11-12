@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def choose_prompt_input(prompt):
+    import re
+    if re.fullmatch(r'[A-Za-z0-9 ,.]{1,120}', prompt) and random.randrange(2) == 0:
+        return 'type'
+    return 'paste'
+
+
 class InputNotSubmitted(Exception):
     """The provider submission boundary was not crossed."""
 
@@ -102,16 +109,18 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
                 raise InputNotSubmitted('composer_not_empty')
             from portal_keyboard_client import PortalKeyboard
             keyboard = PortalKeyboard(target, gui_environment=getattr(driver, 'env', None))
-            typing = keyboard.ready() and len(prompt) <= 2500
+            # Only type short, single-line ASCII; paste everything else once
+            # to avoid repeatedly replacing the desktop clipboard.
+            typing = keyboard.ready() and choose_prompt_input(prompt) == 'type'
+            record('typing_started' if typing else 'paste_started', characters=len(prompt))
             if typing:
-                record('chunked_paste_started', characters=len(prompt), chunks=max(1, (len(prompt) + 47) // 48))
-                await driver.copy_prompt_and_paste_chunks(page, composer, target, prompt)
+                if not await driver.confirm_focus(target, page, composer):
+                    raise InputNotSubmitted('window_focus_lost')
+                await keyboard.type(prompt)
             else:
-                record('paste_started')
-                # A partial/late paste must never be repeated automatically.
                 await driver.copy_prompt_and_paste(page, composer, target, prompt)
-            # The editor can lag real keystrokes; only poll, never re-enter text.
-            deadline = time.monotonic() + (max(12.0, len(prompt) * 0.35) if typing else 2)
+            # Only poll; never repeat a partially entered prompt.
+            deadline = time.monotonic() + 2
             while (await driver.composer_text(page, composer)).replace('\r\n', '\n') != prompt:
                 if time.monotonic() >= deadline:
                     raise InputNotSubmitted('pasted_text_mismatch')
@@ -121,7 +130,7 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
             if not await driver.confirm_focus(target, page, composer):
                 raise InputNotSubmitted('window_focus_lost')
             from pointer_sequence import record_input_action
-            record_input_action(target, 'chunked_text_verified' if typing else 'pasted_text_verified', characters=len(prompt))
+            record_input_action(target, 'typed_text_verified' if typing else 'pasted_text_verified', characters=len(prompt))
             # A human looks the text over before sending; the real pointer drifts meanwhile.
             await asyncio.sleep(random.uniform(1.5, 4.0))
             await _pointer_drift(driver, target)

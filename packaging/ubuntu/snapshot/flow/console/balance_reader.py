@@ -126,12 +126,14 @@ async def read_balance(account, playwright, include_details=False):
             if verified:
                 if await close.count()==1:
                     break
-                count=await panel.count()
-                if count==0 and attempt>=3 and scroll_top is None:
+                if scroll_top is None:
                     scroll_top=await page.evaluate(REVEAL_HEADER)
+                    if scroll_top is not None:
+                        await asyncio.sleep(.35)
+                count=await panel.count()
                 if count==1:
                     try:
-                        await panel.click(timeout=900)
+                        await panel.click(timeout=1600)
                     except BrowserTimeout:
                         raise ValueError('Flow 账号详情按钮暂不可点，可能有弹窗遮挡，保留上次余额。') from None
                     opened=True

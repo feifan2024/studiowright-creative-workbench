@@ -2,7 +2,7 @@
 
 一个连接 Flow 创作服务和 Gemini 对话服务的工作台，包含 Ubuntu 服务端和 Windows 桌面操作端。Windows 端使用独立窗口，支持系统托盘和局域网发现。
 
-当前源码版本：**v0.2.3**。见 [版本记录](CHANGELOG.md) 与 [验证说明](docs/RELEASE-v0.2.3.md)。此源码版本未重新发布安装包。
+当前源码版本：**v0.2.4**。见 [版本记录](CHANGELOG.md) 与 [验证说明](docs/RELEASE-v0.2.4.md)。此源码版本未重新发布安装包。
 
 ## 安装使用
 

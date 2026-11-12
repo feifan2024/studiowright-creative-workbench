@@ -39,6 +39,8 @@ def call(path, payload=None, request_id=None, *, file=None):
 
 ## Gemini · 对话与推理
 
+需要关闭某条 Gemini 文字请求的自动重试时，可在请求体传 `"retry_policy": "never"`。同一请求编号重查时保持参数一致。
+
 **`POST /api/conversations`** · 传 title，返回对话 id。
 
 **`POST /api/real-pool/chat`** · 传 conversation_id、account: "auto"、prompt，返回 request_id 和 status。

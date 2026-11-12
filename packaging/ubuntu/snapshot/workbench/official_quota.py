@@ -18,6 +18,23 @@ KEY = re.compile(r'[0-9a-f]{64}\Z')
 TTL = 300
 
 
+def verification_entry(text):
+    from urllib.parse import parse_qs, urlsplit
+    candidates = set()
+    for link in re.findall(r'https://[^\s<>"\x1b]+', ANSI.sub('', text)):
+        try:
+            url = urlsplit(link)
+            target = parse_qs(url.query).get('continue', [])
+            if (url.scheme == 'https' and url.netloc == 'accounts.google.com'
+                    and url.path == '/v3/signin/continue' and not url.fragment
+                    and target == ['https://developers.google.com/gemini-code-assist/auth/auth_success_gemini']
+                    and len(link) <= 4096):
+                candidates.add(link)
+        except ValueError:
+            continue
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
 def classify_failure(text, *, sent=False, identity=False):
     """Expose only typed evidence; generic eligibility failures do not prove verification."""
     plain = ANSI.sub('', text)
@@ -93,7 +110,7 @@ def read_account(runtime, key, *, save_renewal=False):
                'TERM':'xterm-256color', 'SSH_TTY':'quota-read-only', 'SSH_CONNECTION':'quota-read-only'}
         env.update(official_network_env())
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH',60,150,0,0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH',60,4096,0,0))
         process = None
         try:
             process = subprocess.Popen([str(account['binary']), '--settings', '{"altScreenMode":"never","notifications":false}'],
@@ -108,7 +125,15 @@ def read_account(runtime, key, *, save_renewal=False):
                     break
                 plain = ANSI.sub('',output.decode('utf-8',errors='replace'))
                 failure=classify_failure(plain,sent=sent,identity=identity)
-                if failure['status']=='verification_required':return failure
+                if failure['status']=='verification_required':
+                    link=verification_entry(plain) if identity and sent else None
+                    if link:
+                        failure['_verification_url']=link
+                        return failure
+                    # The official link can arrive in a later terminal write.
+                    if time.monotonic()-started >= 20:
+                        failure['reason']='provider_validation_no_entry'
+                        return failure
                 # Trust is granted solely to the newly created empty tmpfs workspace.
                 if not trusted and 'Do you trust the contents of this project?' in plain:
                     os.write(master,b'\r'); trusted = True
@@ -123,7 +148,13 @@ def read_account(runtime, key, *, save_renewal=False):
                             save_verified_token(original/token_name,cfg/token_name,original_token,account['email'])
                         return {'status':'ok', 'checked_at':time.time(),'phase':'usage','identity_matched':True, **parsed}
                 if process.poll() is not None and not select.select([master],[],[],0)[0]:break
-            return classify_failure(output.decode('utf-8',errors='replace'),sent=sent,identity=identity)
+            plain=output.decode('utf-8',errors='replace')
+            failure=classify_failure(plain,sent=sent,identity=identity)
+            if failure['status']=='verification_required':
+                link=verification_entry(plain) if identity and sent else None
+                if link:failure['_verification_url']=link
+                else:failure['reason']='provider_validation_no_entry'
+            return failure
         finally:
             if slave is not None: os.close(slave)
             if process:
@@ -198,6 +229,11 @@ class QuotaReader:
     def __init__(self, runtime):
         self.runtime = runtime; self.lock = threading.Lock(); self.running = False; self.attempted = 0
         self.account_locks = {}
+        self.authorization_refreshes = set()
+        self.explicit_attempted = 0
+        self.pending_recovery = ()
+        self.verification_links = {}
+        self.verification = {'state':'idle','completed':0,'total':0}
         self.rows = {}; self.cache = runtime.config.parent/'official-quota.json'
         try:
             if not self.cache.is_symlink() and self.cache.stat().st_size < 100000:
@@ -216,7 +252,11 @@ class QuotaReader:
             self.rows = {k:self.rows.get(k,{'status':'not_read'}) for k in keys if KEY.fullmatch(k)}
             # Failed reads await the explicit refresh button; no silent auth retry loop.
             automatic = not self.attempted or (any(r.get('status')=='ok' for r in self.rows.values()) and now-self.attempted >= TTL)
-            explicit = force and now-self.attempted>=60
+            explicit = force and now-self.explicit_attempted>=60
+            if explicit:
+                self.explicit_attempted=now
+                if self.running:
+                    self.pending_recovery=tuple(self.rows)
             plan = tuple(k for k,r in self.rows.items() if explicit or r.get('status') in ('ok','not_read'))
             if refresh and plan and not self.running and (automatic or explicit):
                 self.running=True; self.attempted=now
@@ -234,7 +274,29 @@ class QuotaReader:
         except OSError:
             pass  # The in-memory snapshot remains usable when cache storage is unavailable.
         finally:
-            with self.lock: self.running=False
+            with self.lock:
+                pending=self.pending_recovery
+                self.pending_recovery=()
+                self.running=bool(pending)
+                if pending:
+                    self.attempted=time.time()
+                    threading.Thread(target=self._refresh,args=(pending,True),daemon=True,name='official-quota-recovery').start()
+
+    def refresh_after_authorization(self, key):
+        if not KEY.fullmatch(key):
+            return False
+        with self.lock:
+            if key in self.authorization_refreshes:
+                return False
+            self.authorization_refreshes.add(key)
+        def refresh():
+            try:
+                self.check(key)
+            finally:
+                with self.lock:
+                    self.authorization_refreshes.discard(key)
+        threading.Thread(target=refresh,daemon=True,name='official-quota-after-login').start()
+        return True
 
     def check(self,key):
         if not KEY.fullmatch(key):raise ValueError('账号编号不正确')
@@ -244,6 +306,9 @@ class QuotaReader:
             except (OSError,ValueError,TypeError,KeyError,subprocess.SubprocessError):
                 row={'status':'unavailable','checked_at':time.time(),'reason':'local_read_failed'}
             with self.lock:
+                link=row.pop('_verification_url',None)
+                if link:self.verification_links[key]=(link,time.time())
+                else:self.verification_links.pop(key,None)
                 self.rows[key]=row
                 if not self.cache.is_symlink():
                     temporary=self.cache.with_name('.official-quota-'+str(time.time_ns())+'.json')

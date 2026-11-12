@@ -39,6 +39,48 @@ class GeminiAuthorizationTest(unittest.TestCase):
             self.assertEqual(pool.reason(db, 'a', inventory, pool.readiness_block(db, 'a'),
                                          readiness_probe=True), 'official_call_blocked')
 
+    def test_old_timeout_is_archived_without_replaying_or_deleting(self):
+        pool = OfficialPool.__new__(OfficialPool)
+        with sqlite3.connect(':memory:', isolation_level=None) as db:
+            db.executescript("""
+                CREATE TABLE requests(request_id TEXT, account_key TEXT, status TEXT, finished REAL, note TEXT, response TEXT);
+                CREATE TABLE official_jobs(request_id TEXT, reason TEXT, readiness_probe INTEGER);
+                CREATE TABLE official_account_blocks(account_key TEXT PRIMARY KEY, reason TEXT, created REAL);
+                CREATE TABLE account_unknown_release(request_id TEXT PRIMARY KEY, released REAL, reason TEXT);
+                INSERT INTO requests VALUES('old','a','unknown',100,'timeout','partial');
+                INSERT INTO requests VALUES('new','a','unknown',500,'timeout',NULL);
+                INSERT INTO official_jobs VALUES('old','timeout_unconfirmed',0);
+                INSERT INTO official_jobs VALUES('new','timeout_unconfirmed',0);
+            """)
+            pool.pool = SimpleNamespace(maintenance=lambda: False, connection=lambda: db)
+            self.assertEqual(pool.archive_old_timeouts(now=2000), 1)
+            self.assertEqual(pool.archive_old_timeouts(now=2000), 0)
+            self.assertEqual(db.execute("SELECT status,response FROM requests WHERE request_id='old'").fetchone(), ('unknown','partial'))
+            self.assertEqual(db.execute("SELECT request_id FROM account_unknown_release").fetchall(), [('old',)])
+            self.assertEqual(db.execute("SELECT reason FROM official_account_blocks").fetchone(), ('timeout_unconfirmed',))
+
+    def test_authorization_schedules_targeted_quota_read(self):
+        import threading
+        from official_quota import QuotaReader
+        reader = QuotaReader.__new__(QuotaReader)
+        reader.lock = threading.Lock()
+        reader.authorization_refreshes = set()
+        seen = []
+        started, release = threading.Event(), threading.Event()
+        def check(key):
+            seen.append(key)
+            started.set()
+            release.wait(2)
+        reader.check = check
+        key = 'a' * 64
+        try:
+            self.assertTrue(reader.refresh_after_authorization(key))
+            self.assertTrue(started.wait(1))
+            self.assertFalse(reader.refresh_after_authorization(key))
+            self.assertEqual(seen, [key])
+        finally:
+            release.set()
+
     def make_activation(self):
         return GeminiAuthorization(SimpleNamespace(pool=None, runtime=None))
 

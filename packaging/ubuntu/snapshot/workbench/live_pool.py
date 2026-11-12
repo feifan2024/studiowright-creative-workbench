@@ -456,15 +456,17 @@ class RealPool:
         return {'enabled': enabled, 'message': '自动保活已启用；账号异常和未确认结果不会自动清除。' if enabled
                 else '自动保活已暂停；Gemini 使用和 Flow 不受此开关影响。'}
 
-    def request_history(self):
+    def request_history(self, include_checks=True):
         """Only workbench requests, without message bodies or upstream credentials."""
         with self.connection() as db:
             rows = db.execute('''SELECT r.request_id,r.account_key,r.selection,r.status,r.created,r.finished,r.note,
                                  CASE WHEN j.request_id IS NOT NULL THEN 'official_antigravity_cli' WHEN p.request_id IS NULL THEN 'legacy' ELSE 'pooldesk' END AS engine,
-                                 p.stage AS engine_stage,p.engine_version AS engine_version
+                                 p.stage AS engine_stage,p.engine_version AS engine_version,
+                                 COALESCE(j.readiness_probe,0) AS readiness_probe
                                  FROM requests r LEFT JOIN pooldesk_attempts p ON p.request_id=r.request_id
                                  LEFT JOIN official_jobs j ON j.request_id=r.request_id
-                                 ORDER BY r.created DESC LIMIT 100''').fetchall()
+                                 WHERE ? OR COALESCE(j.readiness_probe,0)=0
+                                 ORDER BY r.created DESC LIMIT 100''', (int(include_checks),)).fetchall()
         return {'source': 'workbench', 'items': [dict(row) for row in rows]}
 
     def dialogue_statistics(self):
@@ -1648,5 +1650,5 @@ class RealPool:
             raise Conflict('没有同时满足登录、浏览器和用量条件的 Gemini 账号，请先核对账号。')
         return min(candidates)[2]
 
-    def generate(self, account, prompt, request_id, items, attachments=None, conversation_id=None, model=None):
-        return self.official.generate(account,prompt,request_id,items,attachments,conversation_id,model)
+    def generate(self, account, prompt, request_id, items, attachments=None, conversation_id=None, model=None, *, retry_policy=None):
+        return self.official.generate(account,prompt,request_id,items,attachments,conversation_id,model,retry_policy=retry_policy)

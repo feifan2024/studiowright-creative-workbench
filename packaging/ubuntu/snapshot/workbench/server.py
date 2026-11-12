@@ -426,6 +426,7 @@ def account_rows(state):
                      "flow_login": "verified" if row.get("state") == "verified" else "unknown",
                      "flow_health": health, "flow_balance": balance,
                      "flow_next_credit_date": info.get("next_credit_date"),
+                     "flow_balance_error": clean_text(info.get("balance_error"), 200),
                      "flow_balance_fresh": info.get("balance_fresh") is True,
                      "flow_balance_observed": numeric_time(info.get("balance_observed")),
                      "flow_cooldown_seconds": max(0, numeric_time(row.get("cooldown_remaining")) or 0),
@@ -900,6 +901,14 @@ class Sources:
         result = subprocess.run([str(python),'-B',str(helper)], input=json.dumps(payload).encode(),
                                 capture_output=True, check=True, timeout=10)
         checks = json.loads(result.stdout)
+        if repair and not automatic and any(
+                checks.get(a['profile']) == 'ok' and a['flow_login'] == 'verified'
+                and not a['flow_balance_fresh'] and not a['flow_risk_paused'] and not a['flow_cooling']
+                for a in account_rows(state) if a['flow_risk_known'] and a['flow_pacing_known']):
+            try:
+                self.refresh_flow_balances_once()
+            except (OSError, ValueError):
+                pass
         allowed = {'ok','busy','binding','unique','project','login','draft','overlay','editor','unconfirmed'}
         if not isinstance(checks,dict) or any(v not in allowed for v in checks.values()):
             raise ValueError('invalid_readiness_result')
@@ -1121,6 +1130,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
         def do_GET(self):
             if not self.valid():
                 return self.respond(403, b"Forbidden", "text/plain; charset=utf-8")
+            if self.path == '/api/real-pool/request-policy':
+                return self.json_response(200, {'retry_policy':['never'], 'scope':'request', 'version':1})
             if self.path == '/api/recent-tasks/events':
                 return self.stream_tasks()
             if self.path == '/api/frontend/events':
@@ -1138,6 +1149,12 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 if not real_pool:
                     return self.json_response(503, {'error':'账号治理暂不可用。'})
                 return self.json_response(200,real_pool.official.reauth.dashboard())
+            if self.path == '/api/official-quota/verify':
+                from official_quota import reader_for
+                from gemini_quota_verification import status
+                if not real_pool:
+                    return self.json_response(503, {'error':'额度服务暂不可用。'})
+                return self.json_response(200,status(reader_for(real_pool.official.runtime)))
             if self.path == '/api/official-quota':
                 from official_quota import snapshot
                 return self.json_response(200, snapshot(real_pool.official.runtime) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
@@ -1290,7 +1307,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 except (ValueError, OSError, URLError):
                     return self.json_response(503, {'error': '素材信息暂不可读取。'})
             if self.path == "/api/health":
-                result = {"application": "unified-workbench", "version": 1, "deployment": deployment}
+                result = {"application": "unified-workbench", "version": 1, "deployment": deployment, "request_policy": {"retry_policy":["never"], "scope":"request", "version":1}}
             elif self.path == "/api/status":
                 result = sources.status()
                 if real_pool:
@@ -1319,8 +1336,17 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             elif self.path in {"/api/scheduler/health", "/api/scheduler/workflows", "/api/scheduler/demo-accounts"}:
                 status, result = coordinator.request("GET", self.path.replace("/api/scheduler/", "/api/", 1))
                 return self.json_response(status, result)
-            elif real_pool and self.path == '/api/real-pool/activity':
-                result = real_pool.request_history()
+            elif real_pool and re.fullmatch(r"/api/real-pool/activity/[0-9a-f-]{36}", self.path):
+                with real_pool.connection() as db:
+                    row = db.execute("""SELECT r.request_id,r.status,r.response,r.note,t.prompt,j.model
+                                        FROM requests r LEFT JOIN conversation_turns t USING(request_id)
+                                        LEFT JOIN official_jobs j USING(request_id) WHERE r.request_id=?""",
+                                     (self.path.rsplit('/',1)[-1],)).fetchone()
+                if row is None:
+                    return self.json_response(404, {"error":"没有找到该请求。"})
+                return self.json_response(200,dict(row))
+            elif real_pool and self.path in ('/api/real-pool/activity','/api/real-pool/activity?include_checks=0'):
+                result = real_pool.request_history(include_checks=not self.path.endswith('?include_checks=0'))
             elif real_pool and re.fullmatch(r"/api/real-pool/requests/[0-9a-f-]{36}", self.path):
                 result = real_pool.get(self.path.rsplit('/', 1)[-1])
                 if result is None:
@@ -1421,6 +1447,14 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(400, {'error': str(exc)})
                 except (ImportError, OSError, sqlite3.Error):
                     return self.json_response(503, {'error': '参考图暂存服务暂不可用。'})
+            if self.path == '/api/official-quota/verify':
+                if not real_pool or not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台发起验证。'})
+                if self.headers.get('Transfer-Encoding') or self.headers.get_all('Content-Length',[]) != ['2'] or self.rfile.read(2) != b'{}':
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                from official_quota import reader_for
+                from gemini_quota_verification import start
+                return self.json_response(202,start(reader_for(real_pool.official.runtime)))
             if self.path in ('/api/official-quota/refresh','/api/gemini-readiness','/api/gemini-readiness?scope=recoverable'):
                 if not self.valid(mutation=True):
                     return self.json_response(403, {'error':'请从工作台刷新额度。'})
@@ -1439,7 +1473,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     probes=official.queue_readiness_probes(snapshot_accounts.get('items',[]),quota['accounts'],
                         blocked_only=self.path.endswith('?scope=recoverable')) if snapshot_accounts.get('available') is True else []
                     return self.json_response(200, {**quota,'readiness_probes':probes})
-                return self.json_response(200, snapshot(real_pool.official.runtime, force=True) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
+                return self.json_response(200, reader_for(real_pool.official.runtime).snapshot(force=True, recover=True) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
             if self.path in {'/api/real-pool/recover-account', '/api/real-pool/check'}:
                 return self.json_response(410, {"error":'旧 Gemini 网页功能已停用。当前官方通道提供文字对话；这项旧操作未执行。',"code":"legacy_gemini_removed"})
             if self.path == '/api/channel-status':
@@ -1799,18 +1833,21 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         if set(data) != {'account', 'enabled'}:
                             raise ValueError('请求内容格式不正确。')
                         return self.json_response(200, real_pool.set_gemini_enabled(data['account'], data['enabled'], account_data['items']))
-                    if set(data) - {"account", "prompt", "attachments", "conversation_id", "model"} or not {'account', 'prompt'} <= set(data):
+                    if set(data) - {"account", "prompt", "attachments", "conversation_id", "model", "retry_policy"} or not {'account', 'prompt'} <= set(data):
                         raise ValueError("请求内容格式不正确。")
+                    if data.get('retry_policy') not in (None, 'never'):
+                        raise ValueError('Invalid retry policy')
+                    retry_kwargs={'retry_policy':data['retry_policy']} if 'retry_policy' in data else {}
                     if 'attachments' in data and not isinstance(data['attachments'], list):
                         raise ValueError("附件信息不正确。")
                     if data.get('conversation_id'):
-                        record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'], data.get('attachments', []), data['conversation_id'], data.get('model'))
+                        record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'], data.get('attachments', []), data['conversation_id'], data.get('model'), **retry_kwargs)
                     elif data.get('model') is not None:
                         raise ValueError('模型选择需要在对话中使用。')
                     elif data.get('attachments'):
-                        record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'], data['attachments'])
+                        record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'], data['attachments'], **retry_kwargs)
                     else:
-                        record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'])
+                        record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'], **retry_kwargs)
                     return self.json_response(201 if created else 200, record)
                 except DispatchBusy as exc:
                     return self.json_response(409, {'error': str(exc)})

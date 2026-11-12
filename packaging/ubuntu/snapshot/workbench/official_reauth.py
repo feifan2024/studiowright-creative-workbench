@@ -351,6 +351,9 @@ class Reauthorization:
             db.execute("UPDATE official_reauth SET state=?,stage=NULL,token_before=NULL WHERE request_id=?",(state,rid))
             db.execute('COMMIT')
         self.clean(stage)
+        if state in ('completed','queued'):
+            from official_quota import reader_for
+            reader_for(self.runtime).refresh_after_authorization(auth['account_key'])
         self.official.wake.set()
 
 

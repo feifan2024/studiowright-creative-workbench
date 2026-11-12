@@ -62,6 +62,8 @@ class OfficialPool:
                     COMMIT;''')
             if 'readiness_probe' not in {row['name'] for row in db.execute('PRAGMA table_info(official_jobs)')}:
                 db.execute('ALTER TABLE official_jobs ADD COLUMN readiness_probe INTEGER NOT NULL DEFAULT 0')
+            if 'no_retry' not in {r['name'] for r in db.execute('PRAGMA table_info(official_jobs)')}:
+                db.execute('ALTER TABLE official_jobs ADD COLUMN no_retry INTEGER NOT NULL DEFAULT 0')
             db.executescript(REAUTH_SCHEMA)
             # Interrupted submitted jobs stay unknown; queued jobs were never sent and are not replayed after restart.
             db.executescript("""BEGIN IMMEDIATE;
@@ -98,8 +100,30 @@ class OfficialPool:
     def monitor_saved_replies(self):
         # Conversation recovery runs separately from the account readiness button.
         while not self.stop.wait(60):
-            try:self.reconcile_saved_replies()
+            try:
+                self.reconcile_saved_replies()
+                self.archive_old_timeouts()
             except (sqlite3.Error,OSError,ValueError):pass
+
+    def archive_old_timeouts(self, now=None):
+        """Archive final timeouts after 30 minutes without deleting or replaying."""
+        if self.pool.maintenance():return 0
+        now=time.time() if now is None else now
+        with self.pool.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows=db.execute("""SELECT r.request_id,r.account_key,r.finished
+                FROM requests r JOIN official_jobs j USING(request_id)
+                WHERE r.status='unknown' AND r.finished <= ?
+                AND j.reason='timeout_unconfirmed' AND j.readiness_probe=0
+                AND NOT EXISTS(SELECT 1 FROM account_unknown_release x WHERE x.request_id=r.request_id)""",
+                (now-1800,)).fetchall()
+            for rid,key,finished in rows:
+                db.execute("INSERT INTO account_unknown_release VALUES(?,?,'timeout_archived_unconfirmed')",(rid,now))
+                db.execute("UPDATE requests SET note=COALESCE(note,'') || ? WHERE request_id=?",
+                           (' 已归档：超时，结果未确认；保留原记录，未重发。',rid))
+                db.execute("INSERT OR IGNORE INTO official_account_blocks VALUES(?,'timeout_unconfirmed',?)",(key,finished))
+            db.execute('COMMIT')
+        return len(rows)
 
     def reconcile_saved_replies(self):
         """Restore only proven replies from original CLI receipts. Never call a model."""
@@ -234,7 +258,8 @@ class OfficialPool:
             queued.append({'request_id':record['request_id'],'account_key':key,'new':new})
         return queued
 
-    def generate(self,account,prompt,request_id,items,attachments=None,conversation_id=None,model=None,*,image_analysis=False,readiness_probe=False):
+    def generate(self,account,prompt,request_id,items,attachments=None,conversation_id=None,model=None,*,image_analysis=False,readiness_probe=False,retry_policy=None):
+        if retry_policy not in (None, "never"):raise ValueError("Invalid retry policy")
         from live_pool import Conflict
         if not self.ready:raise Conflict('官方调用尚未配置完成，未发送。')
         self.pool.conversation_id(request_id)
@@ -248,6 +273,7 @@ class OfficialPool:
         if account!='auto':self.pool.allowed(account,items)
         if conversation_id:self.pool.conversation_id(conversation_id)
         payload={'account':account,'prompt':prompt,'conversation_id':conversation_id,'model':model or MODEL}
+        if retry_policy == 'never':payload['retry_policy']='never'
         if image_analysis:payload.update(channel=vision.CHANNEL,attachments=attachments)
         digest=hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
         now=time.time();available=self.runtime.inventory()
@@ -301,8 +327,8 @@ class OfficialPool:
                 db.execute("INSERT INTO requests(request_id,account_key,prompt_digest,status,created,note,selection) VALUES(?,?,?,'queued',?,?,?)",(request_id,account,digest,now,'已进入官方调用队列；固定账号。',selection))
                 db.execute('INSERT INTO conversation_turns VALUES(?,?,?,?)',(request_id,conversation_id,prompt,json.dumps(attachments if image_analysis else [])))
                 db.execute('INSERT INTO conversation_attempt_models(request_id,model) VALUES(?,?)',(request_id,MODEL))
-                db.execute('INSERT INTO official_jobs(request_id,conversation_id,model,native_before,readiness_probe) VALUES(?,?,?,?,?)',
-                           (request_id,conversation_id,MODEL,native,int(readiness_probe)))
+                db.execute('INSERT INTO official_jobs(request_id,conversation_id,model,native_before,readiness_probe,no_retry) VALUES(?,?,?,?,?,?)',
+                           (request_id,conversation_id,MODEL,native,int(readiness_probe),int(retry_policy=='never')))
                 db.execute('COMMIT')
             except BaseException:db.execute('ROLLBACK');raise
         self.wake.set()
@@ -314,7 +340,7 @@ class OfficialPool:
             db.execute('BEGIN IMMEDIATE')
             try:
                 if self.pool.maintenance():db.execute('COMMIT');return None
-                rows=db.execute("""SELECT r.request_id,r.account_key,r.created,r.finished,j.reason AS job_reason,j.conversation_id,j.native_before,j.readiness_probe,t.prompt,t.attachments,
+                rows=db.execute("""SELECT r.request_id,r.account_key,r.created,r.finished,j.reason AS job_reason,j.conversation_id,j.native_before,j.readiness_probe,j.no_retry,t.prompt,t.attachments,
                                   a.state AS reauth_state,a.block_reason,a.block_created,a.account_key AS reauth_account,c.hidden
                                   FROM requests r JOIN official_jobs j USING(request_id)
                                   JOIN conversation_turns t USING(request_id) JOIN conversations c ON c.id=j.conversation_id
@@ -404,6 +430,8 @@ class OfficialPool:
             return self.runtime.run(*args,audit/'attempt-2')
         ordinal=job.get('ordinal',1)
         result=self.runtime.run(*args,audit if ordinal==1 else audit/f'attempt-{ordinal}')
+        if job.get('no_retry'):
+            return result
         if job.get('readiness_probe'):
             if result.get('reason')==AUTH_UNSENT:
                 return {**result,'reason':'readiness_authorization_required'}

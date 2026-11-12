@@ -198,7 +198,8 @@ function flowAccountReason(account, snapshot, row, pageState) {
     (t.retry?.attempts || []).some(a => a.id === window.task_id));
   const active = tasks.find(t => ['queued','running'].includes(t.status) && t.source_profile === account.profile);
   if (!active && row?.status === 'ready' && !row?.issues?.length && pageState !== 'busy') return null;
-  const task = active || linked;
+  const historical = window?.state === 'idle' && !account.flow_risk_paused && !account.flow_cooling;
+  const task = active || (historical ? null : linked);
   const attempts = (task?.retry?.attempts || []).filter(a => !a.profile || a.profile === account.profile);
   const latest = attempts.at(-1);
   const failure = latest?.failure_reason || task?.failure_reason;
@@ -358,7 +359,90 @@ function setView(view) {
 
 // The Windows app and browser display the same workbench. Each cycle only
 // reads the open page; sending, checking credentials and retrying stay explicit.
+let recordsTab = 'flow';
+let geminiRecordLoad = null;
+async function refreshGeminiRecords() {
+  if (geminiRecordLoad) return geminiRecordLoad;
+  const summary=$('geminiRecordSummary');
+  const table=$('geminiRecordTable');
+  geminiRecordLoad=(async()=>{
+    try {
+      const showChecks=$('geminiShowChecks')?.checked === true;
+      const data=await getJson('/api/real-pool/activity'+(showChecks?'':'?include_checks=0'),{timeoutMs:8000});
+      if (showChecks!==($('geminiShowChecks')?.checked === true)) return;
+      if (!Array.isArray(data.items)) throw new Error('invalid records');
+      const accounts=new Map((state.snapshot?.real_accounts?.items || []).map(
+        a=>[(a.key || '').replace(/^flow-account-/,''),a.email || a.label]));
+      const statuses={queued:'排队中',dispatching:'执行中',completed:'已完成',failed:'失败',unknown:'结果待核对',cancelled:'已取消'};
+      summary.textContent=`最近 ${data.items.length} 条请求${showChecks?' · 含自查请求':''}`;
+      const rows=data.items.map(r=>{
+        const archived=r.status==='unknown' && String(r.note || '').includes('已归档');
+        const elapsed=Number.isFinite(r.finished) && Number.isFinite(r.created) && r.finished>=r.created
+          ? ((r.finished-r.created).toFixed(1)+' 秒') : '—';
+        return `<tr><td>${esc(accounts.get(r.account_key) || '—')}</td><td>${esc(archived?'已归档 · 结果待核对':statuses[r.status] || '状态待核对')}</td><td>${esc(Number.isFinite(r.created)?dateTime(r.created):'—')}</td><td>${esc(elapsed)}</td><td><code>${esc(r.request_id || '—')}</code></td><td>${r.readiness_probe ? '<strong>自查请求</strong> · ' : ''}${esc(r.note || '—')}<details data-gemini-request="${esc(r.request_id || '')}"><summary>查看请求和返回</summary><div class="subtle">展开后读取详情。</div></details></td></tr>`;
+      }).join('');
+      const markup=rows ? `<table><thead><tr><th>账号</th><th>状态</th><th>提交时间</th><th>总耗时</th><th>请求编号</th><th>结果说明</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<div class="empty">还没有 Gemini 请求记录。</div>';
+      if (!table.querySelector('details[open]') && table.innerHTML!==markup) table.innerHTML=markup;
+    } catch (_) {
+      summary.textContent='Gemini 请求记录暂时无法读取。';
+    }
+  })().finally(()=>{geminiRecordLoad=null;});
+  return geminiRecordLoad;
+}
+$('geminiRecordTable')?.addEventListener('toggle',async event=>{
+  const panel=event.target;
+  if (!panel.matches('details[data-gemini-request]') || !panel.open || panel.dataset.loading==='true') return;
+  panel.dataset.loading='true';
+  const body=panel.querySelector('div');
+  body.textContent='正在读取…';
+  try {
+    const row=await getJson('/api/real-pool/activity/'+encodeURIComponent(panel.dataset.geminiRequest),{timeoutMs:8000});
+    body.replaceChildren();
+    for (const [label,value] of [['请求内容',row.prompt ?? '没有保存原请求内容。'],
+      ['返回内容',row.response ?? '没有收到或保存回复。']]) {
+      const heading=document.createElement('strong');
+      const content=document.createElement('p');
+      heading.textContent=label;
+      content.style.whiteSpace='pre-wrap';
+      content.style.overflowWrap='anywhere';
+      content.textContent=value;
+      body.append(heading,content);
+    }
+  } catch (_) {
+    body.textContent='详情暂时无法读取，合上后可再展开重试。';
+  } finally { delete panel.dataset.loading; }
+},true);
+
+$('geminiShowChecks')?.addEventListener('change',async ()=>{
+  const table=$('geminiRecordTable');
+  table.replaceChildren();
+  $('geminiRecordSummary').textContent='正在读取…';
+  if (geminiRecordLoad) await geminiRecordLoad;
+  void refreshGeminiRecords();
+});
+function selectRecordsTab(tab, focus=false) {
+  recordsTab=tab;
+  for (const [name,id,panel] of [['flow','flowRecordsTab','taskRecords'],['gemini','geminiRecordsTab','geminiRecords']]) {
+    const selected=name===tab;
+    $(id).setAttribute('aria-selected',String(selected));
+    $(id).tabIndex=selected?0:-1;
+    $(panel).hidden=!selected;
+    if (selected && focus) $(id).focus();
+  }
+  if (tab==='gemini') void refreshGeminiRecords();
+}
+for (const [name,id] of [['flow','flowRecordsTab'],['gemini','geminiRecordsTab']]) {
+  $(id)?.addEventListener('click',()=>selectRecordsTab(name));
+  $(id)?.addEventListener('keydown',event=>{
+    if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+    event.preventDefault();
+    selectRecordsTab(event.key==='Home'?'flow':event.key==='End'?'gemini':name==='flow'?'gemini':'flow',true);
+  });
+}
+
 function syncVisiblePage(view, background) {
+  if (view==='records' && recordsTab==='gemini') void refreshGeminiRecords();
   const read = (key, fn) => {
     if (viewReads.has(key)) return;
     const pending = Promise.resolve().then(fn).catch(() => {}).finally(() => viewReads.delete(key));
@@ -927,7 +1011,7 @@ function flowGovernance(snapshot, fresh = state.snapshotFresh, verifiedEmpty = n
     if (account.flow_risk_known!==true || account.flow_pacing_known!==true)
       add('flow_controls','暂停或冷却状态待核对','核对原账号状态。');
     if (account.flow_balance_fresh !== true || !Number.isFinite(account.flow_balance))
-      add('flow_balance','积分待核对','等待后台读到近期余额。');
+      add('flow_balance',account.flow_balance_error || '积分待核对','点 Flow 一键就绪重新读取积分。');
     else if (account.flow_balance <= 0 && !issues.some(i=>i.key==='flow_empty'))
       add('flow_empty','Flow 积分不足','积分恢复后重新检查。');
     const window=windows.get(account.profile);
@@ -1324,12 +1408,20 @@ async function startGovernanceAudit(service, repair = true) {
   renderGovernance();
   try {
     const flowResult=service==='flow' && repair ? await postJson('/api/flow-readiness',{}) : null;
-    const [snapshot, extra]=await Promise.all([
+    let [snapshot, extra]=await Promise.all([
       getJson('/api/snapshot',{timeoutMs:10000}),
       getJson(service==='flow' ? '/api/dispatch/concurrency' : '/api/channel-status',{timeoutMs:8000}).catch(()=>null)
     ]);
     if (snapshot.real_accounts?.available!==true) throw new Error('本轮账号列表暂不可读取。');
     if (service==='flow') {
+      const waiting = () => (snapshot.real_accounts?.items || []).some(a =>
+        flowResult?.accounts?.[a.profile] === 'ok' && !a.flow_balance_fresh &&
+        a.flow_login === 'verified' && !a.flow_risk_paused && !a.flow_cooling);
+      for (let i=0; i<8 && repair && waiting(); i++) {
+        await new Promise(resolve=>setTimeout(resolve,1500));
+        const latest=await getJson('/api/snapshot',{timeoutMs:6000}).catch(()=>null);
+        if (latest?.real_accounts?.available) snapshot=latest;
+      }
       audit.snapshot=snapshot;
       audit.dispatch=extra;
       const pageChecks=flowResult || await getJson('/api/flow-readiness',{timeoutMs:14000}).catch(()=>null);
@@ -1338,7 +1430,26 @@ async function startGovernanceAudit(service, repair = true) {
       rememberFlowReadiness(pageChecks,extra);
       if (!pageChecks) audit.error='实际任务窗口检查暂未返回。';
     } else {
+      // The circle includes quota refresh, even when conversation dispatch is healthy.
+      let quotaRead=repair ? await postJson('/api/official-quota/refresh',{}).catch(()=>null) : null;
+      if (quotaRead?.refreshing) {
+        audit.quotaChecking=true;
+        renderGovernance();
+        const quotaDeadline=Date.now()+60000;
+        while (quotaRead.refreshing && Date.now()<quotaDeadline) {
+          await new Promise(resolve=>setTimeout(resolve,2000));
+          quotaRead=await getJson('/api/official-quota',{timeoutMs:6000}).catch(()=>null) || quotaRead;
+        }
+        audit.quotaChecking=false;
+      }
       let quota=await postJson('/api/gemini-readiness',{});
+      const quotaRows=Object.values(quota?.accounts || {});
+      const quotaComplete=quotaRows.filter(row=>row.status==='ok' && ['five_hour','weekly'].every(
+        window=>Number.isFinite(row[window]?.remaining_percent)) && Number.isFinite(row.checked_at) &&
+        Math.abs(Date.now()/1000-row.checked_at)<=600).length;
+      audit.quotaSummary=quotaRows.length ? ` · 两项额度已读取 ${quotaComplete}/${quotaRows.length}` : '';
+      if (quotaRead?.refreshing) audit.error='部分额度仍在读取，结果会自动更新。';
+      renderAccountQuotas();
       const probes=Array.isArray(quota.readiness_probes) ? quota.readiness_probes : [];
       const expected=new Map(probes.map(p=>[p.account_key,p.request_id]));
       audit.probes=probes.length;
@@ -1382,6 +1493,25 @@ async function startGovernanceAudit(service, repair = true) {
           audit.rows=auditGeminiAccounts(updated,channel,quota,expected);
           if (channel.available) {state.channelStatus=channel;channelReadFailed=false;}
         }
+        if (audit.authorization.state!=='stopped') {
+          audit.quotaVerification=await postJson('/api/official-quota/verify',{});
+          while (['starting','waiting','rechecking'].includes(audit.quotaVerification.state)) {
+            renderGovernance();
+            await new Promise(resolve=>setTimeout(resolve,2000));
+            audit.quotaVerification=await getJson('/api/official-quota/verify',{timeoutMs:8000});
+          }
+          if (audit.quotaVerification.total) {
+            quota=await getJson('/api/official-quota',{timeoutMs:8000});
+            officialQuotaData=quota;officialQuotaReadFailed=false;
+            audit.rows=auditGeminiAccounts(currentSnapshot,currentChannel,quota,expected);
+            const count=Object.values(quota.accounts).filter(row=>row.status==='ok' &&
+              ['five_hour','weekly'].every(w=>Number.isFinite(row[w]?.remaining_percent))).length;
+            audit.quotaSummary=` · 两项额度已读取 ${count}/${Object.keys(quota.accounts).length}`;
+            if (audit.quotaVerification.state==='stopped') audit.error=
+              audit.quotaVerification.reason==='verification_wait_timeout' ? '官方验证等待超时，完成后可重新检查。' :
+                '无法打开该账号的官方验证页，请核对 Ubuntu 浏览器窗口。';
+          }
+        }
       }
     }
     audit.checkedAt=Date.now()/1000;
@@ -1389,6 +1519,7 @@ async function startGovernanceAudit(service, repair = true) {
     audit.error=error.message || '本轮检查未完成。';
   } finally {
     audit.running=false;
+    if (service==='gemini') renderAccountQuotas();
     if (state.view==='overview' && state.snapshot) renderAccountInsights(audit.snapshot || state.snapshot,$('overviewInsights'));
     delete audit.snapshot;
     renderGovernance();
@@ -1492,12 +1623,17 @@ function renderGovernance() {
   const authProgress=isGemini && authorization?.state==='waiting'
     ? `请在 Ubuntu 完成 ${authorization.email} 的 Google 授权（${authorization.completed+1}/${authorization.total}）。确认后自动打开下一个。`
     : isGemini && authorization?.completed ? `已完成 ${authorization.completed}/${authorization.total} 个账号授权。 ` : '';
-  const status = governanceError || authProgress+(audit?.running ? (authorization?.state==='waiting' ? '' : '正在自动检查全部账号…') : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
-    (audit.probes ? ` · 云端验活 ${audit.probes} 个账号` : '') : '') +
+  const verification=audit?.quotaVerification;
+  const verificationProgress=isGemini && verification?.state==='waiting'
+    ? `请在 Ubuntu 完成 ${verification.email} 的 Google 官方验证。完成后自动重读额度。`
+    : isGemini && verification?.state==='rechecking' ? '正在重读已验证账号的额度…' : '';
+  const status = governanceError || verificationProgress || authProgress+(audit?.running ? (authorization?.state==='waiting' ? '' : audit?.quotaChecking ? '正在自动读取 5 小时和每周额度…' : '正在自动检查全部账号…') : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
+    (audit.probes ? ` · 云端验活 ${audit.probes} 个账号` : '') + (audit.quotaSummary || '') : '') +
     (audit?.error ? ' '+audit.error : '');
   if ($('governanceStatus').textContent !== status) $('governanceStatus').textContent = status;
   const detailRows=rows.map(({account,status,issues,note})=>{
-    const reasons=[...new Set(issues.map(issue=>issue.title.replace(/^固定任务窗口绑定待核对$/,'任务窗口绑定待核对')))];
+    const visibleIssues=isGemini && audit?.running ? issues.filter(issue=>!['confirmed_verification','confirmed_reauth'].includes(issue.key)) : issues;
+    const reasons=[...new Set(visibleIssues.map(issue=>issue.title.replace(/^固定任务窗口绑定待核对$/,'任务窗口绑定待核对')))];
     return `<article class="governance-row"><div><strong>${esc(governanceAccountName(account))}</strong><span class="governance-result" data-state="${status}">${esc(!isGemini && status==='ready' ? '就绪' : governanceAuditLabels[status])}</span>
       ${note ? '<p>'+esc(note)+'</p>' : ''}${reasons.map(reason=>'<p>'+esc(reason)+'</p>').join('')}</div></article>`;
   }).join('');
@@ -1649,7 +1785,14 @@ function accountOfficialQuotaMarkup(key) {
     const recovery = value === null ? '' : typeof reset === 'number' && Number.isFinite(reset) && reset > now ? '恢复 '+dateTime(reset) : value === 100 ? '额度充足' : '恢复时间待官方更新';
     return `<div class="account-quota-window"><div class="account-quota-label"><span>${title}</span><strong>${text}</strong></div><div class="account-quota-track${value === null ? ' is-unknown' : ''}" ${value === null ? `role="img" aria-label="Gemini ${title}尚未读取"` : `role="progressbar" aria-label="Gemini ${title}剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`} >${value === null ? '' : `<i style="width:${value}%"></i>`}</div>${recovery ? `<span class="account-quota-reset">${esc(recovery)}</span>` : ''}</div>`;
   };
-  const message = officialQuotaReadFailed ? '额度服务暂不可读取' : row?.status === 'ok' && !fresh ? '额度记录已过期，等待更新' : row?.status === 'network_error' ? '连接失败，额度暂未读到' : !fresh ? '额度暂未读到' : '';
+  const quotaReason = {
+    verification_required:row?.reason==='provider_validation_no_entry' ? '额度查询受限，Google 未提供验证入口' : 'Google 验证尚未通过，额度暂不可读',
+    authorization_required:'Google 要求重新授权后读取额度',
+    authorization_unavailable:'上次读取时授权不可用，额度待重新读取',
+    eligibility_failed:'官方资格检查未通过，额度暂不可读',
+  }[row?.status];
+  const recoveringQuota = (governanceAudits.gemini?.running || officialQuotaData?.refreshing) && !fresh;
+  const message = recoveringQuota ? '正在检查并恢复额度读取…' : officialQuotaReadFailed ? '额度服务暂不可读取' : quotaReason ? quotaReason : row?.status === 'ok' && !fresh ? '额度记录已过期，等待更新' : row?.status === 'network_error' ? '连接失败，额度暂未读到' : !fresh ? '额度暂未读到' : '';
   return `<div class="account-quota-windows">${windowMarkup('five_hour','5 小时额度')}${windowMarkup('weekly','每周额度')}</div>${message ? `<p class="account-quota-note">${esc(message)}</p>` : ''}`;
 }
 

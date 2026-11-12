@@ -44,7 +44,7 @@ class GeminiAuthorization:
         for key, entry in config['accounts'].items():
             origin = Path(entry['root']) / TOKEN
             missing = not origin.exists() and not origin.is_symlink()
-            if (missing or key in probes) and self.allowed(key, login_only=key in probes and not missing):
+            if (missing or key in probes) and self.allowed(key, login_only=True):
                 result.append((key, entry, config['binary'], None if missing else probes[key]))
         return result
 
@@ -63,7 +63,7 @@ class GeminiAuthorization:
             pending = self.candidates()
             self.update(total=len(pending))
             for index, (key, entry, binary, request) in enumerate(pending):
-                if not self.allowed(key, login_only=bool(request)):
+                if not self.allowed(key, login_only=True):
                     raise ValueError('账号状态已变化，未继续授权。')
                 self.update(state='waiting', email=entry['email'], completed=index)
                 if request:
@@ -123,7 +123,7 @@ class GeminiAuthorization:
                             raise ValueError('登录邮箱与该账号不一致，未保存授权。')
                         config = self.runtime.settings()
                         if (not config or config['accounts'].get(key) != entry
-                                or not self.allowed(key)):
+                                or not self.allowed(key, login_only=True)):
                             raise ValueError('账号状态已变化，未保存授权。')
                         fd, temporary = tempfile.mkstemp(prefix='.bootstrap-', dir=origin.parent)
                         try:
@@ -137,6 +137,8 @@ class GeminiAuthorization:
                         if not self.runtime.account(key):
                             raise ValueError('新授权未通过本地核对。')
                         close_authorization_tab(stage, key)
+                        from official_quota import reader_for
+                        reader_for(self.runtime).refresh_after_authorization(key)
                         return
                 if (stage/'closed').exists():
                     raise ValueError('登录窗口已关闭或未打开，未保存授权。')

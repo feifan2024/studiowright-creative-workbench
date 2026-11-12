@@ -160,8 +160,11 @@ def unit_quote(value):
 
 
 def write_unit(unit_dir, name, program, workdir, environment=(), after='network.target'):
+    directory = str(workdir)
+    if not Path(directory).is_absolute() or any(c in directory for c in ('\r', '\n')):
+        raise ValueError('invalid systemd working directory')
     parts = ['[Unit]', 'Description=StudioWright ' + name, 'After=' + after,
-             '', '[Service]', 'Type=simple', 'WorkingDirectory=' + unit_quote(workdir)]
+             '', '[Service]', 'Type=simple', 'WorkingDirectory=' + directory.replace('%', '%%')]
     parts.extend('Environment=' + unit_quote(k + '=' + str(v)) for k, v in environment)
     parts += ['ExecStart=' + ' '.join(unit_quote(v) for v in program),
               'Restart=on-failure', 'RestartSec=3', 'NoNewPrivileges=yes',
