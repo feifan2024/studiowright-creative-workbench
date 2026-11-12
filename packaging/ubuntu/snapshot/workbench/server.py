@@ -382,6 +382,69 @@ def task_rows(state, projects):
     return rows
 
 
+FLOW9EXIT_MAP = Path.home() / '.local/share/studiowright-evaluation/bin/exit-map.txt'
+
+
+def flow9exit_windows():
+    """Scan /proc for running Chrome window mains: profile -> debug port.
+
+    Chromium flattens /proc cmdline into a single space-joined string (NUL
+    separation is gone), so parse with regex. A window main carries
+    --user-data-dir and --remote-debugging-port but no --type=; children
+    (renderers etc.) carry a flattened copy of the parent flags plus
+    --type=, so the --type= guard excludes them.
+    """
+    import re
+    result = {}
+    udd = re.compile(r'--user-data-dir=(\S+)')
+    dbg = re.compile(r'--remote-debugging-port=(\d+)')
+    typ = re.compile(r'--type=')
+    for proc in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            raw = proc.read_bytes()
+        except OSError:
+            continue
+        if b'chrome' not in raw:
+            continue
+        joined = raw.replace(b'\0', b' ').decode('utf-8', 'replace')
+        if typ.search(joined) or not udd.search(joined):
+            continue
+        match_udd = udd.search(joined)
+        match_dbg = dbg.search(joined)
+        if not (match_udd and match_dbg):
+            continue
+        profile = match_udd.group(1).rsplit('/', 1)[-1]
+        result[profile] = match_dbg.group(1)
+    return result
+
+
+def flow9exit_info():
+    """Read exit-map.txt and project each pool profile's dedicated egress.
+
+    Port 310N maps to IPv6 2607:9000:1000:800N::1 (one /64 per account).
+    """
+    info = {}
+    try:
+        lines = FLOW9EXIT_MAP.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return info
+    windows = flow9exit_windows()
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 2 or parts[0].startswith('#'):
+            continue
+        name, port = parts
+        try:
+            octet = int(port) - 3100
+        except ValueError:
+            continue
+        if not 1 <= octet <= 9:
+            continue
+        info[name] = {'port': int(port), 'ipv6': '2607:9000:1000:800%d::1' % octet,
+                      'window_alive': name in windows, 'debug_port': windows.get(name)}
+    return info
+
+
 def account_rows(state):
     """Project existing Flow account status; never copy credentials or guess Gemini bindings."""
     accounts = state.get("accounts")
@@ -827,6 +890,12 @@ class Sources:
             return None, error or '任务记录暂不可读取。'
         projects = project_rows(state)
         accounts = account_rows(state)
+        exit_info = flow9exit_info()
+        if exit_info and accounts:
+            for item in accounts:
+                data = exit_info.get(item.get('profile'))
+                if data:
+                    item['exit_info'] = data
         tasks = task_rows(state, projects)
         flow_task_notes(tasks, accounts, state.get('coordination'))
         return {"checked_at": time.time(), "flow_state": {"available": True, "skipped_tasks": len(state['tasks']) - len(tasks)},
@@ -930,6 +999,12 @@ class Sources:
             open_flow_project_names(state, projects)
         tasks = task_rows(state, projects) if state is not None else []
         accounts = account_rows(state) if state is not None else None
+        exit_info = flow9exit_info()
+        if exit_info and accounts:
+            for item in accounts:
+                data = exit_info.get(item.get('profile'))
+                if data:
+                    item['exit_info'] = data
         valid_projects = {(p['source_profile'], p['source_id']): p['key'] for p in projects}
         retry_projects = {}
         for item in state.get('retry_projects', []) if isinstance(state, dict) else []:

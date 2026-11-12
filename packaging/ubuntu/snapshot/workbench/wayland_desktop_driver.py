@@ -130,6 +130,28 @@ class WaylandDesktopDriver:
                               driver=self, pointer=pointer)
         return await self.confirm_focus(target,page,composer)
 
+    async def composer_ready_cdp(self, page, composer, target):
+        """Like composer_ready, but pointer preparation is best-effort: CDP
+        typing does not depend on the real pointer, so a pending portal
+        consent dialog must not block the input path."""
+        if not await self._identity_confirmed(target):return False
+        await page.bring_to_front()
+        if not await self._os_focus_confirmed(target): return False
+        try:
+            from portal_pointer_client import PortalPointer
+            from pointer_sequence import prepare_pointer
+            pointer=PortalPointer(target,gui_environment=self.env)
+            await pointer.ensure_ready(timeout=10)
+            await prepare_pointer(page=page, composer=composer, target=target,
+                                  driver=self, pointer=pointer)
+        except Exception:
+            pass
+        try:
+            await composer.click()
+        except Exception:
+            pass
+        return await self.confirm_focus(target,page,composer)
+
     async def composer_text(self, page, composer):
         return await composer.inner_text()
 
@@ -169,3 +191,21 @@ class WaylandDesktopDriver:
             await keyboard.paste()
             if index < len(chunks) - 1:
                 await asyncio.sleep(random.uniform(.12, .4))
+
+    async def type_prompt_chars(self, page, prompt):
+        """Per-character typing through the CDP keyboard: trusted key events
+        with unicode text, human jitter, clipboard untouched."""
+        import random
+        for ch in prompt:
+            await page.keyboard.type(ch)
+            await asyncio.sleep(random.uniform(.035, .13))
+
+    async def clear_composer(self, page, composer):
+        """Empty the composer with keyboard select-all + delete."""
+        try:
+            await composer.click()
+        except Exception:
+            pass
+        await page.keyboard.press('Control+a')
+        await page.keyboard.press('Delete')
+        await asyncio.sleep(.15)

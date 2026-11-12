@@ -15,7 +15,7 @@ def choose_prompt_input(prompt):
     import re
     if re.fullmatch(r'[A-Za-z0-9 ,.]{1,120}', prompt) and random.randrange(2) == 0:
         return 'type'
-    return 'paste'
+    return 'cdp_type'
 
 
 class InputNotSubmitted(Exception):
@@ -85,6 +85,7 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
         raise InputNotSubmitted('invalid_target')
     from task_coordinator import record, preparation_safe
     await _pacing_wait(record, target.account_key)
+    mode = choose_prompt_input(prompt)
     try:
             # Repair only focus/pointer preparation; paste and send stay single-shot.
             for attempt in range(3):
@@ -95,7 +96,10 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
                 try:
                     if not await driver.activate_and_confirm(target):
                         raise InputNotSubmitted('window_activation_unconfirmed')
-                    if not await driver.composer_ready(page, composer, target):
+                    ready = await (driver.composer_ready_cdp(page, composer, target)
+                                   if mode == 'cdp_type'
+                                   else driver.composer_ready(page, composer, target))
+                    if not ready:
                         raise InputNotSubmitted('composer_unavailable')
                     break
                 except Exception as exc:
@@ -109,14 +113,24 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
                 raise InputNotSubmitted('composer_not_empty')
             from portal_keyboard_client import PortalKeyboard
             keyboard = PortalKeyboard(target, gui_environment=getattr(driver, 'env', None))
-            # Only type short, single-line ASCII; paste everything else once
-            # to avoid repeatedly replacing the desktop clipboard.
-            typing = keyboard.ready() and choose_prompt_input(prompt) == 'type'
-            record('typing_started' if typing else 'paste_started', characters=len(prompt))
+            # Short, single-line ASCII may use the portal keyboard; everything
+            # else types per character over CDP, falling back to a single
+            # chunked paste if the CDP path fails.
+            typing = keyboard.ready() and mode == 'type'
+            record('typing_started' if typing else (mode + '_started'), characters=len(prompt))
             if typing:
                 if not await driver.confirm_focus(target, page, composer):
                     raise InputNotSubmitted('window_focus_lost')
                 await keyboard.type(prompt)
+            elif mode == 'cdp_type':
+                try:
+                    await driver.type_prompt_chars(page, prompt)
+                except Exception as exc:
+                    record('cdp_typing_fallback', error=type(exc).__name__)
+                    if not await driver.confirm_focus(target, page, composer):
+                        raise InputNotSubmitted('window_focus_lost')
+                    await driver.clear_composer(page, composer)
+                    await driver.copy_prompt_and_paste(page, composer, target, prompt)
             else:
                 await driver.copy_prompt_and_paste(page, composer, target, prompt)
             # Only poll; never repeat a partially entered prompt.
@@ -130,7 +144,7 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
             if not await driver.confirm_focus(target, page, composer):
                 raise InputNotSubmitted('window_focus_lost')
             from pointer_sequence import record_input_action
-            record_input_action(target, 'typed_text_verified' if typing else 'pasted_text_verified', characters=len(prompt))
+            record_input_action(target, 'typed_text_verified' if typing else ('cdp_typed_verified' if mode == 'cdp_type' else 'pasted_text_verified'), characters=len(prompt))
             # A human looks the text over before sending; the real pointer drifts meanwhile.
             await asyncio.sleep(random.uniform(1.5, 4.0))
             await _pointer_drift(driver, target)

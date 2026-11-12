@@ -11,7 +11,7 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar" aria-label="主导航">
-      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>创作工作台</strong><small>FLOW · GEMINI <span class="brand-version" aria-label="版本 0.2.4">v0.2.4</span></small></div></div>
+      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>创作工作台</strong><small>FLOW · GEMINI <span class="brand-version" aria-label="版本 0.2.1">v0.2.1</span></small></div></div>
       <div class="nav-label">工作空间</div>
       <nav class="navigation" aria-label="工作空间">
         <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>总览<span class="nav-arrow">›</span></button>
@@ -223,16 +223,8 @@
           </details>
         </section>
         <section id="recordsView" class="view" aria-labelledby="recordsHeading" hidden>
-          <div class="page-heading"><div><h1 id="recordsHeading">任务记录</h1><p>分别查看 Flow 任务与 Gemini 请求的执行记录。</p></div></div>
-          <div class="records-tabs" role="tablist" aria-label="记录类型">
-            <button class="button button-light" id="flowRecordsTab" type="button" role="tab" aria-selected="true" aria-controls="taskRecords">Flow 任务</button>
-            <button class="button button-light" id="geminiRecordsTab" type="button" role="tab" aria-selected="false" aria-controls="geminiRecords" tabindex="-1">Gemini 请求</button>
-          </div>
-          <section id="taskRecords" role="tabpanel" class="panel list-panel original-tasks" aria-labelledby="taskRecordsHeading"><div class="panel-heading"><div><h2 id="taskRecordsHeading">最近任务记录</h2><p id="taskListSummary" class="panel-caption">正在读取…</p><small id="taskLiveStatus" class="subtle" role="status">正在连接任务记录…</small></div><div class="filter-row"><label class="search"><span aria-hidden="true">⌕</span><input id="taskSearch" type="search" placeholder="搜索项目、任务或原任务编号" aria-label="搜索项目、任务或原任务编号"></label><label class="select-label"><span class="sr-only">任务类型</span><select id="taskKindFilter"><option value="">全部类型</option></select></label><label class="select-label"><span class="sr-only">任务状态</span><select id="taskStatusFilter"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">执行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="interrupted">已中断</option><option value="cancelled">已取消</option></select></label><button id="taskFiltersReset" class="button button-light" type="button" disabled>清空筛选</button></div></div><div id="taskTable" class="table-wrap"><div class="empty">正在读取任务…</div></div></section>
-          <section id="geminiRecords" class="panel list-panel" role="tabpanel" aria-labelledby="geminiRecordsTab" hidden>
-            <div class="panel-heading"><div><h2>最近 Gemini 请求</h2><p id="geminiRecordSummary" class="panel-caption" role="status">正在读取…</p></div><label><input id="geminiShowChecks" type="checkbox"> 显示自查请求</label></div>
-            <div id="geminiRecordTable" class="table-wrap"></div>
-          </section>
+          <div class="page-heading"><div><h1 id="recordsHeading">任务记录</h1><p>查看 Flow 任务的进度、结果和重试记录。</p></div></div>
+          <section id="taskRecords" class="panel list-panel original-tasks" aria-labelledby="taskRecordsHeading"><div class="panel-heading"><div><h2 id="taskRecordsHeading">最近任务记录</h2><p id="taskListSummary" class="panel-caption">正在读取…</p><small id="taskLiveStatus" class="subtle" role="status">正在连接任务记录…</small></div><div class="filter-row"><label class="search"><span aria-hidden="true">⌕</span><input id="taskSearch" type="search" placeholder="搜索项目、任务或原任务编号" aria-label="搜索项目、任务或原任务编号"></label><label class="select-label"><span class="sr-only">任务类型</span><select id="taskKindFilter"><option value="">全部类型</option></select></label><label class="select-label"><span class="sr-only">任务状态</span><select id="taskStatusFilter"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">执行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="interrupted">已中断</option><option value="cancelled">已取消</option></select></label><button id="taskFiltersReset" class="button button-light" type="button" disabled>清空筛选</button></div></div><div id="taskTable" class="table-wrap"><div class="empty">正在读取任务…</div></div></section>
         </section>
         <section id="apiView" class="view api-view" aria-labelledby="apiHeading" hidden>
           <div class="page-heading api-page-heading"><div><div class="eyebrow"><span></span> API / INTEGRATION</div><h1 id="apiHeading">API 文档</h1><p>查看请求地址、参数和返回结果。</p></div><div class="api-page-actions"><button id="apiCopyAll" class="button button-primary" type="button">一键复制完整文档</button><span id="apiCopyAllStatus" role="status" aria-live="polite"></span></div></div>
