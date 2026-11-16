@@ -93,6 +93,44 @@ class OfficialRuntime:
         if len(data['accounts'])>50 or any(not KEY.fullmatch(k) for k in data['accounts']):raise ValueError('账号配置不正确。')
         return data
 
+    def _token_backup(self,key):
+        return self.config.parent/'official-token-backups'/f'{key}.token'
+
+    def _restore_token(self,key,token,item):
+        """Restore the last known-good token after the CLI lost or corrupted its own.
+
+        A run terminated during the CLI's internal token rotation can leave the
+        oauth token file deleted or half-written. The backup taken at the last
+        validated read brings the account back without a manual re-login; a
+        stale-but-restored token still refreshes on the CLI's next run."""
+        backup=self._token_backup(key)
+        if backup.is_symlink() or not backup.is_file():return False
+        try:
+            payload=json.loads(backup.read_bytes())
+            identity=payload.get('id_token_email','').lower() if isinstance(payload,dict) else ''
+            if not identity or not isinstance(item.get('email'),str) or identity!=item['email'].lower():
+                return False
+            data=backup.read_bytes()
+            temporary=token.with_name(f'.token-{time.time_ns()}.tmp')
+            with temporary.open('xb') as stream:
+                os.fchmod(stream.fileno(),0o600);stream.write(data)
+            temporary.replace(token)
+            print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} restored missing CLI token for {key[:8]} from backup', flush=True)
+            return True
+        except (OSError,ValueError):return False
+
+    def _backup_token(self,key,token):
+        """Keep a private copy of the current validated token for recovery."""
+        try:
+            backup=self._token_backup(key);data=token.read_bytes()
+            if backup.is_symlink() or (backup.is_file() and backup.read_bytes()==data):return
+            backup.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+            temporary=backup.with_name(f'.{time.time_ns()}.tmp')
+            with temporary.open('xb') as stream:
+                os.fchmod(stream.fileno(),0o600);stream.write(data)
+            temporary.replace(backup)
+        except (OSError,ValueError):pass
+
     def account(self,key):
         data=self.settings()
         if not data or key not in data['accounts']:return None
@@ -100,13 +138,26 @@ class OfficialRuntime:
         if not root.is_absolute() or root.is_symlink():return None
         home=root/'home';token=home/'.gemini/antigravity-cli/antigravity-oauth-token'
         settings=home/'.gemini/antigravity-cli/settings.json'
-        if any(p.is_symlink() or not p.is_file() for p in [token,settings]):return None
-        if token.stat().st_size>100000 or settings.stat().st_size>65536:return None
-        identity=json.loads(token.read_text()).get('id_token_email','').lower()
+        if settings.is_symlink() or not settings.is_file() or settings.stat().st_size>65536:return None
+        if token.is_symlink():return None
+        if not token.is_file():
+            if not self._restore_token(key,token,item):return None
+        try:
+            payload=json.loads(token.read_text())
+            identity=payload.get('id_token_email','').lower() if isinstance(payload,dict) else ''
+        except (OSError,ValueError):
+            # Half-written by an interrupted refresh: recover from the last backup.
+            if not self._restore_token(key,token,item):return None
+            try:
+                payload=json.loads(token.read_text())
+                identity=payload.get('id_token_email','').lower() if isinstance(payload,dict) else ''
+            except (OSError,ValueError):return None
         if not isinstance(item.get('email'),str) or identity!=item['email'].lower():return None
+        if token.stat().st_size>100000:return None
         policy=json.loads(settings.read_text())
         if not DENY<=set(policy.get('permissions',{}).get('deny',[])):return None
         if not (root/'workspace').is_dir():return None
+        self._backup_token(key,token)
         return {'root':root,'binary':Path(data['binary']),'email':identity}
 
     def inventory(self):
