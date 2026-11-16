@@ -762,3 +762,25 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .host-shutdown:hover { background:#fbf4f4; border-color:#c9a3a3; }
 .host-shutdown.is-armed { background:#a13030; border-color:#a13030; color:#fff; font-weight:700; }
 @media (max-width: 720px) { .host-power { margin-inline:14px; flex-wrap:wrap; } }
+/* 2026-11-17: 紧凑账号卡片 + 拖拽排序 */
+.account-grid { gap: 11px; }
+.account-card { padding: 12px 13px; }
+.account-avatar { width: 32px; height: 32px; border-radius: 9px; font-size: 15px; }
+.account-identity h3 { font-size: 14px; }
+.account-login { padding: 3px 8px; }
+.account-card-heading { gap: 9px; }
+.account-services { gap: 7px; margin-top: 10px; }
+.account-service { padding: 8px 10px; border-radius: 10px; }
+.account-flow-value { min-height: 66px; }
+.account-flow-value > div:first-child > strong { margin-top: 1px; font-size: 19px; }
+.account-quota-windows { gap: 7px; margin-top: 8px; }
+.account-quota-label { font-size: 10px; }
+.account-quota-label strong { font-size: 12px; }
+.account-quota-track { margin-top: 3px; }
+.account-quota-note { margin: 5px 0 0; font-size: 10px; line-height: 1.45; }
+.account-card .details, .account-card details { margin-top: 0; }
+.account-card details summary { font-size: 11px; }
+.account-card-actions { padding-top: 8px; margin-top: 8px; }
+.account-card[draggable="true"] { cursor: grab; }
+.account-card[draggable="true"]:active { cursor: grabbing; }
+.account-card.is-dragging { opacity: .45; outline: 2px dashed #7fa58f; outline-offset: 2px; }

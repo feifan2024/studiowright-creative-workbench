@@ -98,6 +98,7 @@ async function refreshChannelStatus() {
       const data = await getJson('/api/channel-status', {timeoutMs:8000});
       if (data.schema_version !== 1 || data.available !== true || !Array.isArray(data.accounts)) throw new Error('unknown');
       state.channelStatus = data; channelReadFailed = false;
+      if (accountOrderOverride && JSON.stringify(data.account_order) === JSON.stringify(accountOrderOverride)) accountOrderOverride = null;
     } catch (_) { channelReadFailed = true; }
     renderConnections();
     if (state.snapshot && state.view === 'overview') renderAccountInsights(state.snapshot, $('overviewInsights'));
@@ -1885,6 +1886,54 @@ function renderAccountQuotas() {
   });
 }
 
+// Account cards keep a user-dragged order; that order is the Gemini round-robin circle.
+const bareAccountKey = key => String(key || "").replace(/^flow-account-/, "");
+let accountOrderOverride = null;
+const accountDrag = {key: null};
+function applyAccountOrder(list) {
+  const order = accountOrderOverride || state.channelStatus?.account_order;
+  if (!Array.isArray(order) || !order.length) return list;
+  const rank = new Map(order.map((key, index) => [key, index]));
+  return [...list].sort((x, y) =>
+    (rank.get(bareAccountKey(x.key)) ?? order.length) - (rank.get(bareAccountKey(y.key)) ?? order.length));
+}
+function saveAccountOrderFromDom() {
+  if (!accountDrag.key) return;
+  accountOrderOverride = [...document.querySelectorAll("#realAccountTable [data-drag-key]")].map(el => el.dataset.dragKey);
+  const order = accountOrderOverride;
+  accountDrag.key = null;
+  renderAccounts();
+  postJson("/api/account-order", {order}).then(() => refreshChannelStatus()).catch(() => {});
+}
+$("realAccountTable").addEventListener("dragstart", event => {
+  const card = event.target.closest("[data-drag-key]");
+  if (!card) return;
+  accountDrag.key = card.dataset.dragKey;
+  card.classList.add("is-dragging");
+  event.dataTransfer.effectAllowed = "move";
+  try { event.dataTransfer.setData("text/plain", accountDrag.key); } catch (_) {}
+});
+$("realAccountTable").addEventListener("dragover", event => {
+  if (!accountDrag.key) return;
+  const card = event.target.closest("[data-drag-key]");
+  if (!card || card.dataset.dragKey === accountDrag.key) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  const rect = card.getBoundingClientRect();
+  const before = (event.clientY - rect.top) / rect.height < .5;
+  const dragging = $("realAccountTable").querySelector(".account-card.is-dragging");
+  if (dragging && dragging !== card) card.parentNode.insertBefore(dragging, before ? card : card.nextSibling);
+});
+$("realAccountTable").addEventListener("drop", event => {
+  if (!accountDrag.key) return;
+  event.preventDefault();
+  saveAccountOrderFromDom();
+});
+$("realAccountTable").addEventListener("dragend", () => {
+  $("realAccountTable").querySelector(".account-card.is-dragging")?.classList.remove("is-dragging");
+  saveAccountOrderFromDom();
+});
+
 function renderAccounts() {
   const opened = [...document.querySelectorAll('.account-details[open] summary')].map(e=>e.getAttribute('aria-controls'));
   const focusedDetail = document.activeElement?.closest('.account-details')?.querySelector('summary')?.getAttribute('aria-controls');
@@ -1919,7 +1968,7 @@ function renderAccounts() {
     $("saveDispatchPolicy").disabled = true;
     $("dispatchPolicyMessage").textContent = "规则暂不可读取。";
   }
-  const accounts = Array.isArray(data.items) ? data.items : [];
+  const accounts = applyAccountOrder(Array.isArray(data.items) ? data.items : []);
   const flowReadinessNow = flowReadiness(state.snapshot);
   const geminiReadinessNow = geminiReadiness(state.snapshot);
   const ready = flowReadinessNow.ready ?? "—";
@@ -1951,6 +2000,8 @@ function renderAccounts() {
     issueCounts.set(issue.key, {title: issue.title, count: (previous?.count || 0) + 1});
   }
   const issueSummary = issueCounts.size ? `<section class="account-issue-summary" aria-label="当前账号状态"><strong>当前需关注</strong><div class="account-issue-summary-items">${Array.from(issueCounts.values()).map(issue => `<span>${esc(issue.title)} <b>${issue.count}</b></span>`).join('')}</div></section>` : '';
+  // An in-progress drag owns the DOM; a snapshot refresh must not rebuild the cards mid-drag.
+  if (accountDrag.key) return;
   $("realAccountTable").innerHTML = `${issueSummary}<div class="account-grid">${accounts.map((item) => {
     const identity = item.email || item.label || item.profile;
     const official = officialAccount(item);
@@ -2025,7 +2076,7 @@ function renderAccounts() {
     const ownGemini = state.snapshot?.gemini_stats?.accounts?.[item.key.slice('flow-account-'.length)];
     const flowPerformance = flowDone + flowFailed ? `任务 ${flowDone} 成功 / ${flowFailed} 失败 · 成功率 ${Math.round(flowDone * 100 / (flowDone + flowFailed))}%` : '暂无已结束生成任务';
     const gemPerformance = ownGemini ? `对话 ${ownGemini.completed} 完成 · 平均首段 ${typeof ownGemini.avg_first_ms === 'number' ? (ownGemini.avg_first_ms / 1000).toFixed(1) + ' 秒' : '暂无实测'}` : '暂无工作台对话记录';
-    return `<article class="account-card${cardState}">
+    return `<article class="account-card${cardState}" draggable="true" data-drag-key="${esc(quotaKey)}">
       <div class="account-card-heading"><div class="account-avatar" aria-hidden="true">${esc(String(identity).slice(0, 1).toUpperCase())}</div><div class="account-identity"><span class="account-alias">${esc(item.label || item.profile)}</span><h3 title="${esc(identity)}">${esc(identity)}</h3></div><span class="account-login ${item.flow_login === 'verified' ? 'is-ready' : ''}">${esc(login)}</span>
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
       <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div><span>${hasBalance && !item.flow_balance_fresh ? '上次积分余额' : '积分余额'}</span><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账：${esc(item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : "暂未读取")}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>

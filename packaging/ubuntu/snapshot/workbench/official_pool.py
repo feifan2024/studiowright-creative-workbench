@@ -236,6 +236,41 @@ class OfficialPool:
             AND (r.status IN ('queued','dispatching') OR r.created>=?)
             ORDER BY r.created DESC LIMIT 1""",(key,time.time()-30)).fetchone()
 
+    def saved_account_order(self):
+        """Panel-defined circle order persisted in the pool state directory."""
+        try:
+            path=self.pool.state_dir/'account-order.json'
+            if path.is_symlink():return []
+            data=json.loads(path.read_text(encoding='utf-8'))
+            order=data.get('order') if isinstance(data,dict) else None
+            if not isinstance(order,list):return []
+            return [k for k in order if isinstance(k,str) and re.fullmatch(r'[0-9a-f]{64}',k)]
+        except (OSError,ValueError):return []
+
+    def save_account_order(self,order):
+        """Persist the panel's drag order; must be a permutation of configured accounts."""
+        if not isinstance(order,list) or not order:raise ValueError('账号顺序格式不正确。')
+        if any(not isinstance(k,str) or not re.fullmatch(r'[0-9a-f]{64}',k) for k in order) \
+                or len(set(order))!=len(order):
+            raise ValueError('账号顺序包含无效或重复的编号。')
+        try:configured=set((self.runtime.settings() or {}).get('accounts',{}))
+        except (OSError,ValueError,TypeError):configured=None
+        if configured is None:raise ValueError('账号列表暂不可读取，稍后再试。')
+        if set(order)!=configured:raise ValueError('账号顺序与当前账号列表不一致；请刷新页面后重试。')
+        path=self.pool.state_dir/'account-order.json'
+        temporary=path.with_name('.account-order-'+str(time.time_ns())+'.json')
+        with temporary.open('x',encoding='utf-8') as stream:
+            json.dump({'schema_version':1,'order':order},stream)
+        temporary.replace(path)
+        return order
+
+    def circle_order(self,eligible):
+        """Rotation circle: the saved panel order first, then any other eligible key."""
+        saved=self.saved_account_order()
+        if not saved:return list(eligible)
+        chosen=set(saved)
+        return [k for k in saved if k in set(eligible)]+[k for k in eligible if k not in chosen]
+
     def queue_readiness_probes(self,items,quotas,*,blocked_only=False):
         """One real check per eligible account, with double-click protection."""
         from live_pool import Conflict
@@ -321,8 +356,11 @@ class OfficialPool:
                     readiness_probe=readiness_probe and k==account) is None)
                 if account=='auto':
                     if not eligible:raise Conflict('没有允许派发且授权就绪的账号；暂停和未确认限制均保留。')
+                    circle=self.circle_order(eligible)
                     row=db.execute('SELECT last_account FROM official_pool_cursor WHERE id=1').fetchone();last=row[0] if row else ''
-                    account=next((k for k in eligible if k>last),eligible[0])
+                    # Index-based step: with a saved panel order this follows the user's
+                    # circle; without one it degenerates to the legacy sorted-key rotation.
+                    account=circle[(circle.index(last)+1)%len(circle)] if last in circle else circle[0]
                     db.execute('INSERT INTO official_pool_cursor(id,last_account) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(account,))
                 elif account not in eligible:raise Conflict('该账号授权未就绪、已暂停或存在未确认结果，消息未发送。')
                 if not conv:

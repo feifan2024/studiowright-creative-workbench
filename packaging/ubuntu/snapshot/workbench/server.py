@@ -1263,6 +1263,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             if self.path == '/api/channel-status':
                 from channel_status import read_status
                 data = read_status(real_pool.path, real_pool.official.public_status()) if real_pool else {'schema_version': 1, 'available': False}
+                if real_pool and data.get('available'):
+                    data['account_order'] = real_pool.official.saved_account_order()
                 return self.json_response(200 if data.get('available') else 503, data)
             if project_actions and self.path == '/api/project-actions':
                 return self.json_response(200, project_actions.status())
@@ -1525,6 +1527,22 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} host shutdown requested from panel', flush=True)
                 threading.Timer(1.5, request_host_shutdown).start()
                 return self.json_response(202, {'status':'shutdown_scheduled'})
+            if self.path == '/api/account-order':
+                if not real_pool or not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台发起账号顺序调整。'})
+                try:
+                    length = int(self.headers.get('Content-Length','0') or 0)
+                    raw = json.loads(self.rfile.read(length) if length else b'{}')
+                except (OSError,ValueError,TypeError):
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                order = raw.get('order') if isinstance(raw,dict) else None
+                try:
+                    saved = real_pool.official.save_account_order(order)
+                except ValueError as exc:
+                    return self.json_response(400, {'error':str(exc)})
+                except (OSError,TypeError,AttributeError):
+                    return self.json_response(503, {'error':'账号顺序暂时无法保存。'})
+                return self.json_response(200, {'schema_version':1,'account_order':saved})
             if self.path == '/api/official-reauth/activate':
                 if not real_pool or not self.valid(mutation=True):
                     return self.json_response(403, {'error':'请从工作台发起授权。'})
