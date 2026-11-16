@@ -16,6 +16,7 @@ from official_runtime import official_network_env
 ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))')
 KEY = re.compile(r'[0-9a-f]{64}\Z')
 TTL = 300
+AUTO_REFRESH_SECONDS = 6 * 3600
 
 
 def verification_entry(text):
@@ -243,6 +244,35 @@ class QuotaReader:
                     attempted=saved.get('attempted_at',0)
                     self.attempted=attempted if type(attempted) in (float,int) and math.isfinite(attempted) and attempted<=time.time() else 0
         except (OSError,ValueError,TypeError): pass
+        self.stop = threading.Event()
+        threading.Thread(target=self._auto_refresh_loop, daemon=True, name='official-quota-auto').start()
+
+    def _auto_refresh_tick(self):
+        """One scheduled pass over the currently readable accounts.
+
+        Failed reads (verification required, network errors) stay on the
+        explicit-refresh path exactly like the manual button; the tick only
+        re-reads accounts whose numbers are actually shown on the panel."""
+        with self.lock:
+            if self.running or not self.rows:
+                return 0
+            keys = tuple(k for k, r in self.rows.items() if r.get('status') in ('ok', 'not_read'))
+            if not keys:
+                return 0
+            self.running = True
+            self.attempted = time.time()
+        print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} quota auto-refresh: {len(keys)} accounts', flush=True)
+        self._refresh(keys)
+        return len(keys)
+
+    def _auto_refresh_loop(self):
+        while not self.stop.wait(AUTO_REFRESH_SECONDS):
+            try:
+                self._auto_refresh_tick()
+            except Exception:
+                # The daemon loop must survive anything a single pass raises.
+                with self.lock:
+                    self.running = False
 
     def snapshot(self, force=False, recover=False, refresh=True):
         try: keys = list((self.runtime.settings() or {}).get('accounts',{}))
@@ -263,6 +293,7 @@ class QuotaReader:
                 threading.Thread(target=self._refresh,args=(plan,recover),daemon=True,name='official-quota-reader').start()
             rows=copy.deepcopy(self.rows)
             return {'schema_version':1,'source':'official_cli_usage','read_at':now,'attempted_at':self.attempted,
+                    'auto_refresh_seconds':AUTO_REFRESH_SECONDS,
                     'refreshing':self.running,'accounts':rows,**aggregate(rows,now)}
 
     def _refresh(self,keys,recover=False):
