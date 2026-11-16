@@ -2,8 +2,11 @@
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from io import BytesIO
+from ipaddress import ip_address
 from pathlib import Path
-from urllib.request import urlopen
+from socket import getaddrinfo, IPPROTO_TCP
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, build_opener
 from zipfile import ZipFile
 
 PACKAGES = (
@@ -22,12 +25,39 @@ PACKAGES = (
     ('system.valuetuple', '4.6.2', '76fd0e366a2b90655fd15d557b0b79504197748358cb578fe3193f6d97bdd9aa', 'net462', 'System.ValueTuple.dll'),
 )
 
+PINNED_HOST = 'api.nuget.org'
+
+
+class PinnedRedirectHandler(HTTPRedirectHandler):
+    """Refuse redirects that leave the pinned package host."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parts = urlsplit(newurl)
+        if parts.scheme != 'https' or parts.hostname != PINNED_HOST:
+            raise RuntimeError('refusing redirect outside the pinned package host')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def open_pinned(url, timeout):
+    """Open only pinned https://api.nuget.org URLs.
+
+    Enforces scheme and host before any request, resolves the pinned host and
+    refuses private/loopback/link-local results (DNS rebinding guard), and
+    rejects redirects that leave the pinned host."""
+    parts = urlsplit(url)
+    if parts.scheme != 'https' or parts.hostname != PINNED_HOST or parts.username or parts.password:
+        raise RuntimeError('refusing non-pinned package URL: ' + url)
+    for _, _, _, _, sockaddr in getaddrinfo(parts.hostname, 443, proto=IPPROTO_TCP):
+        address = ip_address(sockaddr[0])
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast:
+            raise RuntimeError('package host resolved to a non-public address')
+    return build_opener(PinnedRedirectHandler).open(url, timeout=timeout)
+
 
 def prepare(payload):
     def fetch(item):
         name, version, expected, target, dll = item
         url = f'https://api.nuget.org/v3-flatcontainer/{name}/{version}/{name}.{version}.nupkg'
-        with urlopen(url, timeout=25) as response:
+        with open_pinned(url, timeout=25) as response:
             data = response.read()
         if sha256(data).hexdigest() != expected:
             raise RuntimeError(f'{name}: package hash mismatch')

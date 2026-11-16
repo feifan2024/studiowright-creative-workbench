@@ -1,9 +1,27 @@
 import ast
+import importlib.util
 from pathlib import Path
 import re
+import tempfile
 import types
 import unittest
 from unittest.mock import Mock
+
+
+def import_nodes(label, imports, nodes):
+    """Import extracted console source as a temporary module file.
+
+    The console modules import Playwright and other Ubuntu-only dependencies at
+    the top, so offline tests isolate single methods instead of importing the
+    whole module."""
+    safe = re.sub(r'[^A-Za-z0-9_]', '_', str(label))
+    with tempfile.TemporaryDirectory() as tmp:
+        module_file = Path(tmp) / (safe + '.py')
+        module_file.write_text(imports + '\n\n' + '\n\n'.join(ast.unparse(node) for node in nodes), encoding='utf-8')
+        spec = importlib.util.spec_from_file_location('extracted_' + safe, module_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return {key: value for key, value in vars(module).items() if not key.startswith('__')}
 
 
 class FailedNoResultDisplay(unittest.TestCase):
@@ -12,8 +30,7 @@ class FailedNoResultDisplay(unittest.TestCase):
         tree=ast.parse(path.read_text(encoding='utf-8'))
         cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='Console')
         method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='task_view')
-        namespace={'re':re}
-        exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),namespace)
+        namespace=import_nodes('console_server_task_view','import re',[method])
         store=Mock()
         store.retry_detail.return_value=dict(root_id='original',ordinal=0,state='needs_review',
             attempts=[dict(id='original',ordinal=0,status='failed',finished=1)])

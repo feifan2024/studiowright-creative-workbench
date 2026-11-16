@@ -50,7 +50,9 @@ async function swExpectedFromJob(sender) {
             const match = /^#chrome-job=([A-Za-z0-9_-]{40,60})$/.exec(location.hash);
             if (!match) return null;
             const base = 'http://127.0.0.1:18890';
-            const jobResponse = await fetch(base + '/api/job/' + match[1], {cache:'no-store'});
+            const jobUrl = new URL('/api/job/' + encodeURIComponent(match[1]), base);
+            if (jobUrl.protocol !== 'http:' || jobUrl.hostname !== '127.0.0.1' || jobUrl.port !== '18890') return null;
+            const jobResponse = await fetch(jobUrl, {cache:'no-store'});
             if (!jobResponse.ok) return null;
             const job = await jobResponse.json();
             if (job.status !== 'running' || !/^(Default|Profile \d+)$/.test(job.profile || '')) return null;

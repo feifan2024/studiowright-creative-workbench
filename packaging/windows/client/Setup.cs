@@ -294,7 +294,8 @@ namespace StudioWrightClient
                     string message = shortcutReady ? "桌面版已安装。接下来将打开创作工作台。" :
                         "桌面版已安装，但桌面快捷方式未能创建。可以从开始菜单打开。";
                     MessageBox.Show(message, "安装完成");
-                    Process.Start(Program.InstalledExe); Close();
+                    // Program.InstalledExe is an install-time constant path, not user input.
+                    Process.Start(new ProcessStartInfo(Program.InstalledExe) { UseShellExecute = true }); Close();
                 } catch (Exception ex) {
                     MessageBox.Show(ex.Message, "未完成安装"); install.Enabled = true;
                 }
