@@ -11,7 +11,7 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar" aria-label="主导航">
-      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>创作工作台</strong><small>FLOW · GEMINI <span class="brand-version" aria-label="版本 0.2.1">v0.2.1</span></small></div></div>
+      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>创作工作台</strong><small>FLOW · GEMINI <span class="brand-version" aria-label="版本 0.2.6">v0.2.6</span></small></div></div>
       <div class="nav-label">工作空间</div>
       <nav class="navigation" aria-label="工作空间">
         <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>总览<span class="nav-arrow">›</span></button>
@@ -55,6 +55,7 @@
   <footer><button type="button" class="text-link" data-govern-destination="accounts">管理账号 →</button><button id="governanceRecords" type="button" class="text-link">查看记录 →</button></footer>
 </section>
             <div id="dashboardRuntime"></div>
+            <div class="host-power"><div class="host-power-info"><strong>主机维护</strong><span>关闭 Ubuntu 主机：所有服务、账号浏览器和进行中的任务都会停止，面板随之下线。</span></div><span id="hostShutdownStatus" class="subtle" role="status"></span><button id="hostShutdown" class="button button-light host-shutdown" type="button">关闭主机</button></div>
           </section>
           <div class="notice" role="note"><span class="notice-symbol" aria-hidden="true">i</span><span id="sourceNotice">正在读取现有服务状态。</span></div>
 
@@ -208,6 +209,7 @@
               <label for="flowCount">数量</label> <select id="flowCount"><option>1</option><option>2</option><option>3</option><option>4</option></select></p>
               <p id="flowVideoOptions" hidden><label for="flowResolution">清晰度</label> <select id="flowResolution"><option>720p</option><option>360p</option></select>
               <label for="flowDuration">时长（秒）</label> <select id="flowDuration"><option>8</option><option>4</option><option>6</option><option>10</option></select></p>
+              <p><label for="flowStyleId">画风 ID（可选）</label> <input id="flowStyleId" type="text" autocomplete="off"></p>
               <p><label for="flowPrompt">提示词</label></p><textarea id="flowPrompt" rows="4" cols="70" maxlength="10000"></textarea>
               <p><label><input id="flowAutoRetry" type="checkbox" checked disabled> 单图或单视频失败后自动换号重试（最多 3 次；平台统一启用）</label><br><small>图片确认未发送才重试；视频重试沿用原任务的时长与清晰度。结果不明时暂停核对。重试由平台强制执行，提交请求不接受 auto_retry 字段。</small></p>
               <p><label><input id="flowConfirm" type="checkbox"> 我确认创建本次任务，并同意此次可能产生的积分消耗</label></p>
@@ -223,8 +225,10 @@
           </details>
         </section>
         <section id="recordsView" class="view" aria-labelledby="recordsHeading" hidden>
-          <div class="page-heading"><div><h1 id="recordsHeading">任务记录</h1><p>查看 Flow 任务的进度、结果和重试记录。</p></div></div>
-          <section id="taskRecords" class="panel list-panel original-tasks" aria-labelledby="taskRecordsHeading"><div class="panel-heading"><div><h2 id="taskRecordsHeading">最近任务记录</h2><p id="taskListSummary" class="panel-caption">正在读取…</p><small id="taskLiveStatus" class="subtle" role="status">正在连接任务记录…</small></div><div class="filter-row"><label class="search"><span aria-hidden="true">⌕</span><input id="taskSearch" type="search" placeholder="搜索项目、任务或原任务编号" aria-label="搜索项目、任务或原任务编号"></label><label class="select-label"><span class="sr-only">任务类型</span><select id="taskKindFilter"><option value="">全部类型</option></select></label><label class="select-label"><span class="sr-only">任务状态</span><select id="taskStatusFilter"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">执行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="interrupted">已中断</option><option value="cancelled">已取消</option></select></label><button id="taskFiltersReset" class="button button-light" type="button" disabled>清空筛选</button></div></div><div id="taskTable" class="table-wrap"><div class="empty">正在读取任务…</div></div></section>
+          <div class="page-heading"><div><h1 id="recordsHeading">任务记录</h1><p>分别查看 Flow 任务与 Gemini 请求的进度、结果和记录。</p></div></div>
+          <div class="records-tabs" role="tablist" aria-label="任务记录分类"><button id="flowRecordsTab" class="records-tab" role="tab" type="button" aria-selected="true" aria-controls="taskRecords">Flow 任务</button><button id="geminiRecordsTab" class="records-tab" role="tab" type="button" aria-selected="false" aria-controls="geminiRecords" tabindex="-1">Gemini 任务</button></div>
+          <section id="taskRecords" class="panel list-panel original-tasks" role="tabpanel" aria-labelledby="taskRecordsHeading"><div class="panel-heading"><div><h2 id="taskRecordsHeading">最近任务记录</h2><p id="taskListSummary" class="panel-caption">正在读取…</p><small id="taskLiveStatus" class="subtle" role="status">正在连接任务记录…</small></div><div class="filter-row"><label class="search"><span aria-hidden="true">⌕</span><input id="taskSearch" type="search" placeholder="搜索项目、任务或原任务编号" aria-label="搜索项目、任务或原任务编号"></label><label class="select-label"><span class="sr-only">任务类型</span><select id="taskKindFilter"><option value="">全部类型</option></select></label><label class="select-label"><span class="sr-only">任务状态</span><select id="taskStatusFilter"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">执行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="interrupted">已中断</option><option value="cancelled">已取消</option></select></label><button id="taskFiltersReset" class="button button-light" type="button" disabled>清空筛选</button></div></div><div id="taskTable" class="table-wrap"><div class="empty">正在读取任务…</div></div></section>
+          <section id="geminiRecords" class="panel list-panel" role="tabpanel" aria-label="Gemini 请求记录" hidden><div class="panel-heading"><div><h2>Gemini 请求记录</h2><p id="geminiRecordSummary" class="panel-caption">切到该标签后读取。</p></div><label class="select-label"><input id="geminiShowChecks" type="checkbox"> 显示自查请求</label></div><div id="geminiRecordTable" class="table-wrap"><div class="empty">切到该标签后读取最近的 Gemini 请求。</div></div></section>
         </section>
         <section id="apiView" class="view api-view" aria-labelledby="apiHeading" hidden>
           <div class="page-heading api-page-heading"><div><div class="eyebrow"><span></span> API / INTEGRATION</div><h1 id="apiHeading">API 文档</h1><p>查看请求地址、参数和返回结果。</p></div><div class="api-page-actions"><button id="apiCopyAll" class="button button-primary" type="button">一键复制完整文档</button><span id="apiCopyAllStatus" role="status" aria-live="polite"></span></div></div>
@@ -304,7 +308,7 @@ payload = {
 print(call("/api/real-pool/flow", payload, rid))</code></pre>
               <h3>带参考素材</h3>
               <div class="api-endpoint"><b>POST</b><code>/api/real-pool/flow-references/auto/{素材 UUID}/{扩展名}</code><span>逐个上传文件原始字节，返回 reference_id。上传、校验和提交使用同一个 Idempotency-Key，不填账号或项目。</span></div>
-              <div class="api-table-wrap"><table class="api-table"><thead><tr><th scope="col">模式</th><th scope="col">在 params 中添加</th></tr></thead><tbody><tr><td>图生图</td><td><code>mode: "image-to-image"</code> 和 <code>reference_ids</code>（图片编号数组）</td></tr><tr><td>Omni 首帧或首尾帧</td><td><code>mode: "frames"</code>、<code>start_reference_id</code>，可选 <code>end_reference_id</code>（图片编号）</td></tr><tr><td>Omni 混合参考</td><td><code>model: "omni-flash"</code>、<code>mode: "ingredients"</code> 和 <code>reference_ids</code>（图片、MP4 编号数组）</td></tr></tbody></table></div>
+              <div class="api-table-wrap"><table class="api-table"><thead><tr><th scope="col">模式</th><th scope="col">在 params 中添加</th></tr></thead><tbody><tr><td>图生图</td><td><code>mode: "image-to-image"</code> 和 <code>reference_ids</code>（图片编号数组）</td></tr><tr><td>Omni 首帧或首尾帧</td><td><code>mode: "frames"</code>、<code>start_reference_id</code>，可选 <code>end_reference_id</code>（图片编号）</td></tr><tr><td>Omni 混合参考</td><td><code>model: "omni-flash-1.1"</code>、<code>mode: "ingredients"</code> 和 <code>reference_ids</code>（图片、MP4 编号数组）</td></tr></tbody></table></div>
               <p>参考文件支持 JPG、PNG、WebP 和上述模式允许的 MP4，不接收独立音频。单文件最多 8 MiB、合计 64 MiB，编号 24 小时有效。单图或单视频由平台统一启用换号重试，最多换 3 个账号；重试行为不受调用方控制。图片只在确认未发送时重试；视频重试沿用原任务的时长与清晰度。结果不明不重发。查询和下载始终用原任务编号。只校验时发送 <code>POST /api/real-pool/flow-validate</code> 并设 <code>confirm: false</code>，返回 <code>valid</code>、<code>submitted: false</code> 和 <code>reference_count</code>。</p>
               <div class="api-code-head"><span>复制参考素材请求 · 默认只校验</span><button type="button" data-copy-code="api-code-flow-references">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-flow-references">rid = str(uuid4())
 print("请求编号:", rid, flush=True)
@@ -314,7 +318,7 @@ ref = call(f"/api/real-pool/flow-references/auto/{uuid4()}/{ext}",
            request_id=rid, file=file)
 payload = {
     "kind": "video", "confirm": False,
-    "params": {"prompt": "镜头平稳前推", "model": "omni-flash-2", "aspect": "16:9",
+    "params": {"prompt": "镜头平稳前推", "model": "omni-flash-1.2", "aspect": "16:9",
                "count": 1, "resolution": "720p", "duration": 8,
                "mode": "frames", "start_reference_id": ref["reference_id"]}
 }

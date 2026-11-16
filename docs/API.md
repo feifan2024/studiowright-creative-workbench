@@ -85,6 +85,8 @@ print(call("/api/real-pool/image-analysis-validate", payload, rid))
 
 ## Flow · 生成图片或视频
 
+**源码更新（尚未部署到 Ubuntu）：** 启用前台输入的 Flow 会先输入最多 3 个字符，再一次粘贴剩余提示词。输入框聚焦后，输入和全文核对须在 3 秒内完成；超时不提交生成。这个时限不包含排队、页面准备或生成，也不是 API 请求超时。请求字段和调用方式保持不变。
+
 **`POST /api/real-pool/flow`** · 传 kind、confirm: true 和 params。返回 request_id、status、task_id；submitted 表示已排队。
 
 单图或单视频（`count: 1`，含参考素材）由平台统一管理失败后的重试，最多增加 3 次尝试。仅在后台确认符合重试条件时继续，结果不明时暂停核对。查询和下载始终使用原 `task_id`；每次尝试的账号、状态和失败原因在 `retry.attempts` 中记录。调用方不要传 `auto_retry`；当前实现忽略该字段，不能通过它关闭重试。
@@ -106,6 +108,41 @@ payload = {
 print(call("/api/real-pool/flow", payload, rid))
 ```
 
+### 画风 ID（可选）
+
+上游节点在 Flow 生图或生视频请求中传入可选的 1～256 字符字符串 `params.style_id`，例如 `"style_id": "ink-wash-v1"`。画风 ID 是素材管理字段；用于生成的画风描述仍放在 `prompt`。
+
+- 有值时，Flow 按原字符串记录，保留大小写和符号，不从提示词猜测，不改写、不替换。字段已提供但类型错误或值为空时明确报错。**完全省略 `params.style_id` 时，照常接收任务、生成并自动入库**；任务和素材来源不补填画风 ID。已有节点无需修改请求。
+- 任务详情通过 `GET /api/tasks/{任务编号}` 的 `style_id` 回显原值；查工作台请求记录时位于 `task.style_id`。自动重试、换账号和多份产物沿用同一值，每个产物入库时写入对应来源的 `origins[].style_id`。
+- 同一媒体文件去重时，保留各来源独立的画风 ID。自动分析标签与画风 ID 分开存储，任何分析结果不覆盖上游传值。
+- 验收标准：从同一次提交分别读取任务详情及素材来源，两处均与上游传值逐字相同；未传时不补填，去重及重试不丢值。
+
+若连接的是旧版后台，请省略此字段。
+
+### Omni 视频模型
+
+| 界面名称 | API 的 `params.model` | 支持的 `params.duration`（秒） |
+| --- | --- | --- |
+| Omni 1.1 Flash | `omni-flash-1.1` | 4、6、8、10 |
+| Omni 1.2 Flash | `omni-flash-1.2` | 3～15 的任意整数 |
+
+新调用推荐使用带版本号的 ID。旧 ID `omni-flash` 和 `omni-flash-2` 仍可调用，模型快照也可能沿用旧 ID。
+
+**Omni 1.2 Flash · 15 秒纯文字生成（实际提交，可能消耗积分）**
+
+```python
+rid = str(uuid4())
+print("请求编号:", rid, flush=True)
+payload = {
+    "kind": "video",
+    "confirm": True,
+    "params": {"prompt": "清晨海边，镜头沿海岸线平稳前推",
+               "model": "omni-flash-1.2", "aspect": "16:9",
+               "count": 1, "resolution": "720p", "duration": 15}
+}
+print(call("/api/real-pool/flow", payload, rid))
+```
+
 ### 带参考素材
 
 **`POST /api/real-pool/flow-references/auto/{素材 UUID}/{扩展名}`** · 逐个上传文件原始字节，返回 reference_id。上传、校验和提交使用同一个 Idempotency-Key，不填账号或项目。
@@ -114,7 +151,7 @@ print(call("/api/real-pool/flow", payload, rid))
 | --- | --- |
 | 图生图 | `mode: "image-to-image"` 和 `reference_ids`（图片编号数组） |
 | Veo / Omni 1.1、1.2 首帧或首尾帧 | `mode: "frames"`、`start_reference_id`，可选 `end_reference_id`（图片编号） |
-| Omni 混合参考 | `model: "omni-flash"`、`mode: "ingredients"` 和 `reference_ids`（图片、MP4 编号数组） |
+| Omni 1.1 Flash 混合参考 | `model: "omni-flash-1.1"`、`mode: "ingredients"` 和 `reference_ids`（图片、MP4 编号数组） |
 
 参考文件支持 JPG、PNG、WebP 和上述模式允许的 MP4，不接收独立音频。单文件最多 8 MiB、合计 64 MiB，编号 24 小时有效。只校验时发送 `POST /api/real-pool/flow-validate` 并设 `confirm: false`，返回 `valid`、`submitted: false` 和 `reference_count`。
 

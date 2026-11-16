@@ -752,3 +752,13 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .records-tabs [aria-selected="true"] { background:#e3eee8; color:#214b3c; border-color:#a7c1b2; font-weight:700; }
 #geminiRecordTable code { overflow-wrap:anywhere; }
 #recordsView [role="tabpanel"][hidden] { display:none; }
+.records-tab { appearance:none; background:#fff; border:1px solid var(--line); border-radius:9px; min-height:38px; padding:7px 16px; font:inherit; font-size:13px; font-weight:600; color:#40524a; cursor:pointer; }
+.records-tab:hover { background:#f6faf7; border-color:#c7d7ce; }
+.host-power { display:flex; align-items:center; justify-content:flex-end; gap:12px; margin-top:16px; margin-inline:26px; padding:13px 18px; border:1px solid #e6d9d9; border-radius:12px; background:#fffdfa; }
+.host-power-info { display:flex; flex-direction:column; gap:2px; margin-right:auto; min-width:0; }
+.host-power-info strong { font-size:13px; }
+.host-power-info span { font-size:12px; color:var(--muted); }
+.host-shutdown { border-color:#d9bcbc; color:#8f3e3e; }
+.host-shutdown:hover { background:#fbf4f4; border-color:#c9a3a3; }
+.host-shutdown.is-armed { background:#a13030; border-color:#a13030; color:#fff; font-weight:700; }
+@media (max-width: 720px) { .host-power { margin-inline:14px; flex-wrap:wrap; } }

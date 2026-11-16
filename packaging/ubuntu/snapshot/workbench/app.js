@@ -19,6 +19,9 @@ let projectActionsPending = new Map();
 const retryProjectDrafts = new Map(), accountActionsInFlight = new Set();
 let lastProjectCountsRead = 0;
 const viewReads = new Map();
+let officialQuotaData = null;
+let officialQuotaBusy = false;
+let officialQuotaReadFailed = false;
 let projectActionsLoading = false;
 const SNAPSHOT_REFRESH_MS = 5000;
 let dispatchPolicyDirty = false;
@@ -425,10 +428,12 @@ function selectRecordsTab(tab, focus=false) {
   recordsTab=tab;
   for (const [name,id,panel] of [['flow','flowRecordsTab','taskRecords'],['gemini','geminiRecordsTab','geminiRecords']]) {
     const selected=name===tab;
-    $(id).setAttribute('aria-selected',String(selected));
-    $(id).tabIndex=selected?0:-1;
-    $(panel).hidden=!selected;
-    if (selected && focus) $(id).focus();
+    const tabEl=$(id),panelEl=$(panel);
+    if (!tabEl || !panelEl) continue;
+    tabEl.setAttribute('aria-selected',String(selected));
+    tabEl.tabIndex=selected?0:-1;
+    panelEl.hidden=!selected;
+    if (selected && focus) tabEl.focus();
   }
   if (tab==='gemini') void refreshGeminiRecords();
 }
@@ -450,7 +455,8 @@ function syncVisiblePage(view, background) {
   };
   if (['overview', 'accounts', 'conversations'].includes(view)) read('channel', refreshChannelStatus);
   if (view === 'overview' || view === 'accounts') {
-    read('quota', refreshOfficialQuota);
+    // Load saved quota once; only explicit refresh performs a provider query.
+    if (!officialQuotaData && !officialQuotaReadFailed) read('quota', refreshOfficialQuota);
     read('flowReadinessStatus', refreshFlowReadinessStatus);
   }
   if (view === 'overview') {
@@ -583,6 +589,7 @@ function renderConnections() {
 function renderOverview() {
   const snapshot = state.snapshot;
   renderOverviewCharts(snapshot);
+  renderOfficialQuota();
   renderAccountInsights(snapshot, $('overviewInsights'));
   const flowAudit=governanceAudits.flow;
   if (snapshot?.flow_state?.available && !snapshot.flow_state.simulated && !flowAudit?.running &&
@@ -945,7 +952,7 @@ function renderTasks() {
   const accounts = new Map((snapshot.real_accounts?.items || []).map(a => [a.profile, a]));
   const reasons = new Map(tasks.map(item => [item.source_id, flowQueueReason(item, snapshot, accounts.get(item.source_profile))]));
   const taskMarkup = `<table><thead><tr><th>任务类型</th><th>项目 / 账号</th><th>状态</th><th>提交时间</th><th>任务编号</th><th>结果</th><th>来源</th></tr></thead><tbody>${tasks.map((item) => `
-    <tr class="task-kind-${["image", "video", "quote", "sync", "session_import", "check"].includes(item.kind) ? item.kind : "other"}"><td><strong>${esc(kindLabel(item.kind))}</strong>${item.retry ? `<br><span class="subtle">${item.retry.attempts?.length > 1 ? `已重试 ${item.retry.attempts.length - 1} 次` : "原任务"}</span>` : ''}</td><td class="table-title">${esc(item.project_title)}<br><span class="subtle">${esc(byProfile.get(item.source_profile) || item.source_profile)}</span></td><td>${flowTaskStatusBadge(item)}${reasons.get(item.source_id) ? '<br><span class="subtle">' + esc(reasons.get(item.source_id)) + '</span>' : ''}${item.note ? `<br><span class="subtle">${esc(item.note.replace('换号重试已完成','重试已完成'))}</span>` : ""}</td><td>${esc(dateTime(item.created))}</td><td><code title="${esc(item.source_id)}">${esc(shortId(item.source_id))}</code>${item.retry && item.retry.ordinal ? `<br><span class="subtle" title="${esc(item.retry.root_id)}">原任务 ${esc(shortId(item.retry.root_id))}</span>` : ''}</td><td>${taskFailureMarkup(item)}${retryAttemptsMarkup(item, byProfile)}${(item.downloads || []).map((file, index) => `<a class="text-link" href="http://127.0.0.1:18888${esc(file.path)}" target="_blank" rel="noopener noreferrer">下载${index + 1}</a>`).join(" ")}${item.recovered_path ? `<a class="text-link" href="${esc(item.recovered_path)}" target="_blank" rel="noopener noreferrer">打开已找回图片</a>` : ""}${item.recoverable ? `<button class="text-link" type="button" data-recover-flow="${esc(item.source_id)}">找回已生成图片</button>` : ""}${item.status !== "failed" && !(item.downloads || []).length && !item.recovered_path && !item.recoverable ? "—" : ""}</td><td><span class="source-chip">Flow</span></td></tr>`).join("")}</tbody></table>`;
+    <tr class="task-kind-${["image", "video", "quote", "sync", "session_import", "check"].includes(item.kind) ? item.kind : "other"}"><td><strong>${esc(kindLabel(item.kind))}</strong>${typeof item.style_id === "string" ? `<br><span class="subtle">画风 ID：<code style="white-space:pre-wrap">${esc(item.style_id)}</code></span>` : ""}${item.retry ? `<br><span class="subtle">${item.retry.attempts?.length > 1 ? `已重试 ${item.retry.attempts.length - 1} 次` : "原任务"}</span>` : ''}</td><td class="table-title">${esc(item.project_title)}<br><span class="subtle">${esc(byProfile.get(item.source_profile) || item.source_profile)}</span></td><td>${flowTaskStatusBadge(item)}${reasons.get(item.source_id) ? '<br><span class="subtle">' + esc(reasons.get(item.source_id)) + '</span>' : ''}${item.note ? `<br><span class="subtle">${esc(item.note.replace('换号重试已完成','重试已完成'))}</span>` : ""}</td><td>${esc(dateTime(item.created))}</td><td><code title="${esc(item.source_id)}">${esc(shortId(item.source_id))}</code>${item.retry && item.retry.ordinal ? `<br><span class="subtle" title="${esc(item.retry.root_id)}">原任务 ${esc(shortId(item.retry.root_id))}</span>` : ''}</td><td>${taskFailureMarkup(item)}${retryAttemptsMarkup(item, byProfile)}${(item.downloads || []).map((file, index) => `<a class="text-link" href="http://127.0.0.1:18888${esc(file.path)}" target="_blank" rel="noopener noreferrer">下载${index + 1}</a>`).join(" ")}${item.recovered_path ? `<a class="text-link" href="${esc(item.recovered_path)}" target="_blank" rel="noopener noreferrer">打开已找回图片</a>` : ""}${item.recoverable ? `<button class="text-link" type="button" data-recover-flow="${esc(item.source_id)}">找回已生成图片</button>` : ""}${item.status !== "failed" && !(item.downloads || []).length && !item.recovered_path && !item.recoverable ? "—" : ""}</td><td><span class="source-chip">Flow</span></td></tr>`).join("")}</tbody></table>`;
   // Keep opened task details and keyboard focus during an unchanged refresh.
   const table = $("taskTable");
   if (lastTaskMarkup !== taskMarkup || !table.querySelector('table')) {
@@ -975,6 +982,51 @@ $("taskTable").addEventListener("click", async (event) => {
     button.textContent = "找回失败，可再尝试";
     button.disabled = false;
   }
+});
+
+// Host shutdown: two clicks within six seconds, then the host powers off.
+let hostShutdownArmed = null;
+function disarmHostShutdown() {
+  if (hostShutdownArmed) clearTimeout(hostShutdownArmed);
+  hostShutdownArmed = null;
+  const button = $("hostShutdown");
+  button.textContent = "关闭主机";
+  button.classList.remove("is-armed");
+}
+$("hostShutdown")?.addEventListener("click", async () => {
+  const button = $("hostShutdown");
+  const status = $("hostShutdownStatus");
+  const note = (text) => { if (status) status.textContent = text; };
+  if (hostShutdownArmed) {
+    disarmHostShutdown();
+    button.disabled = true;
+    button.textContent = "正在关机…";
+    note("关机指令发送中…");
+    try {
+      const response = await fetch("/api/host-shutdown", {
+        method: "POST", credentials: "same-origin",
+        headers: {"Content-Type": "application/json", "X-Workbench-Request": "1"},
+        body: JSON.stringify({confirm: true})
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "关机指令未受理。");
+      button.textContent = "关机指令已发出";
+      note("主机即将关闭；面板连接会随之下线，开机后刷新本页即可恢复。");
+    } catch (error) {
+      note(error.message || "关机指令未受理。");
+      button.disabled = false;
+    }
+    return;
+  }
+  button.textContent = "再点一次确认关机";
+  button.classList.add("is-armed");
+  note("再次点击才会真正关机。");
+  hostShutdownArmed = setTimeout(() => {
+    hostShutdownArmed = null;
+    button.textContent = "关闭主机";
+    button.classList.remove("is-armed");
+    note("");
+  }, 6000);
 });
 
 function currentGeminiSummary(pool) {
@@ -1336,6 +1388,8 @@ function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
     const key=account.key?.replace(/^flow-account-/,'');
     const current=byKey.get(key);
     const quota=quotaData?.accounts?.[key];
+    const callable=channel?.available===true && channel.production_send_available===true &&
+      current?.dispatch_eligible===true && account.gemini_enabled!==false;
     const issues=[];
     const add=(title,action)=>issues.push({title,action});
     const reasons={
@@ -1348,11 +1402,11 @@ function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
     if (current && current.dispatch_eligible!==true) add(...(reasons[current.restriction] || ['账号暂不具备派发资格','查看账号详情。']));
     const fresh=Number.isFinite(quota?.checked_at) && Math.abs(Date.now()/1000-quota.checked_at)<=600;
     const values=['five_hour','weekly'].map(w=>quota?.[w]?.remaining_percent);
-    if (fresh && quota.status==='authorization_required')
+    if (!callable && fresh && quota.status==='authorization_required')
       issues.push({key:'confirmed_reauth',title:'官方要求重新授权',action:'完成 Google 官方授权后再检查。'});
-    if (fresh && quota.status==='verification_required' && quota.identity_matched===true)
+    if (!callable && fresh && quota.status==='verification_required' && quota.identity_matched===true)
       issues.push({key:'confirmed_verification',title:'Google 要求本人验证',action:'在 Google 验证页完成后重新检查。'});
-    if (fresh && quota.status==='ok' && values.includes(0)) add('官方额度已用尽','等待对应周期恢复。');
+    if (!callable && fresh && quota.status==='ok' && values.includes(0)) add('官方额度已用尽','等待对应周期恢复。');
     const raw=current?.latest_probe;
     // Show the last cloud check until a newer result or dispatch restriction
     // supersedes it. A manual check still displays only its own requests.
@@ -1360,7 +1414,7 @@ function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
     const latestSuccess=current?.latest_success;
     const confirmedAfterProbe=!expected && current?.dispatch_eligible===true && Number.isFinite(latestSuccess?.finished) &&
       (!probe || (['failed','unknown'].includes(probe.status) && Number.isFinite(probe.finished) && latestSuccess.finished>probe.finished));
-    if (!confirmedAfterProbe && (probe?.status==='failed' || probe?.status==='unknown')) {
+    if (!callable && !confirmedAfterProbe && (probe?.status==='failed' || probe?.status==='unknown')) {
       const code=probe.reason;
       issues.push({key:code==='verification_required' ? 'confirmed_verification' :
         code==='readiness_authorization_required' ? 'confirmed_reauth' : 'cloud_probe',
@@ -1372,13 +1426,13 @@ function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
       paused:shared.paused,queued:channel.dispatch.queued} : null;
     const busy=current?.busy===true;
     const status=auditDispatchState({issues,busy,
-      dispatch:current ? dispatch : null,gemini:true,quota:probe?.status==='completed' || confirmedAfterProbe ? 'ok' : null});
+      dispatch:current ? dispatch : null,gemini:true,quota:callable || probe?.status==='completed' || confirmedAfterProbe ? 'ok' : null});
     const timing=Number.isFinite(probe?.total_ms) ? `，耗时 ${(probe.total_ms/1000).toFixed(1)} 秒` : '';
     const note=confirmedAfterProbe ? '最近的真实请求已成功回复 · '+dateTime(latestSuccess.finished)+'。' :
       probe?.status==='completed' ? '上次云端验活通过'+(Number.isFinite(probe.finished) ? ' · '+dateTime(probe.finished) : '')+timing+'。' :
       probe?.status==='queued' ? '云端验活排队中。' : probe?.status==='dispatching' ? '等待 Gemini 云端回应。' :
       probe ? (timing ? '本次验活'+timing.slice(1)+'。' : '') : !issues.length ? '尚无本轮云端验活结果。' : '';
-    return {account,status,checking:probe?.status==='queued'||probe?.status==='dispatching',
+    return {account,status,checking:!callable && (probe?.status==='queued'||probe?.status==='dispatching'),
       issues,note:note+(status==='queue' ? ' 新任务需等待并发空位。' : '')};
   });
 }
@@ -1772,17 +1826,45 @@ function updateAccountCooldowns() {
 
 setInterval(updateAccountCooldowns, 1000);
 
+function geminiCardStatus(canCall, callBlocked, quota, now) {
+  if (callBlocked) return {label:'暂不可用', attention:true};
+  if (!canCall) return {label:'待确认', attention:false};
+  const age = now - quota?.checked_at;
+  const quotaKnown = quota?.status === 'ok' && Number.isFinite(age) && age >= 0 && age <= 600 &&
+    ['five_hour','weekly'].every(w => {
+      const value = quota?.[w]?.remaining_percent;
+      return Number.isFinite(value) && value >= 0 && value <= 100;
+    });
+  return {label:quotaKnown ? '可调用' : '可调用 · 额度待验证', attention:false};
+}
+
+function savedQuotaValue(row, window) {
+  const value = row?.[window]?.remaining_percent;
+  return row?.status === 'ok' && Number.isFinite(row.checked_at) &&
+    Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
+}
+
+function savedQuotaSummary(data) {
+  const rows = Object.values(data?.accounts || {}).filter(row =>
+    ['five_hour','weekly'].every(window => savedQuotaValue(row,window) !== null));
+  const windows = {};
+  for (const window of ['five_hour','weekly']) {
+    windows[window] = {average_remaining_percent:rows.length ?
+      Math.round(rows.reduce((sum,row)=>sum+savedQuotaValue(row,window),0)/rows.length*100)/100 : null};
+  }
+  return {known_accounts:rows.length,windows};
+}
+
 function accountOfficialQuotaMarkup(key) {
   const row = officialQuotaReadFailed ? null : officialQuotaData?.accounts?.[key];
   const now = Date.now()/1000;
   const age = row && typeof row.checked_at === 'number' ? now-row.checked_at : null;
   const fresh = row?.status === 'ok' && age !== null && Number.isFinite(age) && age >= 0 && age <= 600;
   const windowMarkup = (window, title) => {
-    const raw = row?.[window]?.remaining_percent;
-    const value = fresh && typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw <= 100 ? raw : null;
+    const value = savedQuotaValue(row,window);
     const reset = row?.[window]?.reset_at;
     const text = value === null ? '—' : value.toFixed(2).replace(/\.00$/, '')+'%';
-    const recovery = value === null ? '' : typeof reset === 'number' && Number.isFinite(reset) && reset > now ? '恢复 '+dateTime(reset) : value === 100 ? '额度充足' : '恢复时间待官方更新';
+    const recovery = value === null ? '' : !fresh ? '上次读取的剩余比例' : typeof reset === 'number' && Number.isFinite(reset) && reset > now ? '恢复 '+dateTime(reset) : value === 100 ? '额度充足' : '恢复时间待官方更新';
     return `<div class="account-quota-window"><div class="account-quota-label"><span>${title}</span><strong>${text}</strong></div><div class="account-quota-track${value === null ? ' is-unknown' : ''}" ${value === null ? `role="img" aria-label="Gemini ${title}尚未读取"` : `role="progressbar" aria-label="Gemini ${title}剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`} >${value === null ? '' : `<i style="width:${value}%"></i>`}</div>${recovery ? `<span class="account-quota-reset">${esc(recovery)}</span>` : ''}</div>`;
   };
   const quotaReason = {
@@ -1792,7 +1874,7 @@ function accountOfficialQuotaMarkup(key) {
     eligibility_failed:'官方资格检查未通过，额度暂不可读',
   }[row?.status];
   const recoveringQuota = (governanceAudits.gemini?.running || officialQuotaData?.refreshing) && !fresh;
-  const message = recoveringQuota ? '正在检查并恢复额度读取…' : officialQuotaReadFailed ? '额度服务暂不可读取' : quotaReason ? quotaReason : row?.status === 'ok' && !fresh ? '额度记录已过期，等待更新' : row?.status === 'network_error' ? '连接失败，额度暂未读到' : !fresh ? '额度暂未读到' : '';
+  const message = recoveringQuota ? '正在检查并恢复额度读取…' : officialQuotaReadFailed ? '额度服务暂不可读取' : quotaReason ? quotaReason : row?.status === 'ok' && !fresh ? '上次读取：'+dateTime(row.checked_at)+'；仅供参考，点刷新更新' : row?.status === 'network_error' ? '连接失败，额度暂未读到' : !fresh ? '额度暂未读到' : '';
   return `<div class="account-quota-windows">${windowMarkup('five_hour','5 小时额度')}${windowMarkup('weekly','每周额度')}</div>${message ? `<p class="account-quota-note">${esc(message)}</p>` : ''}`;
 }
 
@@ -1904,7 +1986,14 @@ function renderAccounts() {
     const cooling = item.flow_cooling === true || item.flow_health === 'cooling';
     const flowPaused = item.flow_risk_paused === true;
     const flowReady = flowRow?.status === 'ready' || flowRow?.status === 'queue';
-    const geminiReady = geminiRow?.status === 'ready' || geminiRow?.status === 'queue';
+    const callState = officialAccount(item);
+    const geminiReady = geminiAccountAvailability(item).manual;
+    const callBlocked = callState.paused ||
+      (!channelReadFailed && state.channelStatus?.available === true && state.channelStatus.production_send_available === false) ||
+      callState.data?.dispatch_eligible === false;
+    const quotaKey = item.key.slice('flow-account-'.length);
+    const geminiCard = geminiCardStatus(geminiReady, callBlocked,
+      officialQuotaReadFailed ? null : officialQuotaData?.accounts?.[quotaKey], Date.now()/1000);
     const flowIssues = flowRow?.issues || [];
     const geminiIssues = issues.filter(issue => !issue.key.startsWith('flow_') && issue.key !== 'quota_stale');
     const windowIssue = flowWindowIssue(item.profile, state.snapshot);
@@ -1914,10 +2003,10 @@ function renderAccounts() {
       ? ({blocked:'Gemini 处于不可派发状态，等待就绪核对通过。', unknown:'Gemini 状态尚未完成核对，等待下次检查。'}[geminiRow?.status] || 'Gemini 状态待核对，等待下次检查。') : '';
     // Derive each service's presentation from its own recorded state only.
     const flowNeedsAttention = flowRow?.status==='blocked' && !cooling;
-    const geminiNeedsAttention = geminiRow?.status==='blocked';
+    const geminiNeedsAttention = geminiCard.attention;
     const needsAttention = flowNeedsAttention || geminiNeedsAttention;
     const geminiLastCheck = item.gemini_enabled === false ? '已暂停' : item.gemini === 'verified' ? '上次已核对' : '待核对';
-    const geminiStatusText = readinessBadge(geminiRow);
+    const geminiStatusText = geminiCard.label;
     const flowIssueTitle = flowIssues.map(issue => issue.title).join('；');
     const geminiIssueTitle = geminiIssues.map(issue => issue.title).join('；');
     const cardState = (flowPaused ? ' is-flow-paused' : cooling ? ' is-flow-cooling' : '') + (needsAttention ? ' is-account-issue' : '');
@@ -1940,7 +2029,7 @@ function renderAccounts() {
       <div class="account-card-heading"><div class="account-avatar" aria-hidden="true">${esc(String(identity).slice(0, 1).toUpperCase())}</div><div class="account-identity"><span class="account-alias">${esc(item.label || item.profile)}</span><h3 title="${esc(identity)}">${esc(identity)}</h3></div><span class="account-login ${item.flow_login === 'verified' ? 'is-ready' : ''}">${esc(login)}</span>
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
       <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div><span>${hasBalance && !item.flow_balance_fresh ? '上次积分余额' : '积分余额'}</span><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账：${esc(item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : "暂未读取")}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
-      <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText)}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${countsAsReady(geminiRow) ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${accountOfficialQuotaMarkup(item.key.slice('flow-account-'.length))}</div></div></div>
+      <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText)}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${geminiReady && !geminiNeedsAttention ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${accountOfficialQuotaMarkup(item.key.slice('flow-account-'.length))}</div></div></div>
       <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${flowFallback ? `<span class="account-mini-status is-attention">Flow · ${esc(flowFallback)}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}${geminiFallback ? `<span class="account-mini-status is-attention">Gemini · ${esc(geminiFallback)}</span>` : ''}</div>
       ${flowReason ? `<p class="account-flow-reason"><strong>${esc(flowReason.label)}：</strong>${esc(flowReason.text)}</p>` : ''}
       <details><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>
@@ -3553,6 +3642,8 @@ async function showMaterial(id) {
     + '<p class="material-facts">分辨率：' + esc(resolution) + '　·　时长：' + esc(duration) + '　·　' + esc(materialSize(item.size)) + '</p>'
     + '<p class="material-facts">来源：' + esc(materialSource(origin)) + '　·　账号：'
     + esc(origin.account_email || origin.account_id || '未记录') + ((item.origins || []).length > 1 ? '　·　共 ' + item.origins.length + ' 条来源' : '') + '</p>'
+    + (item.origins || []).filter(o => typeof o.style_id === 'string').map(o =>
+      '<p>画风 ID：<code style="white-space:pre-wrap">' + esc(o.style_id) + '</code> · ' + esc(o.request_id || o.source_id || '') + '</p>').join('')
     + '<div class="material-prompt">' + esc(origin.prompt || '原记录未保存提示词') + '</div></div><div class="material-panel"><h3>素材与标签</h3>'
     + '<a class="text-link material-download" href="' + url + '?download=1" download>下载原文件 ↓</a>'
     + '<div id="materialShotContent">' + materialShotNotes(item, extra) + '</div>'
@@ -3763,6 +3854,8 @@ $("flowSend").addEventListener("click", async () => {
   const params = {prompt: $("flowPrompt").value, model: $("flowModel").value, aspect: $("flowAspect").value,
     count: Number($("flowCount").value), resolution: $("flowResolution").value,
     duration: Number($("flowDuration").value)};
+  const styleId = $("flowStyleId").value;
+  if (styleId !== "") params.style_id = styleId;
   if (!params.prompt.trim() || !$("flowConfirm").checked) {
     $("flowMessage").textContent = "请填写提示词并确认可能的积分消耗。"; return;
   }
@@ -4396,25 +4489,23 @@ readRetainedSettings();
 
 
 // Official quota is a separate read-only source; request counts are never quotas.
-let officialQuotaData = null;
-let officialQuotaBusy = false;
-let officialQuotaReadFailed = false;
 function renderOfficialQuota() {
   const target = $('geminiQuotaOverview');
   if (!target) return;
   const opened = !!target.querySelector('details[open]');
   const focused = target.contains(document.activeElement) ? document.activeElement?.dataset.quotaAction : null;
   const data = officialQuotaReadFailed ? null : officialQuotaData;
-  const known = data?.known_accounts || 0;
+  const saved = savedQuotaSummary(data);
+  const known = saved.known_accounts;
   const total = data?.total_accounts || state.snapshot?.real_accounts?.items?.length || 0;
   const refreshing = data?.refreshing === true;
   const percent = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
   const number = value => value == null ? '—' : value.toFixed(2).replace(/\.00$/, '') + '%';
   const resetText = seconds => typeof seconds === 'number' ? `最近恢复 ${dateTime(seconds)}` : '恢复时间以官方状态为准';
   const windowMarkup = (key, title) => {
-    const window = data?.windows?.[key];
+    const window = saved.windows[key];
     const value = percent(window?.average_remaining_percent);
-    return `<div class="quota-window"><div class="quota-window-label"><span>${title}</span><strong>${number(value)}<small> 平均剩余</small></strong></div><div class="quota-track ${value == null ? 'is-unknown' : ''}" ${value == null ? 'role="img" aria-label="额度尚未读取"' : `role="progressbar" aria-label="${title}账号平均剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`}><i data-quota-fill="${value ?? 0}"></i></div><span class="quota-reset">${value == null ? '等待官方额度数据' : esc(resetText(window?.next_reset_at))}</span></div>`;
+    return `<div class="quota-window"><div class="quota-window-label"><span>${title}</span><strong>${number(value)}<small> 平均剩余</small></strong></div><div class="quota-track ${value == null ? 'is-unknown' : ''}" ${value == null ? 'role="img" aria-label="额度尚未读取"' : `role="progressbar" aria-label="${title}账号平均剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`}><i data-quota-fill="${value ?? 0}"></i></div><span class="quota-reset">${value == null ? '等待手动读取额度' : '上次读取的平均剩余，非实时额度'}</span></div>`;
   };
   const taskKnown = state.snapshot?.flow_state?.available === true && Array.isArray(state.snapshot?.tasks);
   const tasks = taskKnown ? state.snapshot.tasks.filter(t=>['image','video'].includes(t.kind)) : [];
@@ -4427,13 +4518,13 @@ function renderOfficialQuota() {
   const rows = Object.entries(data?.accounts || {});
   const rowMarkup = rows.map(([key,row],index)=>{
     const fresh = row.status === 'ok' && Date.now()/1000-row.checked_at <= 600;
-    const values = ['five_hour','weekly'].map(w=>fresh ? percent(row[w]?.remaining_percent) : null);
+    const values = ['five_hour','weekly'].map(w=>savedQuotaValue(row,w));
     const resets = ['five_hour','weekly'].map(w=>row[w]?.reset_at).filter(t=>fresh && typeof t==='number' && t>Date.now()/1000);
-    const status = fresh ? (resets.length ? resetText(Math.min(...resets)) : '额度可用') : row.status==='verification_required' ? '额度查询提示核验（不限制对话）' : row.status==='eligibility_failed' ? '官方资格检查未通过（未确认需核验）' : row.status==='network_error' ? '连接官方服务失败' : row.status==='authorization_required' ? '官方要求重新授权' : row.status==='authorization_unavailable' ? '本地授权资料未就绪' : row.status==='not_read' ? (refreshing ? '等待本轮读取' : '尚未读取') : row.status==='ok' ? '记录已过期' : '本轮未读到额度';
+    const status = fresh ? (resets.length ? resetText(Math.min(...resets)) : '额度可用') : row.status==='verification_required' ? '额度查询提示核验（不限制对话）' : row.status==='eligibility_failed' ? '官方资格检查未通过（未确认需核验）' : row.status==='network_error' ? '连接官方服务失败' : row.status==='authorization_required' ? '官方要求重新授权' : row.status==='authorization_unavailable' ? '本地授权资料未就绪' : row.status==='not_read' ? (refreshing ? '等待本轮读取' : '尚未读取') : row.status==='ok' ? '上次读取 '+dateTime(row.checked_at)+'，仅供参考' : '本轮未读到额度';
     return `<tr><th scope="row">${esc(names.get(key) || `账号 ${index+1}`)}</th>${values.map((v,i)=>`<td><div class="quota-account-value">${number(v)}</div><div class="quota-account-track" role="img" aria-label="${i ? '每周' : '5小时'}剩余 ${v == null ? '未知' : v+'%'}"><i data-quota-fill="${v ?? 0}"></i></div></td>`).join('')}<td>${esc(status)}</td></tr>`;
   }).join('');
   const checked = rows.map(([,r])=>r.checked_at).filter(t=>typeof t==='number');
-  const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已读取 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : officialQuotaReadFailed ? '额度服务暂不可读取' : '尚未读到官方额度';
+  const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已保存 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : officialQuotaReadFailed ? '额度服务暂不可读取' : '尚未读到官方额度';
   target.setAttribute('aria-busy',String(refreshing));
   target.innerHTML = `<div class="quota-main">${flowMarkup}${windowMarkup('five_hour','GEMINI · 5 小时额度')}${windowMarkup('weekly','GEMINI · 每周额度')}</div><div class="quota-footer"><div class="quota-source"><span>Gemini：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>Flow 进行中和未确认任务不计入；Gemini 为账号平均剩余，不同账号分别恢复。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaBusy ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">Gemini 各账号额度<span>查看剩余与恢复时间</span></summary><div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || '<tr><td colspan="4">正在读取账号列表…</td></tr>'}</tbody></table></div></details>`;
   target.querySelectorAll('[data-quota-fill]').forEach(meter=>{meter.style.width=Number(meter.dataset.quotaFill)+'%';});

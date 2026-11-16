@@ -111,10 +111,23 @@ def review_hold(account, task_id, manual=False):
     return changed == 1
 
 
+def operator_dispatch_paused():
+    marker = STATE / 'maintenance'
+    try:
+        return (not marker.is_symlink() and marker.is_file()
+                and marker.read_bytes() == b'operator-dispatch-pause\n')
+    except OSError:
+        return False
+
+
 def guard_live(account):
     from shared_session_controller import state
     profile = account['profile']
-    if (STATE/'maintenance').exists():
+    marker = STATE / 'maintenance'
+    if account.get('operator_dispatch_paused'):
+        if not operator_dispatch_paused():
+            raise ValueError('maintenance')
+    elif marker.exists() or marker.is_symlink():
         raise ValueError('maintenance')
     s = state()
     rows = [a for a in s['accounts'] if a.get('profile') == profile]
@@ -305,6 +318,8 @@ async def repair(account, initial, actions, safe_only=False):
             if safe_only and (not before.get('origin') or not before.get('account') or before.get('busy')):
                 return ('draft' if before.get('draft') else 'busy' if before.get('busy') else 'login'),None
             if before.get('draft'):
+                if account.get('operator_dispatch_paused'):
+                    return 'draft',None
                 initial = 'draft'
             if (not before.get('origin') or not before.get('account')) and not navigated_once:
                 # Auto-navigation: a stray interstitial (Google bar, account picker)
@@ -504,6 +519,8 @@ async def recover(payload):
     out = {}
     deadline = asyncio.get_running_loop().time() + 140
     for account in payload['accounts']:
+        if payload.get('operator_dispatch_paused'):
+            account = dict(account, operator_dispatch_paused=True)
         if asyncio.get_running_loop().time() >= deadline - 2:
             break
         p = account['profile']
@@ -559,6 +576,26 @@ async def recover(payload):
         if actions and verdict != 'ok':
             Coordinator().event(p,None,'readiness_recovery_needs_review',actions=actions,verdict=verdict)
         out[p] = {'page':verdict,'actions':actions}
+    if payload.get('operator_dispatch_paused') and operator_dispatch_paused():
+        from account_insights import Insights
+        from balance_reader import read_balance
+        from console_store import Store
+        from playwright.async_api import async_playwright
+        root = Path.home() / '.local/share/studiowright-evaluation'
+        store = Store(root / 'console-data')
+        insights = Insights(store, root / 'data/studiowright.db')
+        async with async_playwright() as pw:
+            async def refresh(account):
+                profile = account['profile']
+                if out.get(profile, {}).get('page') != 'ok' or not operator_dispatch_paused():
+                    return
+                try:
+                    await asyncio.to_thread(guard_live, account)
+                    balance = await asyncio.wait_for(read_balance(store.account(profile), pw, include_details=True), timeout=12)
+                    insights.record(profile, balance['balance'], next_credit_date=balance.get('next_credit_date'))
+                except (OSError, ValueError, TimeoutError, sqlite3.Error, subprocess.SubprocessError):
+                    pass
+            await asyncio.gather(*(refresh(dict(a, operator_dispatch_paused=True)) for a in payload['accounts']))
     return out
 
 

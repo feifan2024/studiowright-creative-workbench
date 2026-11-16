@@ -22,6 +22,7 @@ READINESS_RECOVERABLE_BLOCKS=('provider_error','provider_connection_failed','pro
 READINESS_REPLY='GEMINI_READY'
 READINESS_PROMPT='这是创作工作台的云端连通性检查。请只回复 GEMINI_READY，不要添加其他文字。'
 MAX_TIMEOUT_ATTEMPTS=4
+ACCOUNT_BLOCK_REASONS=(AUTH_UNSENT,'authorization_still_required','verification_required','quota_or_rate_limit')
 
 def unresolved_official(db,key):
     return db.execute("SELECT 1 FROM requests r WHERE r.account_key=? AND r.status='unknown' AND "+OFFICIAL_REQUEST_SQL+" AND NOT EXISTS(SELECT 1 FROM official_jobs p WHERE p.request_id=r.request_id AND p.readiness_probe=1) AND NOT EXISTS(SELECT 1 FROM account_unknown_release x WHERE x.request_id=r.request_id)",(key,)).fetchone() is not None
@@ -121,7 +122,7 @@ class OfficialPool:
                 db.execute("INSERT INTO account_unknown_release VALUES(?,?,'timeout_archived_unconfirmed')",(rid,now))
                 db.execute("UPDATE requests SET note=COALESCE(note,'') || ? WHERE request_id=?",
                            (' 已归档：超时，结果未确认；保留原记录，未重发。',rid))
-                db.execute("INSERT OR IGNORE INTO official_account_blocks VALUES(?,'timeout_unconfirmed',?)",(key,finished))
+                # The unknown request remains on its conversation; it does not disable the account.
             db.execute('COMMIT')
         return len(rows)
 
@@ -192,9 +193,15 @@ class OfficialPool:
         if db.execute("""SELECT 1 FROM official_reauth a JOIN official_jobs j USING(request_id)
                         WHERE a.account_key=? AND a.state='waiting' AND j.readiness_probe=1""",(key,)).fetchone():
             return 'authorization_in_progress'
-        if not readiness_probe and unresolved_official(db,key):return 'unresolved_request'
         block=db.execute('SELECT reason,created FROM official_account_blocks WHERE account_key=?',(key,)).fetchone()
-        if block and tuple(block)!=allowed_block and block[0] not in QUOTA_CHECK_ONLY_BLOCKS:return 'official_call_blocked'
+        if block and tuple(block)!=allowed_block and block[0] not in QUOTA_CHECK_ONLY_BLOCKS:
+            # A persisted unknown business result is scoped to its old conversation.
+            # Real authorization, verification and rate limits remain account wide.
+            conversation_only = block[0] not in ACCOUNT_BLOCK_REASONS and db.execute(
+                "SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) "
+                "WHERE r.account_key=? AND r.status='unknown' AND r.finished=? "
+                "AND j.reason=? AND j.readiness_probe=0", (key,block[1],block[0])).fetchone()
+            if not conversation_only:return 'official_call_blocked'
         return None
 
     @staticmethod
@@ -518,7 +525,7 @@ class OfficialPool:
                     db.execute('UPDATE conversations SET native_json=?,updated=?,blocked=NULL WHERE id=?',(json.dumps(native),now,job['conversation_id']))
                 else:
                     db.execute('UPDATE conversations SET blocked=?,updated=? WHERE id=?',(note,now,job['conversation_id']))
-                    if not job.get('readiness_probe') and (status=='unknown' or reason in (AUTH_UNSENT,'authorization_still_required','verification_required','quota_or_rate_limit')):
+                    if not job.get('readiness_probe') and reason in ACCOUNT_BLOCK_REASONS:
                         db.execute('INSERT INTO official_account_blocks VALUES(?,?,?) ON CONFLICT(account_key) DO UPDATE SET reason=excluded.reason,created=excluded.created',(job['account_key'],reason or status,now))
                 db.execute('COMMIT')
             except BaseException:db.execute('ROLLBACK');raise

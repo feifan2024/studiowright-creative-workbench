@@ -55,14 +55,20 @@ test('account cards render fallback states without aborting the account list', (
   const presentation = render.slice(render.indexOf('    const cooling ='), render.indexOf('    const cooldownSeconds ='));
   for (const status of ['ready', 'blocked', 'unknown', 'checking']) {
     const context = vm.createContext({
-      item: {profile:'test', gemini:'verified'}, state:{snapshot:{}},
+      item: {profile:'test', key:'flow-account-test', gemini:'verified'}, state:{snapshot:{}},
+      channelReadFailed:false, officialQuotaData:null, officialQuotaReadFailed:false,
       flowRow:{status,issues:[]}, geminiRow:{status}, issues:[],
       flowWindowIssue: () => null, readinessBadge: row => row.status,
+      officialAccount: () => ({paused:false, data:null}),
+      geminiAccountAvailability: () => ({manual: status === 'ready', auto: status === 'ready'}),
+      geminiCardStatus: () => ({label: status === 'ready' ? '可调用' : '待确认', attention: status !== 'ready'}),
+      Date,
     });
-    const result = vm.runInContext(presentation + '\n({flowFallback,geminiFallback,flowStatusText});', context);
+    const result = vm.runInContext(presentation + '\n({flowFallback,geminiFallback,flowStatusText,geminiStatusText});', context);
     assert.equal(result.flowStatusText, status);
     assert.equal(Boolean(result.flowFallback), status !== 'ready');
     assert.equal(Boolean(result.geminiFallback), status !== 'ready');
+    assert.equal(result.geminiStatusText, status === 'ready' ? '可调用' : '待确认');
   }
 });
 

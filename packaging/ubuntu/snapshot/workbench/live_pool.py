@@ -1485,6 +1485,10 @@ class RealPool:
         kind, params = data['kind'], data['params']
         if kind not in ('image', 'video') or not isinstance(params, dict):
             raise ValueError('任务类型不正确。')
+        if isinstance(params.get("model"), str):
+            aliases = {"omni-flash-1.1": "omni-flash", "omni-flash-1.2": "omni-flash-2"}
+            if params["model"] in aliases:
+                params = dict(params, model=aliases[params["model"]])
         # 2026-11-07: switching on confirmed rejections is enforced server-side.
         # The field is rejected outright so callers notice instead of relying on
         # a silently ignored flag; retry behavior follows kind and count only.
@@ -1494,9 +1498,13 @@ class RealPool:
             raise ValueError('换号重试只支持每次生成一张图片或一段视频。')
         required = {'prompt', 'model', 'aspect', 'count', 'resolution', 'duration'}
         from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
-        if not required <= params.keys() or params.keys() - required - REFERENCE_FIELDS - {'max_credits'}:
+        if not required <= params.keys() or params.keys() - required - REFERENCE_FIELDS - {'max_credits', 'style_id'}:
             raise ValueError('任务参数不正确。')
-        with_references = params.keys() - {'max_credits'} != required
+        if 'style_id' in params:
+            style_id = params['style_id']
+            if not isinstance(style_id, str) or not style_id.strip() or len(style_id) > 256 or any(0xD800 <= ord(c) <= 0xDFFF for c in style_id):
+                raise ValueError('画风 ID 须为 1～256 个字符的非空字符串。')
+        with_references = params.keys() - {'max_credits', 'style_id'} != required
         ids = []
         if with_references:
             ids = task_reference_ids(kind, params)

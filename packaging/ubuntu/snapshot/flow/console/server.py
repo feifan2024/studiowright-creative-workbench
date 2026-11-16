@@ -35,7 +35,8 @@ from remote_login import RemoteLogins
 HERE = Path(__file__).resolve().parent
 PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 KINDS = {"sync", "login", "media", "doctor", "quote", "image", "video"}
-RETRYABLE_INPUT_STOPS = frozenset(('pasted_text_mismatch', 'pre_submit_failed:pointer_not_over_input', 'pre_submit_failed:desktop_keyboard_authorization_timeout', 'window_focus_lost', 'composer_unavailable', 'window_activation_unconfirmed'))
+TERMINAL_INPUT_STOPS = frozenset(('pasted_text_mismatch', 'prompt_input_timeout'))
+RETRYABLE_INPUT_STOPS = frozenset(('pre_submit_failed:pointer_not_over_input', 'pre_submit_failed:desktop_keyboard_authorization_timeout', 'window_focus_lost', 'composer_unavailable', 'window_activation_unconfirmed'))
 
 
 def safe_error(exc):
@@ -162,13 +163,15 @@ class Console:
                     source_error = str(source.get('error') or '')
                     if (stage == 'preparing' and type(exc).__name__ == 'InputNotSubmitted'
                             and type(exc).__module__ == 'foreground_input'
-                            and stop in RETRYABLE_INPUT_STOPS
                             and (source_error == f'InputNotSubmitted: {stop}'
                                  or source_error.startswith(f'InputNotSubmitted: {stop} ('))):
-                        evidence = 'transient_before_submit'
+                        if stop in TERMINAL_INPUT_STOPS:
+                            evidence = 'confirmed_before_submit'
+                        elif stop in RETRYABLE_INPUT_STOPS:
+                            evidence = 'transient_before_submit'
                     if (source['status'] == 'failed' and source['project_id'] == task['project']
                             and source['profile'] == task['profile'] and source['kind'] == task['kind'] and not raw.get('media_ids') and not raw.get('files')
-                            and ((evidence == 'transient_before_submit' and stage == 'preparing')
+                            and ((evidence in ('transient_before_submit', 'confirmed_before_submit') and stage == 'preparing')
                                  or (evidence == 'provider_rejected_unusual' and stage == 'submitting'
                                      and task['params'].get('count') == 1))):
                         retry_evidence = evidence
@@ -507,6 +510,10 @@ class Console:
             p = body.get("params", {})
             if not isinstance(p, dict):
                 raise ValueError("任务参数格式不正确。")
+            if isinstance(p.get("model"), str):
+                aliases = {"omni-flash-1.1": "omni-flash", "omni-flash-1.2": "omni-flash-2"}
+                if p["model"] in aliases:
+                    p = dict(p, model=aliases[p["model"]])
             prompt = p.get("prompt", "").strip() if isinstance(p.get("prompt", ""), str) else ""
             if not prompt or len(prompt) > 10000:
                 raise ValueError("请填写提示词，最多 10000 个字。")
@@ -520,6 +527,13 @@ class Console:
                 "resolution": p.get("resolution", "720p"),
                 "duration": p.get("duration", 8),
             }
+            if 'style_id' in p:
+                style_id = p['style_id']
+                if not isinstance(style_id, str) or not style_id.strip() or len(style_id) > 256 or any(0xD800 <= ord(c) <= 0xDFFF for c in style_id):
+                    raise ValueError('画风 ID 须为 1～256 个字符的非空字符串。')
+                if kind not in ('image', 'video'):
+                    raise ValueError('只有生图和生视频任务可以设置画风 ID。')
+                params['style_id'] = style_id
             if with_references:
                 if kind not in ('image', 'video'):
                     raise ValueError('仅图片和视频任务可以使用参考素材。')
@@ -874,6 +888,8 @@ def create_app(root, adapter, test=False):
         public = c.public_task(row)
         data = {key:public[key] for key in ('id','kind','status','created','finished','downloads','retry')}
         # The API response omits prompts, reference IDs and internal error details.
+        if 'style_id' in public['params']:
+            data['style_id'] = public['params']['style_id']
         data['task_id'] = data['id']
         if ident != root:
             data['requested_task_id'] = ident

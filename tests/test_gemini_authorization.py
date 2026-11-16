@@ -14,7 +14,7 @@ from official_pool import OfficialPool
 
 
 class GeminiAuthorizationTest(unittest.TestCase):
-    def test_unknown_business_request_only_allows_independent_probe(self):
+    def test_unknown_business_request_does_not_lock_account(self):
         pool = OfficialPool.__new__(OfficialPool)
         with sqlite3.connect(':memory:') as db:
             db.executescript("""
@@ -31,7 +31,7 @@ class GeminiAuthorizationTest(unittest.TestCase):
                 INSERT INTO official_account_blocks VALUES('a','timeout_unconfirmed',1);
             """)
             inventory = {'a': True}
-            self.assertEqual(pool.reason(db, 'a', inventory), 'unresolved_request')
+            self.assertIsNone(pool.reason(db, 'a', inventory))
             block = pool.readiness_block(db, 'a')
             self.assertIsNone(pool.reason(db, 'a', inventory, block, readiness_probe=True))
             self.assertEqual(db.execute("SELECT status FROM requests").fetchone()[0], 'unknown')
@@ -57,7 +57,33 @@ class GeminiAuthorizationTest(unittest.TestCase):
             self.assertEqual(pool.archive_old_timeouts(now=2000), 0)
             self.assertEqual(db.execute("SELECT status,response FROM requests WHERE request_id='old'").fetchone(), ('unknown','partial'))
             self.assertEqual(db.execute("SELECT request_id FROM account_unknown_release").fetchall(), [('old',)])
-            self.assertEqual(db.execute("SELECT reason FROM official_account_blocks").fetchone(), ('timeout_unconfirmed',))
+            self.assertIsNone(db.execute("SELECT reason FROM official_account_blocks").fetchone())
+
+    def test_unknown_finish_blocks_only_original_conversation(self):
+        pool = OfficialPool.__new__(OfficialPool)
+        with sqlite3.connect(':memory:', isolation_level=None) as db:
+            db.executescript("""
+                CREATE TABLE requests(request_id TEXT,account_key TEXT,status TEXT,finished REAL,response TEXT,note TEXT);
+                CREATE TABLE official_jobs(request_id TEXT,reason TEXT,readiness_probe INTEGER);
+                CREATE TABLE official_attempts(request_id TEXT,status TEXT,reason TEXT,submitted INTEGER,finished REAL,total_ms REAL,response TEXT);
+                CREATE TABLE conversations(id TEXT,blocked TEXT,updated REAL);
+                CREATE TABLE official_account_blocks(account_key TEXT PRIMARY KEY,reason TEXT,created REAL);
+                CREATE TABLE request_metrics(request_id TEXT PRIMARY KEY,first_text_ms REAL,total_ms REAL,token_count INTEGER);
+                INSERT INTO requests VALUES('old','a','dispatching',NULL,NULL,NULL);
+                INSERT INTO official_jobs VALUES('old',NULL,0);
+                INSERT INTO conversations VALUES('conversation',NULL,0);
+            """)
+            pool.pool = SimpleNamespace(connection=lambda: db)
+            pool.finish(dict(request_id='old',account_key='a',conversation_id='conversation'),
+                        dict(status='unknown',reason='unexpected_tool_stopped',submitted=True))
+            self.assertEqual(db.execute("SELECT status FROM requests").fetchone()[0], 'unknown')
+            self.assertTrue(db.execute("SELECT blocked FROM conversations").fetchone()[0])
+            self.assertEqual(db.execute("SELECT reason FROM official_jobs").fetchone()[0], 'unexpected_tool_stopped')
+            self.assertEqual(db.execute("SELECT count(*) FROM official_account_blocks").fetchone()[0], 0)
+            db.execute("UPDATE requests SET status='dispatching'")
+            pool.finish(dict(request_id='old',account_key='a',conversation_id='conversation'),
+                        dict(status='failed',reason='verification_required',submitted=False))
+            self.assertEqual(db.execute("SELECT reason FROM official_account_blocks").fetchone()[0], 'verification_required')
 
     def test_authorization_schedules_targeted_quota_read(self):
         import threading

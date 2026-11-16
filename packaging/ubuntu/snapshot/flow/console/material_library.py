@@ -213,6 +213,8 @@ class Library(TagIndex):
             for origin in result["origins"]:
                 origin.pop("asset_id")
                 origin["details"] = json.loads(origin["details"])
+                if isinstance(origin["details"], dict) and "style_id" in origin["details"]:
+                    origin["style_id"] = origin["details"]["style_id"]
             result["tags"] = [
                 r[0]
                 for r in c.execute(
@@ -401,6 +403,7 @@ class Library(TagIndex):
                         "job_id": group.get("job_id"),
                         "stage": group.get("stage"),
                         "file_name": path.name,
+                        **({"style_id": task["params"]["style_id"]} if "style_id" in task["params"] else {}),
                     },
                 }
                 with self.connect() as c:

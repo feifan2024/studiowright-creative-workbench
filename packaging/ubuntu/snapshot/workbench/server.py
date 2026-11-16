@@ -369,6 +369,7 @@ def task_rows(state, projects):
             "created": numeric_time(row.get("created")),
             "finished": numeric_time(row.get("finished")),
             "downloads": downloads,
+            **({"style_id": row["params"]["style_id"]} if isinstance(row.get("params"), dict) and "style_id" in row["params"] else {}),
             "self_recovery": [
                 {"action": clean_text(e.get('action'),80), "created": numeric_time(e.get('created'))}
                 for e in (result.get('self_recovery',[]) if isinstance(result,dict) and isinstance(result.get('self_recovery'),list) else [])[-40:]
@@ -903,7 +904,7 @@ class Sources:
 
     def flow_readiness(self, repair=False, manual_review=None, automatic=False):
         """Read current pages; only the explicit POST may repair or release a hold."""
-        from flow_readiness_recovery import generation_evidence
+        from flow_readiness_recovery import generation_evidence, operator_dispatch_paused
         state, _ = self.read("flow", "/api/state")
         if not state or state.get('test') is True:
             raise ValueError('flow_not_connected')
@@ -944,6 +945,8 @@ class Sources:
             recovery = ROOT/'flow_readiness_recovery.py'
             if recovery.is_symlink() or not recovery.is_file():
                 raise ValueError('recovery_helper_unavailable')
+            if not automatic and not manual_review and operator_dispatch_paused():
+                payload.update(operator_dispatch_paused=True, safe_only=True)
             if manual_review:
                 key, task_id = manual_review
                 payload['accounts'] = [a for a in payload['accounts'] if a['key']==key and a['review_task']==task_id]
@@ -970,7 +973,7 @@ class Sources:
         result = subprocess.run([str(python),'-B',str(helper)], input=json.dumps(payload).encode(),
                                 capture_output=True, check=True, timeout=10)
         checks = json.loads(result.stdout)
-        if repair and not automatic and any(
+        if repair and not automatic and not payload.get('operator_dispatch_paused') and any(
                 checks.get(a['profile']) == 'ok' and a['flow_login'] == 'verified'
                 and not a['flow_balance_fresh'] and not a['flow_risk_paused'] and not a['flow_cooling']
                 for a in account_rows(state) if a['flow_risk_known'] and a['flow_pacing_known']):
@@ -1107,6 +1110,30 @@ def split_public_tasks(result):
     return {**result, 'tasks': tasks, 'scheduler_tasks': scheduler_tasks}
 
 
+def request_host_shutdown():
+    """Power off the host from the desktop session, falling back to logind.
+
+    The GNOME session manager allows the logged-in user to shut down without a
+    password prompt; logind is only reached when that call fails.
+    """
+    env = dict(os.environ, DBUS_SESSION_BUS_ADDRESS=f'unix:path=/run/user/{os.getuid()}/bus')
+    try:
+        done = subprocess.run(
+            ['gdbus', 'call', '--session', '--dest', 'org.gnome.SessionManager',
+             '--object-path', '/org/gnome/SessionManager',
+             '--method', 'org.gnome.SessionManager.Shutdown'],
+            env=env, capture_output=True, timeout=10)
+        if done.returncode == 0:
+            return
+        print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} session shutdown failed: {done.stderr.decode(errors="replace").strip()}', flush=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} session shutdown unavailable: {exc}', flush=True)
+    try:
+        subprocess.run(['systemctl', 'poweroff', '-i'], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} logind shutdown unavailable: {exc}', flush=True)
+
+
 def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
     from task_feed import TaskFeed
     frontend_connections = threading.BoundedSemaphore(16)
@@ -1231,8 +1258,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(503, {'error':'额度服务暂不可用。'})
                 return self.json_response(200,status(reader_for(real_pool.official.runtime)))
             if self.path == '/api/official-quota':
-                from official_quota import snapshot
-                return self.json_response(200, snapshot(real_pool.official.runtime) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
+                from official_quota import reader_for
+                return self.json_response(200, reader_for(real_pool.official.runtime).snapshot(refresh=False) if real_pool else {'schema_version':1,'accounts':{},'total_accounts':0,'known_accounts':0,'windows':{}})
             if self.path == '/api/channel-status':
                 from channel_status import read_status
                 data = read_status(real_pool.path, real_pool.official.public_status()) if real_pool else {'schema_version': 1, 'available': False}
@@ -1468,7 +1495,10 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     self.connection.settimeout(None)
                 except (OSError,ValueError,TypeError):
                     return self.json_response(400,{'error':'请求格式不正确。'})
-                if not real_pool or real_pool.maintenance() or not FLOW_READINESS_LOCK.acquire(blocking=False):
+                from flow_readiness_recovery import operator_dispatch_paused
+                maintenance_blocked = real_pool and real_pool.maintenance() and not (
+                    self.path == '/api/flow-readiness' and operator_dispatch_paused())
+                if not real_pool or maintenance_blocked or not FLOW_READINESS_LOCK.acquire(blocking=False):
                     return self.json_response(409,{'error':'工作台正在维护或已有一轮就绪检查，请稍后再试。'})
                 try:
                     result = sources.flow_readiness(repair=True,manual_review=(raw['account'],raw['task']) if manual else None,
@@ -1480,6 +1510,21 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(503,{'error':'本轮 Flow 就绪治理未完成，请重新检查当前状态。'})
                 finally:
                     FLOW_READINESS_LOCK.release()
+            if self.path == '/api/host-shutdown':
+                # Only the Ubuntu deployment may power off its own host, and only
+                # after the panel's explicit two-step confirmation.
+                if deployment != 'ubuntu' or not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'仅限 Ubuntu 主机的工作台发起关机。'})
+                try:
+                    length = int(self.headers.get('Content-Length','0') or 0)
+                    raw = json.loads(self.rfile.read(length) if length else b'{}')
+                except (OSError,ValueError,TypeError):
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                if not isinstance(raw, dict) or raw.get('confirm') is not True:
+                    return self.json_response(400, {'error':'缺少关机确认。'})
+                print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} host shutdown requested from panel', flush=True)
+                threading.Timer(1.5, request_host_shutdown).start()
+                return self.json_response(202, {'status':'shutdown_scheduled'})
             if self.path == '/api/official-reauth/activate':
                 if not real_pool or not self.valid(mutation=True):
                     return self.json_response(403, {'error':'请从工作台发起授权。'})

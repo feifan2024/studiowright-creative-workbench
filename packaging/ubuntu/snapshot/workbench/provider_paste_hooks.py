@@ -43,7 +43,7 @@ async def flow_submit(*, page, composer, submit_button, credits_warning,
         await asyncio.sleep(random.uniform(.06, .14))
         await page.mouse.up()
     kwargs = dict(driver=driver, page=page, composer=composer, target=target,
-                  prompt=prompt, checkpoint=checkpoint, submit=submit)
+                  prompt=prompt, checkpoint=checkpoint, submit=submit, hybrid=True)
     if reserved:
         return await paste_and_submit_reserved(**kwargs)
     return await paste_and_submit(queue=queue, **kwargs)
