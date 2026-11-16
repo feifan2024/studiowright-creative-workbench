@@ -784,3 +784,4 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .account-card[draggable="true"] { cursor: grab; }
 .account-card[draggable="true"]:active { cursor: grabbing; }
 .account-card.is-dragging { opacity: .45; outline: 2px dashed #7fa58f; outline-offset: 2px; }
+.account-flow-value { min-height: 44px; }

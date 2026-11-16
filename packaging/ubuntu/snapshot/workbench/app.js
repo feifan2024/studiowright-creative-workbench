@@ -1836,7 +1836,7 @@ function geminiCardStatus(canCall, callBlocked, quota, now) {
       const value = quota?.[w]?.remaining_percent;
       return Number.isFinite(value) && value >= 0 && value <= 100;
     });
-  return {label:quotaKnown ? '可调用' : '可调用 · 额度待验证', attention:false};
+  return {label:'可调用', attention:false};
 }
 
 function savedQuotaValue(row, window) {
@@ -1861,12 +1861,14 @@ function accountOfficialQuotaMarkup(key) {
   const now = Date.now()/1000;
   const age = row && typeof row.checked_at === 'number' ? now-row.checked_at : null;
   const fresh = row?.status === 'ok' && age !== null && Number.isFinite(age) && age >= 0 && age <= 600;
-  const windowMarkup = (window, title) => {
+  // Window annotations moved to hover tooltips; the card keeps label + percent only.
+  const windowMarkup = (window, label, title) => {
     const value = savedQuotaValue(row,window);
     const reset = row?.[window]?.reset_at;
     const text = value === null ? '—' : value.toFixed(2).replace(/\.00$/, '')+'%';
-    const recovery = value === null ? '' : !fresh ? '上次读取的剩余比例' : typeof reset === 'number' && Number.isFinite(reset) && reset > now ? '恢复 '+dateTime(reset) : value === 100 ? '额度充足' : '恢复时间待官方更新';
-    return `<div class="account-quota-window"><div class="account-quota-label"><span>${title}</span><strong>${text}</strong></div><div class="account-quota-track${value === null ? ' is-unknown' : ''}" ${value === null ? `role="img" aria-label="Gemini ${title}尚未读取"` : `role="progressbar" aria-label="Gemini ${title}剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`} >${value === null ? '' : `<i style="width:${value}%"></i>`}</div>${recovery ? `<span class="account-quota-reset">${esc(recovery)}</span>` : ''}</div>`;
+    const hint = value === null ? '' : !fresh ? '上次读取的剩余比例' : typeof reset === 'number' && Number.isFinite(reset) && reset > now ? '恢复 '+dateTime(reset) : value === 100 ? '额度充足' : '恢复时间待官方更新';
+    const tip = hint ? title+' · '+hint : title;
+    return `<div class="account-quota-window" title="${esc(tip)}"><div class="account-quota-label"><span>${label}</span><strong>${text}</strong></div><div class="account-quota-track${value === null ? ' is-unknown' : ''}" ${value === null ? `role="img" aria-label="Gemini ${title}尚未读取"` : `role="progressbar" aria-label="Gemini ${title}剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`}>${value === null ? '' : `<i style="width:${value}%"></i>`}</div></div>`;
   };
   const quotaReason = {
     verification_required:row?.reason==='provider_validation_no_entry' ? '额度查询受限，Google 未提供验证入口' : 'Google 验证尚未通过，额度暂不可读',
@@ -1875,14 +1877,15 @@ function accountOfficialQuotaMarkup(key) {
     eligibility_failed:'官方资格检查未通过，额度暂不可读',
   }[row?.status];
   const recoveringQuota = (governanceAudits.gemini?.running || officialQuotaData?.refreshing) && !fresh;
-  const message = recoveringQuota ? '正在检查并恢复额度读取…' : officialQuotaReadFailed ? '额度服务暂不可读取' : quotaReason ? quotaReason : row?.status === 'ok' && !fresh ? '上次读取：'+dateTime(row.checked_at)+'；仅供参考，点刷新更新' : row?.status === 'network_error' ? '连接失败，额度暂未读到' : !fresh ? '额度暂未读到' : '';
-  return `<div class="account-quota-windows">${windowMarkup('five_hour','5 小时额度')}${windowMarkup('weekly','每周额度')}</div>${message ? `<p class="account-quota-note">${esc(message)}</p>` : ''}`;
+  const message = recoveringQuota ? '正在检查并恢复额度读取…' : officialQuotaReadFailed ? '额度服务暂不可读取' : quotaReason ? quotaReason : row?.status === 'ok' && !fresh ? '上次读取 '+dateTime(row.checked_at)+'；仅供参考，点刷新更新' : row?.status === 'network_error' ? '连接失败，额度暂未读到' : !fresh ? '额度暂未读到' : '';
+  const html = `<div class="account-quota-windows">${windowMarkup('five_hour','5 小时','5 小时额度')}${windowMarkup('weekly','每周','每周额度')}</div>`;
+  return {html, message};
 }
 
 function renderAccountQuotas() {
   document.querySelectorAll('[data-account-quota]').forEach(panel=>{
-    const markup = accountOfficialQuotaMarkup(panel.dataset.accountQuota);
-    if (panel.innerHTML !== markup) panel.innerHTML = markup;
+    const view = accountOfficialQuotaMarkup(panel.dataset.accountQuota);
+    if (panel.innerHTML !== view.html) panel.innerHTML = view.html;
   });
 }
 
@@ -2076,11 +2079,14 @@ function renderAccounts() {
     const ownGemini = state.snapshot?.gemini_stats?.accounts?.[item.key.slice('flow-account-'.length)];
     const flowPerformance = flowDone + flowFailed ? `任务 ${flowDone} 成功 / ${flowFailed} 失败 · 成功率 ${Math.round(flowDone * 100 / (flowDone + flowFailed))}%` : '暂无已结束生成任务';
     const gemPerformance = ownGemini ? `对话 ${ownGemini.completed} 完成 · 平均首段 ${typeof ownGemini.avg_first_ms === 'number' ? (ownGemini.avg_first_ms / 1000).toFixed(1) + ' 秒' : '暂无实测'}` : '暂无工作台对话记录';
+    const quotaView = accountOfficialQuotaMarkup(quotaKey);
+    const flowNextCredit = item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : '';
+    const flowBalanceTitle = `积分余额${hasBalance && !item.flow_balance_fresh ? '（上次读取）' : ''}${flowNextCredit ? ' · 下次积分到账 ' + flowNextCredit : ''}`;
     return `<article class="account-card${cardState}" draggable="true" data-drag-key="${esc(quotaKey)}">
       <div class="account-card-heading"><div class="account-avatar" aria-hidden="true">${esc(String(identity).slice(0, 1).toUpperCase())}</div><div class="account-identity"><span class="account-alias">${esc(item.label || item.profile)}</span><h3 title="${esc(identity)}">${esc(identity)}</h3></div><span class="account-login ${item.flow_login === 'verified' ? 'is-ready' : ''}">${esc(login)}</span>
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
-      <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div><span>${hasBalance && !item.flow_balance_fresh ? '上次积分余额' : '积分余额'}</span><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账：${esc(item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : "暂未读取")}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
-      <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText)}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${geminiReady && !geminiNeedsAttention ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${accountOfficialQuotaMarkup(item.key.slice('flow-account-'.length))}</div></div></div>
+      <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div title="${esc(flowBalanceTitle)}"><strong>${esc(balance)}</strong></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
+      <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}" title="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${geminiReady && !geminiNeedsAttention ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${quotaView.html}</div></div></div>
       <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${flowFallback ? `<span class="account-mini-status is-attention">Flow · ${esc(flowFallback)}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}${geminiFallback ? `<span class="account-mini-status is-attention">Gemini · ${esc(geminiFallback)}</span>` : ''}</div>
       ${flowReason ? `<p class="account-flow-reason"><strong>${esc(flowReason.label)}：</strong>${esc(flowReason.text)}</p>` : ''}
       <details><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>
