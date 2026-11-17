@@ -1867,6 +1867,7 @@ function updateAccountCooldowns() {
 setInterval(updateAccountCooldowns, 1000);
 
 function geminiCardStatus(canCall, callBlocked, quota, now) {
+  if (quota?.status === 'verification_required') return {label:'待 Google 核验', attention:false};
   if (callBlocked) return {label:'暂不可用', attention:true};
   if (!canCall) return {label:'待确认', attention:false};
   const age = now - quota?.checked_at;
@@ -2077,7 +2078,7 @@ function renderAccounts() {
   const flowTasks = (state.snapshot?.tasks || []).filter(t => ['image','video'].includes(t.kind));
   const issueCounts = new Map();
   for (const account of accounts) for (const issue of accountIssues(account,state.snapshot,geminiReadinessNow.rows.get(account.key))) {
-    if (['historical_unconfirmed', 'quota_stale'].includes(issue.key)) continue;
+    if (['historical_unconfirmed', 'quota_stale', 'gemini_confirmed_verification'].includes(issue.key)) continue;
     const previous = issueCounts.get(issue.key);
     issueCounts.set(issue.key, {title: issue.title, count: (previous?.count || 0) + 1});
   }
@@ -2094,7 +2095,7 @@ function renderAccounts() {
       auth.state==='completed' ? '<span class="subtle">授权已更新 · 待验活</span>' :
       auth.can_start ? `<button class="button button-light" type="button" data-govern-reauth="${esc(auth.request_id)}">打开 Ubuntu 授权页</button>` : '';
     const issues = accountIssues(item,state.snapshot,geminiRow).filter(issue => issue.key !== 'historical_unconfirmed');
-    const issueBadges = issues.filter(issue => !['quota_stale', 'flow_paused', 'flow_cooling', 'flow_empty', 'flow_unknown', 'unresolved', 'gemini_disabled', 'keepalive_disabled', 'keepalive_paused'].includes(issue.key));
+    const issueBadges = issues.filter(issue => !['quota_stale', 'flow_paused', 'flow_cooling', 'flow_empty', 'flow_unknown', 'unresolved', 'gemini_disabled', 'keepalive_disabled', 'keepalive_paused', 'gemini_confirmed_verification'].includes(issue.key));
     const hasBalance = typeof item.flow_balance === "number" && Number.isFinite(item.flow_balance) && item.flow_balance >= 0;
     const balance = hasBalance ? item.flow_balance.toLocaleString("zh-CN") : "—";
     const freshness = !hasBalance ? "尚未读取" : item.flow_balance_fresh ? "最近读取" : "上次读取，可能已过期";
@@ -2128,7 +2129,7 @@ function renderAccounts() {
     const geminiCard = geminiCardStatus(geminiReady, callBlocked,
       officialQuotaReadFailed ? null : officialQuotaData?.accounts?.[quotaKey], Date.now()/1000);
     const flowIssues = flowRow?.issues || [];
-    const geminiIssues = issues.filter(issue => !issue.key.startsWith('flow_') && issue.key !== 'quota_stale');
+    const geminiIssues = issues.filter(issue => !issue.key.startsWith('flow_') && issue.key !== 'quota_stale' && issue.key !== 'gemini_confirmed_verification');
     const windowIssue = flowWindowIssue(item.profile, state.snapshot);
     const flowFallback = (!flowReady && !cooling && !flowPaused && !windowIssue && !flowIssues.length)
       ? ({blocked:'账号处于不可派发状态，等待就绪核对通过。', unknown:'账号状态尚未完成核对，等待下次检查。', checking:'正在验活，请稍候。'}[flowRow?.status] || '账号状态待核对，等待下次检查。') : '';
