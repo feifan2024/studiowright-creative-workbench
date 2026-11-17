@@ -91,7 +91,8 @@ def ensure_chrome_manager():
 
 
 def ssh_command(target, ssh_path=None, config_path=None, port=PORT):
-    executable = ssh_path or shutil.which("ssh")
+    native_ssh = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'System32/OpenSSH/ssh.exe'
+    executable = ssh_path or (str(native_ssh) if os.name == 'nt' and native_ssh.is_file() else shutil.which("ssh"))
     config = Path(config_path) if config_path else Path.home() / ".ssh" / "flow2api_ubuntu.conf"
     if not executable or not config.is_file():
         raise RuntimeError("找不到已有的 SSH 连接环境。")

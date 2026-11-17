@@ -10,13 +10,25 @@ namespace StudioWrightDesktop
     interface IConnectionTunnel : IDisposable
     {
         bool IsAlive { get; }
+        bool Reconnect();
     }
 
     sealed class OpenSshTunnel : IConnectionTunnel
     {
-        readonly Process process;
-        public OpenSshTunnel(Process process) { this.process = process; }
+        Process process;
+        readonly ProcessStartInfo start;
+        public OpenSshTunnel(Process process) { this.process = process; start = process.StartInfo; }
         public bool IsAlive { get { return !process.HasExited; } }
+        public bool Reconnect()
+        {
+            try {
+                if (!process.HasExited) process.Kill();
+                process.WaitForExit(3000);
+                process.Dispose();
+                process = Process.Start(start);
+                return process != null;
+            } catch { return false; }
+        }
         public void Dispose()
         {
             try { if (!process.HasExited) process.Kill(); }
@@ -29,10 +41,21 @@ namespace StudioWrightDesktop
     sealed class PanelSsh : IConnectionTunnel
     {
         readonly SshClient client;
+        readonly byte[] credential;
         public bool IsAlive { get { return client.IsConnected; } }
 
-        PanelSsh(SshClient client) { this.client = client; }
-        public void Dispose() { client.Dispose(); }
+        PanelSsh(SshClient client, byte[] credential) { this.client = client; this.credential = credential; }
+        public bool Reconnect()
+        {
+            try {
+                foreach (var port in client.ForwardedPorts) if (port.IsStarted) port.Stop();
+                client.Disconnect();
+                client.Connect();
+                foreach (var port in client.ForwardedPorts) port.Start();
+                return client.IsConnected;
+            } catch { return false; }
+        }
+        public void Dispose() { try { client.Dispose(); } finally { Array.Clear(credential,0,credential.Length); } }
 
         internal static PanelSsh Open(string address, int port, string user, string password,
                                       string trustDirectory, Func<string, bool> approve,
@@ -42,6 +65,7 @@ namespace StudioWrightDesktop
             string existing = File.Exists(pin) ? File.ReadAllText(pin).Trim() : null;
             string observed = null;
             string trustError = null;
+            bool retained = false;
             byte[] credential = Encoding.UTF8.GetBytes(password);
             var auth = new PasswordAuthenticationMethod(user, credential);
             var info = new ConnectionInfo(address, port, user, auth) { Timeout = TimeSpan.FromSeconds(15) };
@@ -76,12 +100,13 @@ namespace StudioWrightDesktop
                     ssh.AddForwardedPort(forward);
                     forward.Start();
                 }
-                return new PanelSsh(ssh);
+                retained = true;
+                return new PanelSsh(ssh, credential);
             }
             catch { ssh.Dispose(); throw; }
             // Keep the verifier attached for SSH rekeying, without reopening the confirmation UI.
             finally {
-                Array.Clear(credential, 0, credential.Length);
+                if (!retained) Array.Clear(credential, 0, credential.Length);
                 if (trustError == null && observed != null) { existing = observed; }
             }
         }

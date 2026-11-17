@@ -2161,6 +2161,9 @@ function renderAccounts() {
     const quotaView = accountOfficialQuotaMarkup(quotaKey);
     const flowNextCredit = item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : '';
     const flowBalanceTitle = `积分余额${hasBalance && !item.flow_balance_fresh ? '（上次读取）' : ''}${flowNextCredit ? ' · 下次积分到账 ' + flowNextCredit : ''}`;
+    const winRow = (state.snapshot?.flow_coordination?.windows || []).find(w => w.profile === item.profile && w.state === 'result_unknown' && w.task_id);
+    const govRelease = winRow ? `<button type="button" class="button button-primary" style="margin-top:6px" data-govern-review="${esc(winRow.task_id)}" data-review-account="${esc(item.key)}">已核对，放行账号</button>` : '';
+    const geminiVerify = (geminiRow && geminiRow.status !== 'ready' && geminiRow.status !== 'queue') ? `<button type="button" class="button button-light" style="margin-top:6px" data-gemini-verify>开始 Gemini 验证</button>` : '';
     return `<article class="account-card${cardState}" draggable="true" data-drag-key="${esc(quotaKey)}">
       <div class="account-card-heading"><div class="account-avatar" aria-hidden="true">${esc(String(identity).slice(0, 1).toUpperCase())}</div><div class="account-identity"><span class="account-alias">${esc(item.label || item.profile)}</span><h3 title="${esc(identity)}">${esc(identity)}</h3></div><span class="account-login ${item.flow_login === 'verified' ? 'is-ready' : ''}">${esc(login)}</span>
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
@@ -2169,7 +2172,7 @@ function renderAccounts() {
       <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${flowFallback ? `<span class="account-mini-status is-attention">Flow · ${esc(flowFallback)}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}${geminiFallback ? `<span class="account-mini-status is-attention">Gemini · ${esc(geminiFallback)}</span>` : ''}</div>
       ${flowReason ? `<p class="account-flow-reason"><strong>${esc(flowReason.label)}：</strong>${esc(flowReason.text)}</p>` : ''}
       <details><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>
-      <div class="account-card-actions">${authControl}${flowPaused ? `<button class="button button-light" type="button" data-resume-flow="${accountKey}">已核查，恢复 Flow</button>` : ''}</div></article>`;
+      <div class="account-card-actions">${govRelease}${authControl}${geminiVerify}${flowPaused ? `<button class="button button-light" type="button" data-resume-flow="${accountKey}">已核查，恢复 Flow</button>` : ''}</div></article>`;
   }).join("")}</div>`;
   updateAccountUsageBars();
   updateAccountCooldowns();
@@ -2677,6 +2680,31 @@ $('realAccountTable').addEventListener('change', event => {
 });
 $("realAccountTable").addEventListener("click", async (event) => {
   if (event.target.closest('[data-govern-reauth]')) return handleGovernanceClick(event);
+  const govReleaseButton = event.target.closest('[data-govern-review]');
+  if (govReleaseButton) {
+    if (!window.confirm(`确认已核对原任务 ${govReleaseButton.dataset.governReview}，允许此账号接收后续任务？原任务不会重发。`)) return;
+    govReleaseButton.disabled = true;
+    try {
+      await postJson('/api/flow-readiness/review', {account: govReleaseButton.dataset.reviewAccount, task: govReleaseButton.dataset.governReview, confirmed: true});
+      $("accountActionMessage").textContent = '已放行账号，输入管线恢复。';
+      if (typeof startGovernanceAudit === 'function') void startGovernanceAudit('flow', false);
+      await refresh();
+    } catch (error) { $("accountActionMessage").textContent = error.message || '放行未完成，请稍后重试。'; }
+    finally { govReleaseButton.disabled = false; }
+    return;
+  }
+  const geminiVerifyButton = event.target.closest('[data-gemini-verify]');
+  if (geminiVerifyButton) {
+    geminiVerifyButton.disabled = true;
+    try {
+      await postJson('/api/flow-readiness', {});
+      $("accountActionMessage").textContent = '正在核对；请在 Ubuntu 对应账号窗口完成 Google 验证。';
+      if (typeof startGovernanceAudit === 'function') void startGovernanceAudit('gemini', true);
+      openGovernance('gemini');
+    } catch (error) { $("accountActionMessage").textContent = error.message || '检查未完成。'; }
+    finally { geminiVerifyButton.disabled = false; }
+    return;
+  }
   const button = event.target.closest("[data-check-gemini], [data-toggle-gemini], [data-keepalive-gemini], [data-recover-gemini], [data-resume-flow], [data-save-retry-project]");
   if (!button) return;
   if (button.hasAttribute('data-save-retry-project')) {

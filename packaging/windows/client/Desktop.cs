@@ -403,7 +403,10 @@ namespace StudioWrightDesktop
         readonly NotifyIcon tray;
         readonly ToolStripStatusLabel status = new ToolStripStatusLabel("正在连接…");
         IConnectionTunnel tunnel;
-        bool exiting;
+        bool exiting, connectionBusy, connectionDialogOpen, wasDisconnected, monitoring, navigationFailed;
+        readonly System.Windows.Forms.Timer connectionTimer = new System.Windows.Forms.Timer { Interval=5000 };
+        DateTime nextReconnect = DateTime.MinValue;
+        int reconnectFailures;
 
         public DesktopWindow()
         {
@@ -422,12 +425,16 @@ namespace StudioWrightDesktop
             FormClosing+=delegate(object sender, FormClosingEventArgs e) {
                 if (!exiting && e.CloseReason==CloseReason.UserClosing) { e.Cancel=true; Hide(); }
             };
-            FormClosed+=delegate { tray.Visible=false;tray.Dispose();if(tunnel!=null) tunnel.Dispose(); };
+            FormClosed+=delegate { connectionTimer.Stop(); connectionTimer.Dispose(); tray.Visible=false;tray.Dispose();if(tunnel!=null) tunnel.Dispose(); };
+            connectionTimer.Tick+=async delegate { await CheckConnection(); };
             Shown+=async delegate {
+                connectionBusy=true;
                 bool ready=await Task.Run(() => Connection.WorkbenchReady());
                 if (!ready) ready=await Task.Run(() => Connection.TryReuseConfiguredConnection());
                 if (IsDisposed) return;
                 if (ready) { Connection.StartManager(); ShowWorkbench(); } else OpenConnection();
+                connectionBusy=false;
+                connectionTimer.Start();
             };
         }
 
@@ -435,10 +442,71 @@ namespace StudioWrightDesktop
 
         void OpenConnection()
         {
-            using(var dialog=new ConnectDialog()) {
-                if(dialog.ShowDialog(this)==DialogResult.OK) { if(tunnel!=null) tunnel.Dispose(); tunnel=dialog.NewTunnel; ShowWorkbench(); }
-                else if (!Connection.WorkbenchReady()) { status.Text="尚未连接";message.Text="尚未连接。点击左下角“连接”重新查找。"; }
-            }
+            if (connectionDialogOpen || monitoring) return;
+            connectionDialogOpen=true;
+            try {
+                using(var dialog=new ConnectDialog()) {
+                    if(dialog.ShowDialog(this)==DialogResult.OK) {
+                        if(tunnel!=null) tunnel.Dispose();
+                        tunnel=dialog.NewTunnel;
+                        reconnectFailures=0; wasDisconnected=false;
+                        ShowWorkbench();
+                    }
+                    else if (!Connection.WorkbenchReady()) { status.Text="尚未连接 · 将自动重试";message.Text="连接中断，将自动重试。也可点击左下角“连接”。"; }
+                }
+            } finally { connectionDialogOpen=false; }
+        }
+
+        async Task CheckConnection()
+        {
+            if (connectionBusy || connectionDialogOpen || monitoring || exiting || IsDisposed) return;
+            monitoring=true;
+            try {
+                bool healthy=await Task.Run(() => Connection.StackReady());
+                if (IsDisposed || exiting) return;
+                if (healthy) {
+                    bool recovered=wasDisconnected;
+                    wasDisconnected=false; reconnectFailures=0; nextReconnect=DateTime.MinValue;
+                    status.Text="已连接 Ubuntu 工作台 · 断线后自动重连";
+                    if (recovered) {
+                        if (web.CoreWebView2==null || navigationFailed) ShowWorkbench();
+                        else await web.CoreWebView2.ExecuteScriptAsync("window.dispatchEvent(new CustomEvent('studiowright-connection',{detail:{connected:true}}));");
+                    }
+                    return;
+                }
+                wasDisconnected=true;
+                status.Text="连接已断开 · 正在自动重连，页面内容已保留";
+                if (web.CoreWebView2!=null)
+                    await web.CoreWebView2.ExecuteScriptAsync("window.dispatchEvent(new CustomEvent('studiowright-connection',{detail:{connected:false}}));");
+                if (DateTime.UtcNow<nextReconnect) return;
+                bool ready=await Task.Run(() => {
+                    if (tunnel!=null) {
+                        if (Connection.StackReady()) return true;
+                        if (!tunnel.Reconnect()) return false;
+                        for (int i=0;i<10;i++) {
+                            if (Connection.StackReady()) return true;
+                            Thread.Sleep(400);
+                        }
+                        return false;
+                    }
+                    return Connection.TryReuseConfiguredConnection();
+                });
+                if (IsDisposed || exiting) return;
+                if (ready) {
+                    wasDisconnected=false; reconnectFailures=0;
+                    status.Text="连接已恢复 · 已重新读取状态";
+                    if (web.CoreWebView2==null || navigationFailed) ShowWorkbench();
+                    else await web.CoreWebView2.ExecuteScriptAsync("window.dispatchEvent(new CustomEvent('studiowright-connection',{detail:{connected:true}}));");
+                } else {
+                    reconnectFailures++;
+                    int seconds=Math.Min(30,5*reconnectFailures);
+                    nextReconnect=DateTime.UtcNow.AddSeconds(seconds);
+                    status.Text="暂时无法连接 Ubuntu · "+seconds+" 秒后自动重试；请确认主机已开机";
+                }
+            } catch {
+                nextReconnect=DateTime.UtcNow.AddSeconds(15);
+                if (!IsDisposed) status.Text="连接中断 · 15 秒后自动重试";
+            } finally { monitoring=false; }
         }
 
         async void ShowWorkbench()
@@ -447,6 +515,7 @@ namespace StudioWrightDesktop
                 if (web.CoreWebView2==null) {
                     var environment=await CoreWebView2Environment.CreateAsync(null,Program.ProfileDir);
                     await web.EnsureCoreWebView2Async(environment);
+                    web.CoreWebView2.NavigationCompleted+=delegate(object sender, CoreWebView2NavigationCompletedEventArgs e) { navigationFailed=!e.IsSuccess; };
                     web.CoreWebView2.NewWindowRequested+=delegate(object sender, CoreWebView2NewWindowRequestedEventArgs e) {
                         e.Handled=true;
                         Uri uri;
