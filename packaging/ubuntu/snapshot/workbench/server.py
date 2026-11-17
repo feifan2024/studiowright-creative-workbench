@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import http.cookiejar
 import json
 import math
@@ -15,6 +16,7 @@ import subprocess
 import threading
 from dispatch_limit import DispatchBusy
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from functools import lru_cache
 from pathlib import Path
@@ -1134,6 +1136,97 @@ def request_host_shutdown():
         print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} logind shutdown unavailable: {exc}', flush=True)
 
 
+# FlowMusic2API runs on this host's loopback. Host and port are compile-time
+# constants, every path below is a literal, and user input travels only inside
+# the JSON body — there is no URL surface for callers to influence.
+MUSIC_API_HOST = '127.0.0.1'
+MUSIC_API_PORT = 8000
+MUSIC_API_CREDS = Path('/home/xiao/tools/FlowMusic2API/.env.sw-credentials')
+MUSIC_MODELS = {'lyria', 'lyria-fast', 'lyria-pro', 'lyria-pro-fast'}
+
+
+def music_call(method, path, *, body=None, token=None, timeout=30):
+    """One request to the local FlowMusic2API service over a fixed connection."""
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    connection = http.client.HTTPConnection(MUSIC_API_HOST, MUSIC_API_PORT, timeout=timeout)
+    try:
+        connection.request(method, path, body=json.dumps(body).encode() if body is not None else None, headers=headers)
+        response = connection.getresponse()
+        return json.load(response)
+    finally:
+        connection.close()
+
+
+def music_credentials():
+    user = password = key = None
+    try:
+        for line in MUSIC_API_CREDS.read_text(encoding='utf-8').splitlines():
+            name, _, value = line.strip().partition('=')
+            if name == 'FLOWMUSIC_ADMIN_USER': user = value
+            elif name == 'FLOWMUSIC_ADMIN_PASSWORD': password = value
+            elif name == 'FLOWMUSIC_DEFAULT_API_KEY': key = value
+    except OSError: pass
+    return user, password, key
+
+
+def music_admin_token():
+    user, password, _ = music_credentials()
+    if not user or not password:
+        raise ValueError('音乐服务凭据不可读取。')
+    result = music_call('POST', '/api/admin/login', body={'username': user, 'password': password})
+    return result.get('token') or ''
+
+
+def music_service_status():
+    _, _, key = music_credentials()
+    status = {'schema_version': 1, 'available': bool(key), 'accounts': []}
+    if not key:
+        status['reason'] = '音乐服务未配置（缺少 FlowMusic2API 凭据）。'
+        return status
+    try:
+        rows = music_call('GET', '/api/tokens', token=music_admin_token())
+        now_utc = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())
+        status['accounts'] = [{'email': row.get('email'), 'credits': row.get('credits'),
+                               'today_music': row.get('today_music_count'), 'tier': row.get('user_paygate_tier'),
+                               # The token list hides the raw AT; readiness = active and the
+                               # auto-refreshed access token is not yet past its expiry.
+                               'ready': bool(row.get('is_active')) and str(row.get('at_expires') or '') > now_utc}
+                              for row in rows if isinstance(row, dict)]
+    except (OSError, ValueError, KeyError) as exc:
+        status['reason'] = f'音乐服务暂不可读取：{exc}'
+    return status
+
+
+def music_generate(prompt, model):
+    prompt = (prompt or '').strip()
+    if not prompt:
+        raise ValueError('请填写音乐描述。')
+    if len(prompt) > 2000:
+        raise ValueError('音乐描述最多 2000 个字。')
+    model = model or 'lyria-fast'
+    if model not in MUSIC_MODELS:
+        raise ValueError('音乐模型不正确。')
+    _, _, key = music_credentials()
+    if not key:
+        raise ValueError('音乐服务未配置（缺少 FlowMusic2API 凭据）。')
+    # The upstream call blocks until the song finishes (usually 1-3 minutes).
+    result = music_call('POST', '/v1/audio/generations', body={'model': model, 'prompt': prompt},
+                        token=key, timeout=660)
+    clips = []
+    for clip in result.get('data') or []:
+        if not isinstance(clip, dict):
+            continue
+        clips.append({'title': clip.get('title') or '未命名',
+                      'audio_url': (clip.get('audio') or {}).get('url', ''),
+                      'wav_url': (clip.get('wav') or {}).get('url', ''),
+                      'cover_url': (clip.get('cover') or {}).get('url', '')})
+    if not clips:
+        raise ValueError('音乐服务未返回音频，稍后再试。')
+    return {'schema_version': 1, 'model': model, 'clips': clips}
+
+
 def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
     from task_feed import TaskFeed
     frontend_connections = threading.BoundedSemaphore(16)
@@ -1266,6 +1359,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 if real_pool and data.get('available'):
                     data['account_order'] = real_pool.official.saved_account_order()
                 return self.json_response(200 if data.get('available') else 503, data)
+            if self.path == '/api/music/status':
+                return self.json_response(200, music_service_status())
             if project_actions and self.path == '/api/project-actions':
                 return self.json_response(200, project_actions.status())
             if self.path == '/api/dispatch/concurrency':
@@ -1512,6 +1607,23 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(503,{'error':'本轮 Flow 就绪治理未完成，请重新检查当前状态。'})
                 finally:
                     FLOW_READINESS_LOCK.release()
+            if self.path == '/api/music/generate':
+                if not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台发起音乐生成。'})
+                try:
+                    length = int(self.headers.get('Content-Length','0') or 0)
+                    raw = json.loads(self.rfile.read(length) if length else b'{}')
+                except (OSError,ValueError,TypeError):
+                    return self.json_response(400, {'error':'请求格式不正确。'})
+                prompt = raw.get('prompt') if isinstance(raw,dict) else None
+                model = raw.get('model') if isinstance(raw,dict) else None
+                try:
+                    result = music_generate(prompt, model)
+                except ValueError as exc:
+                    return self.json_response(400, {'error':str(exc)})
+                except (OSError,TimeoutError) as exc:
+                    return self.json_response(504, {'error':f'音乐生成未完成：{exc}'})
+                return self.json_response(200, result)
             if self.path == '/api/host-shutdown':
                 # Only the Ubuntu deployment may power off its own host, and only
                 # after the panel's explicit two-step confirmation.

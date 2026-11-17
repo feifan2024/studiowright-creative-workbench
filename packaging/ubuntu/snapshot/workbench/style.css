@@ -785,3 +785,12 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .account-card[draggable="true"]:active { cursor: grabbing; }
 .account-card.is-dragging { opacity: .45; outline: 2px dashed #7fa58f; outline-offset: 2px; }
 .account-flow-value { min-height: 44px; }
+/* 音乐生成页 */
+.music-form { display:flex; flex-direction:column; gap:9px; padding:16px 20px 18px; }
+.music-form label { color:#526d62; font-size:12px; }
+.music-form select { height:38px; padding:0 8px; border:1px solid #e1e9e3; border-radius:8px; background:#fff; color:#43574c; }
+.music-form textarea { min-height:88px; padding:10px 12px; border:1px solid #e1e9e3; border-radius:9px; background:#fbfcfb; font:inherit; color:var(--ink); resize:vertical; }
+.music-form-actions { display:flex; align-items:center; gap:14px; }
+.music-form-actions span { color:var(--muted); font-size:12px; }
+.music-result-item { display:flex; flex-direction:column; gap:8px; padding:14px 18px; border-top:1px solid #edf1ed; }
+.music-result-item audio { width:100%; max-width:520px; }

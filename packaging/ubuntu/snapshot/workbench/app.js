@@ -3,6 +3,44 @@
 const $ = (id) => document.getElementById(id);
 const state = { status: null, snapshot: null, snapshotReceivedAt: 0, view: "overview", refreshSequence: 0, dispatchPaused: null };
 state.serviceActivations = {};
+state.connectionLost = false;
+
+function showConnectionState(connected) {
+  state.connectionLost = !connected;
+  let banner = $('workbenchConnectionNotice');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'workbenchConnectionNotice';
+    banner.setAttribute('role','alert');
+    banner.setAttribute('aria-live','assertive');
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:100000;padding:14px 20px;background:#fff1df;color:#713b13;border-bottom:2px solid #bc7736;text-align:center;font-size:15px';
+    const text = document.createElement('span');
+    text.textContent = '与 Ubuntu 的连接已断开。桌面端正在自动重连；主机需保持开机。已保留页面内容，暂时无法提交或检查账号。';
+    const retry = document.createElement('button');
+    retry.type = 'button'; retry.dataset.connectionRetry = '1'; retry.textContent = '立即检查连接';
+    retry.style.marginLeft = '16px';
+    retry.addEventListener('click', () => { void refresh({background:true}); });
+    banner.append(text,retry);
+    document.body.append(banner);
+  }
+  banner.hidden = connected;
+}
+
+document.addEventListener('click', event => {
+  if (!state.connectionLost) return;
+  const target = event.target.closest('button,input[type=submit],a');
+  if (!target || target.dataset.connectionRetry || target.hasAttribute('data-view') ||
+      (target.tagName==='A' && !target.hasAttribute('download'))) return;
+  event.preventDefault(); event.stopImmediatePropagation();
+  showConnectionState(false);
+}, true);
+document.addEventListener('submit', event => {
+  if (state.connectionLost) { event.preventDefault(); event.stopImmediatePropagation(); showConnectionState(false); }
+}, true);
+window.addEventListener('studiowright-connection', event => {
+  if (event.detail?.connected === false) showConnectionState(false);
+  else if (event.detail?.connected === true) { showConnectionState(true); void refresh({background:true}); }
+});
 let insightActivationPosting = false;
 let serviceActivationReadSequence = 0;
 let snapshotRefreshTimer = null;
@@ -337,8 +375,8 @@ function setView(view) {
   if (!["overview", "accounts", "projects", "tasks", "records", "conversations", "library", "api"].includes(view)) view = "overview";
   if (view === 'tasks' && state.view !== 'tasks') $('taskWindowsPanel').open = false;
   state.view = view;
-  for (const name of ["overview", "accounts", "projects", "tasks", "records", "conversations", "library", "api"]) $(name + "View").hidden = name !== view;
-  const display = { overview: "总览", accounts: "账号", projects: "项目", tasks: "任务", records: "任务记录", conversations: "对话", library: "素材库", api: "API 文档" };
+  for (const name of ["overview", "accounts", "projects", "tasks", "records", "music", "conversations", "library", "api"]) $(name + "View").hidden = name !== view;
+  const display = { overview: "总览", accounts: "账号", projects: "项目", tasks: "任务", records: "任务记录", music: "音乐生成", conversations: "对话", library: "素材库", api: "API 文档" };
   const inWork = workViews.has(view);
   if (inWork) lastWorkView = view;
   $("workBar").hidden = !inWork;
@@ -449,6 +487,7 @@ for (const [name,id] of [['flow','flowRecordsTab'],['gemini','geminiRecordsTab']
 
 function syncVisiblePage(view, background) {
   if (view==='records' && recordsTab==='gemini') void refreshGeminiRecords();
+  if (view==='music') void refreshMusicStatus();
   const read = (key, fn) => {
     if (viewReads.has(key)) return;
     const pending = Promise.resolve().then(fn).catch(() => {}).finally(() => viewReads.delete(key));
@@ -557,7 +596,7 @@ window.addEventListener('hashchange', () => {
 });
 window.addEventListener('pageshow', wakeSnapshotRefresh);
 window.addEventListener('online', wakeSnapshotRefresh);
-window.addEventListener('offline', () => { $('lastUpdated').textContent = '连接中断 · 保留已读取的数据'; });
+window.addEventListener('offline', () => { showConnectionState(false); $('lastUpdated').textContent = '连接中断 · 保留已读取的数据'; });
 
 function renderConnections() {
   for (const service of ["flow", "gemini"]) {
@@ -1889,6 +1928,46 @@ function renderAccountQuotas() {
   });
 }
 
+// 音乐生成页：生成走 /api/music/generate（同步，1~3 分钟），状态走 /api/music/status。
+let musicServiceStatus = null;
+async function refreshMusicStatus() {
+  const data = await getJson('/api/music/status', {timeoutMs: 12000}).catch(() => null);
+  musicServiceStatus = data;
+  renderMusicStatus();
+}
+function renderMusicStatus() {
+  const el = $("musicCredits");
+  if (!el) return;
+  if (!musicServiceStatus) { el.textContent = "音乐服务状态未读取。"; return; }
+  if (!musicServiceStatus.available) { el.textContent = musicServiceStatus.reason || "音乐服务暂不可用。"; return; }
+  const rows = (musicServiceStatus.accounts || []).map(a =>
+    `${a.email}：${a.ready ? '就绪' : '令牌待刷新'} · 余 ${a.credits ?? '—'} 积分 · 今日已生成 ${a.today_music ?? 0} 首`).join('；');
+  el.textContent = rows || '账号池为空，请先导入 Flow Music 账号。';
+}
+$("musicGenerate")?.addEventListener("click", async () => {
+  const button = $("musicGenerate"), status = $("musicStatus");
+  const prompt = $("musicPrompt").value.trim();
+  if (!prompt) { status.textContent = "请先填写音乐描述。"; return; }
+  button.disabled = true;
+  status.textContent = "生成中…通常 1~3 分钟，请勿刷新或关闭页面。";
+  try {
+    const result = await postJson("/api/music/generate", {prompt, model: $("musicModel").value});
+    const clips = result.clips || [];
+    $("musicResultSummary").textContent = `模型 ${result.model} · 完成 ${clips.length} 首 · ${dateTime(Date.now()/1000)}`;
+    $("musicResult").innerHTML = clips.map(clip => `
+      <div class="music-result-item"><strong>${esc(clip.title)}</strong>
+      ${clip.audio_url ? `<audio controls preload="metadata" src="${esc(clip.audio_url)}"></audio>` : ''}
+      <div>${clip.audio_url ? `<a class="text-link" href="${esc(clip.audio_url)}" download>下载音频</a>` : ''}${clip.wav_url ? ` <a class="text-link" href="${esc(clip.wav_url)}" download>下载 WAV</a>` : ''}${clip.cover_url ? ` <a class="text-link" href="${esc(clip.cover_url)}" target="_blank" rel="noopener noreferrer">封面</a>` : ''}</div></div>`).join('');
+    $("musicResultPanel").hidden = false;
+    status.textContent = "完成。";
+    void refreshMusicStatus();
+  } catch (error) {
+    status.textContent = error.message || "生成失败，可再试一次。";
+  } finally {
+    button.disabled = false;
+  }
+});
+
 // Account cards keep a user-dragged order; that order is the Gemini round-robin circle.
 const bareAccountKey = key => String(key || "").replace(/^flow-account-/, "");
 let accountOrderOverride = null;
@@ -2483,6 +2562,7 @@ async function refreshSnapshot(background) {
     getJson("/api/status", {timeoutMs: 3500}), getJson("/api/snapshot", {timeoutMs: 10000})
   ]);
   if (sequence !== state.refreshSequence) return;
+  showConnectionState(status.status === 'fulfilled' || snapshot.status === 'fulfilled');
   state.snapshotAttempted = true;
   const snapshotReady = snapshot.status === 'fulfilled' && snapshot.value?.flow_state?.available === true;
   state.snapshotFresh = snapshotReady;

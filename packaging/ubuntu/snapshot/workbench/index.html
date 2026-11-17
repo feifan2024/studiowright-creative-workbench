@@ -19,6 +19,7 @@
         <button class="nav-item" data-view="projects"><span class="nav-icon" aria-hidden="true">▤</span>项目<span class="nav-arrow">›</span></button>
         <button class="nav-item" data-view="work" type="button"><span class="nav-icon" aria-hidden="true">☷</span>工作台<span class="nav-arrow">›</span></button>
         <button class="nav-item" data-view="records" type="button"><span class="nav-icon" aria-hidden="true">≡</span>任务记录<span class="nav-arrow">›</span></button>
+        <button class="nav-item" data-view="music" type="button"><span class="nav-icon" aria-hidden="true">♪</span>音乐生成<span class="nav-arrow">›</span></button>
         <button class="nav-item" data-view="library"><span class="nav-icon" aria-hidden="true">▣</span>素材库<span class="nav-arrow">›</span></button>
       </nav>
       <div class="sidebar-separator"></div>
@@ -229,6 +230,23 @@
           <div class="records-tabs" role="tablist" aria-label="任务记录分类"><button id="flowRecordsTab" class="records-tab" role="tab" type="button" aria-selected="true" aria-controls="taskRecords">Flow 任务</button><button id="geminiRecordsTab" class="records-tab" role="tab" type="button" aria-selected="false" aria-controls="geminiRecords" tabindex="-1">Gemini 任务</button></div>
           <section id="taskRecords" class="panel list-panel original-tasks" role="tabpanel" aria-labelledby="taskRecordsHeading"><div class="panel-heading"><div><h2 id="taskRecordsHeading">最近任务记录</h2><p id="taskListSummary" class="panel-caption">正在读取…</p><small id="taskLiveStatus" class="subtle" role="status">正在连接任务记录…</small></div><div class="filter-row"><label class="search"><span aria-hidden="true">⌕</span><input id="taskSearch" type="search" placeholder="搜索项目、任务或原任务编号" aria-label="搜索项目、任务或原任务编号"></label><label class="select-label"><span class="sr-only">任务类型</span><select id="taskKindFilter"><option value="">全部类型</option></select></label><label class="select-label"><span class="sr-only">任务状态</span><select id="taskStatusFilter"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">执行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="interrupted">已中断</option><option value="cancelled">已取消</option></select></label><button id="taskFiltersReset" class="button button-light" type="button" disabled>清空筛选</button></div></div><div id="taskTable" class="table-wrap"><div class="empty">正在读取任务…</div></div></section>
           <section id="geminiRecords" class="panel list-panel" role="tabpanel" aria-label="Gemini 请求记录" hidden><div class="panel-heading"><div><h2>Gemini 请求记录</h2><p id="geminiRecordSummary" class="panel-caption">切到该标签后读取。</p></div><label class="select-label"><input id="geminiShowChecks" type="checkbox"> 显示自查请求</label></div><div id="geminiRecordTable" class="table-wrap"><div class="empty">切到该标签后读取最近的 Gemini 请求。</div></div></section>
+        </section>
+        <section id="musicView" class="view" aria-labelledby="musicHeading" hidden>
+          <div class="page-heading"><div><div class="eyebrow"><span></span> MUSIC STUDIO</div><h1 id="musicHeading">音乐生成</h1><p>用 Flow Music 的 Lyria 模型生成可下载的音频，消耗对应账号的音乐积分。</p></div></div>
+          <section class="panel list-panel" aria-labelledby="musicFormHeading">
+            <div class="panel-heading"><div><h2 id="musicFormHeading">生成音乐</h2><p id="musicCredits" class="panel-caption">正在读取音乐账号状态…</p></div></div>
+            <div class="music-form">
+              <label for="musicModel">模型</label>
+              <select id="musicModel"><option value="lyria-fast">Lyria 3.5 Fast（快 · 省）</option><option value="lyria">Lyria 3.5</option><option value="lyria-pro">Lyria 3 Pro</option><option value="lyria-pro-fast">Lyria 3 Pro Fast</option></select>
+              <label for="musicPrompt">描述（可写风格、情绪、乐器、歌词或时长，例如"无人声钢琴 BGM，约 1 分钟"）</label>
+              <textarea id="musicPrompt" rows="4" maxlength="2000" placeholder="轻快的钢琴背景音乐，无人声，适合短视频背景"></textarea>
+              <div class="music-form-actions"><button id="musicGenerate" class="button button-primary" type="button">生成音乐</button><span id="musicStatus" role="status" aria-live="polite"></span></div>
+            </div>
+          </section>
+          <section class="panel list-panel" aria-labelledby="musicResultHeading" id="musicResultPanel" hidden>
+            <div class="panel-heading"><div><h2 id="musicResultHeading">生成结果</h2><p id="musicResultSummary" class="panel-caption"></p></div></div>
+            <div id="musicResult" class="table-wrap"></div>
+          </section>
         </section>
         <section id="apiView" class="view api-view" aria-labelledby="apiHeading" hidden>
           <div class="page-heading api-page-heading"><div><div class="eyebrow"><span></span> API / INTEGRATION</div><h1 id="apiHeading">API 文档</h1><p>查看请求地址、参数和返回结果。</p></div><div class="api-page-actions"><button id="apiCopyAll" class="button button-primary" type="button">一键复制完整文档</button><span id="apiCopyAllStatus" role="status" aria-live="polite"></span></div></div>
