@@ -39,7 +39,13 @@ def call(path, payload=None, request_id=None, *, file=None):
 
 ## Gemini · 对话与推理
 
-需要关闭某条 Gemini 文字请求的自动重试时，可在请求体传 `"retry_policy": "never"`。同一请求编号重查时保持参数一致。
+Gemini CLI 账号池默认总并发 20，与 Flow 的 1～5 并发设置独立；超出的请求排队。同一账号可执行多个独立对话，同一对话仍逐轮执行。20 是本系统调度上限，不代表供应商承诺的稳定并发。
+
+文字和识图的单次模型等待默认最多 600 秒；连续 240 秒没有收到文字进展时停止等待，保留已收到的部分回复和未确认状态。排队时间另计；提交接口仍返回请求编号供轮询，不应将 HTTP 查询期限当成生成期限。
+
+管理员可在工作台状态目录的 `gemini-execution.json` 配置 `text_total_seconds`、`image_total_seconds`、`idle_seconds`、`probe_total_seconds`、`probe_idle_seconds`，数值须为 1～3600 秒。业务默认 600/600/240 秒；验活默认总计 180 秒、无进展 120 秒。配置仅对下一次调用生效。
+
+需要关闭某条 Gemini 文字或识图请求的自动重试时，可在请求体传 `"retry_policy": "never"`。两条通道均不再预留或发起额外尝试；该字段省略时沿用原有策略。同一请求编号重查时保持参数一致。
 
 **`POST /api/conversations`** · 传 title，返回对话 id。
 

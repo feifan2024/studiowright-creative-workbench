@@ -70,3 +70,41 @@ class VisionValidationHTTP(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join()
+
+
+    def test_image_submission_passes_optional_retry_policy_and_rejects_invalid(self):
+        from urllib.error import HTTPError
+        with fixture_directory() as directory:
+            pool, sources = Mock(), Mock()
+            pool.path = directory / 'unused.sqlite3'
+            pool.maintenance.return_value = False
+            pool.conversation_id.return_value = '00000000-0000-4000-8000-000000000000'
+            sources.snapshot.return_value = {'real_accounts': {'available': True, 'items': []}}
+            pool.official.generate.return_value = ({'request_id': pool.conversation_id.return_value, 'status':'queued'}, True)
+            server = ThreadingHTTPServer(('127.0.0.1',0), make_handler(sources,real_pool=pool))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = 'http://127.0.0.1:' + str(server.server_port)
+            attachments = [dict(index=0, extension='png', sha256='0'*64)]
+            try:
+                for policy in ('omitted','never','invalid'):
+                    pool.official.generate.reset_mock()
+                    payload = dict(account='auto',prompt='Fixture only',attachments=attachments)
+                    if policy != 'omitted': payload['retry_policy'] = policy
+                    request = Request(base+'/api/real-pool/image-analysis',data=json.dumps(payload).encode(),
+                        headers={'Origin':base,'X-Workbench-Request':'1','Content-Type':'application/json','Idempotency-Key':pool.conversation_id.return_value})
+                    if policy == 'invalid':
+                        with self.assertRaises(HTTPError) as caught:
+                            build_opener(ProxyHandler({})).open(request,timeout=3)
+                        self.assertEqual(caught.exception.code,400)
+                        caught.exception.close()
+                        pool.official.generate.assert_not_called()
+                    else:
+                        with build_opener(ProxyHandler({})).open(request,timeout=3) as response:
+                            self.assertEqual(response.status,201)
+                        kwargs = dict(image_analysis=True)
+                        if policy=='never': kwargs['retry_policy']='never'
+                        pool.official.generate.assert_called_once_with(
+                            'auto','Fixture only',pool.conversation_id.return_value,[],attachments,**kwargs)
+            finally:
+                server.shutdown(); server.server_close(); thread.join()

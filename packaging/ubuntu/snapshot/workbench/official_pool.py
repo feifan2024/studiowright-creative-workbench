@@ -22,6 +22,7 @@ READINESS_RECOVERABLE_BLOCKS=('provider_error','provider_connection_failed','pro
 READINESS_REPLY='GEMINI_READY'
 READINESS_PROMPT='这是创作工作台的云端连通性检查。请只回复 GEMINI_READY，不要添加其他文字。'
 MAX_TIMEOUT_ATTEMPTS=4
+DEFAULT_MAX_CONCURRENCY=20
 ACCOUNT_BLOCK_REASONS=(AUTH_UNSENT,'authorization_still_required','verification_required','quota_or_rate_limit')
 
 def unresolved_official(db,key):
@@ -85,7 +86,7 @@ class OfficialPool:
         replies=threading.Thread(target=self.monitor_saved_replies,name='official-saved-replies',daemon=True)
         self.threads.append(replies);replies.start()
         if not self.ready:return
-        for i in range(5):
+        for i in range(DEFAULT_MAX_CONCURRENCY):
             t=threading.Thread(target=self.worker,name='official-worker-'+str(i),daemon=True);self.threads.append(t);t.start()
 
     def close(self):
@@ -225,9 +226,13 @@ class OfficialPool:
                          'busy':busy_official(db,key)} for key,ready in available.items()}
             queued=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued'").fetchone()[0]
             active=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]
+        account_dispatch={'available':True,'maximum':DEFAULT_MAX_CONCURRENCY,'active':active,
+                          'paused':self.pool.maintenance(),'queued':queued,'scope':'gemini_pool'}
         return {'available':any(available.values()),'channel':CHANNEL,'model':MODEL,'accounts':result,'queued':queued,'active':active,
-                'selection':'round_robin','max_concurrency':5,'retry':True,'failover':False,
-                'shared_dispatch':self.pool.dispatch_limit.public_status()}
+                'selection':'round_robin','max_concurrency':DEFAULT_MAX_CONCURRENCY,'retry':True,'failover':False,
+                'concurrency_scope':'gemini_pool','per_account_concurrency':None,
+                'account_dispatch':account_dispatch,
+                'shared_dispatch':account_dispatch}  # Compatibility alias, never the Flow counter.
 
     @staticmethod
     def recent_readiness_probe(db,key):
@@ -281,6 +286,8 @@ class OfficialPool:
             for key in inventory:
                 block=self.readiness_block(db,key)
                 if (not blocked_only or block) and self.reason(db,key,inventory,block,readiness_probe=True) is None:
+                    recent_success=db.execute("SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE r.account_key=? AND r.status='completed' AND r.finished>=? LIMIT 1",(key,time.time()-1800)).fetchone()
+                    if not block and recent_success:continue
                     candidates.append(key)
         queued=[]
         now=time.time()
@@ -379,19 +386,24 @@ class OfficialPool:
         self.wake.set()
         return self.pool.get(request_id),True
 
-    def claim(self):
+    def claim(self, *, probe_only=None):
         available=self.runtime.inventory()
         with self.pool.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             try:
                 if self.pool.maintenance():db.execute('COMMIT');return None
+                if db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]>=DEFAULT_MAX_CONCURRENCY:
+                    db.execute('COMMIT');return None
                 rows=db.execute("""SELECT r.request_id,r.account_key,r.created,r.finished,j.reason AS job_reason,j.conversation_id,j.native_before,j.readiness_probe,j.no_retry,t.prompt,t.attachments,
                                   a.state AS reauth_state,a.block_reason,a.block_created,a.account_key AS reauth_account,c.hidden
                                   FROM requests r JOIN official_jobs j USING(request_id)
                                   JOIN conversation_turns t USING(request_id) JOIN conversations c ON c.id=j.conversation_id
-                                  LEFT JOIN official_reauth a USING(request_id) WHERE r.status='queued' ORDER BY r.created,r.rowid""").fetchall()
+                                  LEFT JOIN official_reauth a USING(request_id) WHERE r.status='queued' ORDER BY j.readiness_probe,r.created,r.rowid""").fetchall()
                 for row in rows:
-                    if db.execute("SELECT 1 FROM requests r WHERE r.account_key=? AND r.status='dispatching' AND "+OFFICIAL_REQUEST_SQL,(row['account_key'],)).fetchone():continue
+                    if probe_only is not None and bool(row['readiness_probe']) != probe_only:continue
+                    if row['readiness_probe'] and db.execute(
+                            "SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE (j.readiness_probe=0 AND r.status IN ('queued','dispatching')) OR (j.readiness_probe=1 AND r.status='dispatching') LIMIT 1").fetchone():continue
+                    if db.execute("SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE j.conversation_id=? AND r.status='dispatching'",(row['conversation_id'],)).fetchone():continue
                     resumed=row['reauth_state']=='queued'
                     timed_out=row['job_reason']=='timeout_retry_queued'
                     recovery=self.readiness_block(db,row['account_key']) if row['readiness_probe'] else None
@@ -474,7 +486,7 @@ class OfficialPool:
         if job.get('reauth_state')=='queued':
             return self.runtime.run(*args,audit/'attempt-2')
         ordinal=job.get('ordinal',1)
-        result=self.runtime.run(*args,audit if ordinal==1 else audit/f'attempt-{ordinal}')
+        result=self.runtime.run(*args,audit if ordinal==1 else audit/f'attempt-{ordinal}',**({'probe':True} if job.get('readiness_probe') else {}))
         if job.get('no_retry'):
             return result
         if job.get('readiness_probe'):
@@ -584,7 +596,7 @@ class OfficialPool:
         result=analyze(self.runtime,job['account_key'],parts,receipt,keep_partial=True)
         if result.get('status')=='completed' and generic_refusal(result.get('response')):
             result={**result,'status':'failed','reason':BAD_REPLY}
-        if self.reserve_retry(job,result):
+        if not job.get('no_retry') and self.reserve_retry(job,result):
             result=analyze(self.runtime,job['account_key'],parts,receipt.with_suffix('.attempt-2.json'),keep_partial=True)
             if result.get('status')=='completed' and generic_refusal(result.get('response')):
                 result={**result,'status':'failed','reason':BAD_REPLY}
@@ -592,26 +604,23 @@ class OfficialPool:
 
     def worker(self):
         while not self.stop.is_set():
-            # Idle queue inspection must not occupy a shared Flow/Gemini slot.
             with self.pool.connection() as db:
                 pending=db.execute("SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued' LIMIT 1").fetchone()
             if not pending:
                 self.wake.wait(.5);self.wake.clear();continue
-            slot=self.pool.dispatch_limit.try_acquire()
             job=None
-            if slot:
-                try:
-                    job=self.claim()
-                    if job:
-                        try:
-                            if job['attachments']!='[]':result=self.run_image(job)
-                            else:result=self.run_text(job)
-                        except Exception:result={'submitted':True,'status':'unknown','reason':'worker_interrupted'}
-                        self.finish(job,result)
-                except Exception:
-                    # A claimed job is never requeued or sent through another account.
-                    if job:
-                        try:self.finish(job,{'submitted':True,'status':'unknown','reason':'persistence_or_worker_failure'})
-                        except Exception:pass
-                finally:slot.close()
-            if not job:self.wake.wait(.2);self.wake.clear()
+            try:
+                # The transaction in claim serializes each account, independent
+                # of Flow slots; probes remain single-file and behind business.
+                job=self.claim()
+                if job:
+                    try:
+                        if job['attachments']!='[]':result=self.run_image(job)
+                        else:result=self.run_text(job)
+                    except Exception:result={'submitted':True,'status':'unknown','reason':'worker_interrupted'}
+                    self.finish(job,result)
+            except Exception:
+                if job:
+                    try:self.finish(job,{'submitted':True,'status':'unknown','reason':'persistence_or_worker_failure'})
+                    except Exception:pass
+            if not job:self.wake.wait(.5);self.wake.clear()

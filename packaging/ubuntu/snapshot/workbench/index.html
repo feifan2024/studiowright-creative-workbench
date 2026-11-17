@@ -69,7 +69,7 @@
           <section class="overview-distributions" aria-label="任务和素材分布"><div id="overviewTaskChart" class="overview-chart"><div class="empty">正在读取任务统计…</div></div><div id="overviewMaterialChart" class="overview-chart"><div class="empty">正在读取素材统计…</div></div></section>
           <section class="overview-quick panel" aria-labelledby="overviewQuickHeading">
             <div><span class="section-kicker">QUICK ACTIONS</span><h2 id="overviewQuickHeading">常用操作</h2><p>从总览进入设置和接入文档。</p></div>
-            <div class="overview-quick-actions"><button id="overviewSchedule" class="button button-light" type="button">通道与设置 <span aria-hidden="true">→</span></button><button id="overviewApiCopy" class="button button-light" type="button">复制 API 调用文档</button><label class="overview-concurrency" title="此上限用于工作台现有任务；官方 CLI 独立实测不使用此设置。超出时等待；调低不会中断已执行的任务。">最大并发 <select id="dispatchConcurrency" aria-label="最大并发任务数" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span><span id="overviewCopyStatus" class="overview-copy-status" role="status" aria-live="polite"></span></div>
+            <div class="overview-quick-actions"><button id="overviewSchedule" class="button button-light" type="button">通道与设置 <span aria-hidden="true">→</span></button><button id="overviewApiCopy" class="button button-light" type="button">复制 API 调用文档</button><label class="overview-concurrency" title="仅限制 Flow；Gemini CLI 默认总并发 20，独立执行。超出时等待；调低不会中断已执行的任务。">Flow 最大并发 <select id="dispatchConcurrency" aria-label="Flow 最大并发任务数" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span><span id="overviewCopyStatus" class="overview-copy-status" role="status" aria-live="polite"></span></div>
           </section>
 
 
@@ -92,7 +92,7 @@
           <div class="notice" role="note"><span class="notice-symbol" aria-hidden="true">i</span><span>Flow 与 Gemini 分别判断。官方实测成功仅证明该次调用；登录授权、额外核验和工作台接入状态请查看账号详情。</span></div>
           <section class="panel list-panel" aria-labelledby="realAccountsHeading">
             <div class="panel-heading"><div><h2 id="realAccountsHeading">统一账号池</h2><p id="realAccountsSummary" class="panel-caption">正在读取现有账号…</p></div><div class="account-heading-actions"><button id="activationScheduleToggle" class="button button-light" type="button" aria-expanded="false" aria-controls="activationSchedulePanel">通道与设置</button><button id="activateAccounts" hidden class="button button-primary" type="button" disabled>检查账号状态</button></div></div>
-            <div id="activationSchedulePanel" class="activation-schedule" hidden><h3>官方调用 · 账号池</h3><p>新对话按轮询分配，多轮固定账号；并发设置1～5。网页登录和网页保活不参与官方调用，暂停限制继续保留。</p><p id="retainedSettings">正在只读核对已保存的设置…</p><div hidden>
+            <div id="activationSchedulePanel" class="activation-schedule" hidden><h3>官方调用 · 账号池</h3><p>新对话按轮询分配，多轮固定账号；Gemini CLI 默认总并发 20，与 Flow 独立。网页登录和网页保活不参与官方调用，暂停限制继续保留。</p><p id="retainedSettings">正在只读核对已保存的设置…</p><div hidden>
               <form id="activationScheduleForm">
               <div class="activation-schedule-fields"><label><input id="activationScheduleEnabled" type="checkbox"> 启用每天定时检查</label><label>北京时间 <input id="activationScheduleTime" type="time" value="08:00" required></label><button class="button button-primary" type="submit">保存设置</button></div>
               <p id="activationScheduleStatus" class="panel-caption" role="status" aria-live="polite">正在读取定时设置…</p>
@@ -148,7 +148,7 @@
 
         <section id="conversationsView" class="view" aria-labelledby="conversationsHeading" hidden>
           <div class="page-heading"><div><h1 id="conversationsHeading">自定义对话</h1><p>使用官方调用与账号池，保留每轮问答、账号和耗时。</p><p id="chatCreateStatus" class="chat-create-status" role="status" aria-live="polite"></p></div><button id="chatNew" class="button button-primary" type="button">新建对话</button></div>
-          <div class="notice" role="note"><span class="notice-symbol">i</span><span>Gemini 无需网页常驻。新对话轮询分配、多轮固定账号；并发按设置排队，最高5。单条新文字对话确认超时后，原账号最多重试三次；其他结果不明的请求待核对。</span></div>
+          <div class="notice" role="note"><span class="notice-symbol">i</span><span>Gemini 无需网页常驻。新对话轮询分配、多轮固定账号；默认总并发 20，超出时排队，与 Flow 独立。单条新文字对话确认超时后，原账号最多重试三次；其他结果不明的请求待核对。</span></div>
           <section class="conversation-filters" aria-label="对话筛选">
             <div class="conversation-filter-grid">
               <label>搜索<input id="chatFilterSearch" type="search" placeholder="搜索对话名称" maxlength="120"></label>
@@ -185,7 +185,7 @@
           <details id="materialActivityPanel" class="panel list-panel"><summary><strong>Gemini 素材分析记录</strong> · 查看对应素材、调用账号和历史结果</summary><p class="panel-caption">按每次分析显示历史记录，账号来自该次请求；无法核实的信息会明确标出。点击素材可查看标签来源。</p><button id="materialActivityRefresh" class="button button-light" type="button">刷新分析记录</button><p id="materialActivityStatus" role="status"></p><div id="materialActivityList" class="table-wrap"></div><div class="library-pagination"><button id="materialActivityPrev" class="button button-light" type="button">← 上一页</button><span id="materialActivityPage"></span><button id="materialActivityNext" class="button button-light" type="button">下一页 →</button></div></details>
           <section class="library-filters" aria-label="素材筛选"><div class="library-filter-grid">
             <label class="library-query">搜索素材<input id="librarySearch" type="search" maxlength="500" placeholder="提示词、项目、模型或标签"></label>
-            <label>素材类型<select id="libraryKind"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option></select></label>
+            <label>素材类型<select id="libraryKind"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option></select></label>
             <label>来源账号<select id="libraryAccount"><option value="">全部账号</option></select></label>
             <label>搜索范围<select id="librarySearchScope"><option value="original">素材与原标签</option><option value="analysis">Gemini 与补充标签</option></select></label>
             <button id="libraryFind" class="button button-primary" type="button">搜索</button>
@@ -204,7 +204,7 @@
             <summary><strong id="flowCreateHeading">创建 Flow 任务</strong></summary><p class="panel-caption">无需填写项目，系统自动安排账号和项目；任务会真实生成并可能消耗积分。</p>
             <div class="workflow-demo">
               <details><summary>项目设置（可选）</summary><p><label for="flowProject">指定已有项目（可选）</label><br><select id="flowProject"><option value="auto">自动安排账号和项目</option></select></p><p>保持自动安排即可直接创建任务，无需先建立或填写项目。</p></details>
-              <p><label for="flowKind">类型</label> <select id="flowKind"><option value="image">图片</option><option value="video">视频</option></select>
+              <p><label for="flowKind">类型</label> <select id="flowKind"><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option></select>
               <label for="flowModel">模型</label> <select id="flowModel"></select>
               <label for="flowAspect">比例</label> <select id="flowAspect"></select>
               <label for="flowCount">数量</label> <select id="flowCount"><option>1</option><option>2</option><option>3</option><option>4</option></select></p>

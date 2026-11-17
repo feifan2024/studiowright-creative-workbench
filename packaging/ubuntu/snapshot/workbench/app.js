@@ -1473,7 +1473,7 @@ function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
         title:geminiProbeReasons[code] || (probe.status==='unknown' ? '未确认云端是否响应' : '云端验活未通过'),
         action:'可在「Gemini 云端验活」对话中查看本次记录。'});
     }
-    const shared=channel?.dispatch?.shared_dispatch;
+    const shared=channel?.dispatch?.account_dispatch || channel?.dispatch?.shared_dispatch;
     const dispatch=shared?.available===true ? {active:shared.active,max_concurrency:shared.maximum,
       paused:shared.paused,queued:channel.dispatch.queued} : null;
     const busy=current?.busy===true;
@@ -4261,7 +4261,7 @@ function showDispatchConcurrency(data) {
   $('dispatchConcurrency').value = String(data.maximum);
   $('dispatchConcurrency').disabled = false;
   $('dispatchConcurrencyStatus').textContent = data.paused ? '维护中' : `执行中 ${data.active} / ${data.maximum}`;
-  $('dispatchConcurrencyStatus').title = data.active > data.maximum ? '已有任务继续完成，新任务按新上限派发。' : '共用并发上限，超过时等待；设置自动保存，立即影响新任务。';
+  $('dispatchConcurrencyStatus').title = data.active > data.maximum ? '已有任务继续完成，新任务按新上限派发。' : '仅限制 Flow 任务；Gemini CLI 独立执行，默认总并发 20。';
 }
 async function refreshDispatchConcurrency() {
   if (dispatchConcurrencySaving || document.activeElement === $('dispatchConcurrency')) return;

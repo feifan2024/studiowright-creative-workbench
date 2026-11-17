@@ -2,6 +2,7 @@
 import ast,errno,http.client,json,os,re,selectors,signal,subprocess,time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from gemini_execution import call_budget
 
 CHANNEL='official_antigravity_cli'
 MODEL='gemini-3.8-flash-medium'
@@ -170,23 +171,24 @@ class OfficialRuntime:
             except (OSError,ValueError,TypeError,KeyError):result[key]=False
         return result
 
-    def run(self,key,prompt,native,audit):
+    def run(self,key,prompt,native,audit,*,probe=False):
         account=self.account(key)
         if not account:return {'submitted':False,'status':'failed','reason':'authorization_not_ready'}
         root=account['root'];home=root/'home'
+        budget=call_budget(self, 'probe' if probe else 'text')
         env={'HOME':str(home),'XDG_CONFIG_HOME':str(home/'.config'),'XDG_CACHE_HOME':str(home/'.cache'),
              'XDG_DATA_HOME':str(home/'.local/share'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','TERM':'xterm-256color'}
         env.update(official_network_env())
         argv=[str(account['binary']),'--print',prompt,'--output-format','stream-json','--model',MODEL,
-              '--disable-slash-commands','--print-timeout','150s']
+              '--disable-slash-commands','--print-timeout','0']
         if native:argv+=['--conversation',native]
         audit=Path(audit);audit.mkdir(mode=0o700,parents=True,exist_ok=False)
         # A receipt precedes the one process launch; the caller never replays it.
         with (audit/'submission.json').open('x',encoding='utf-8') as f:
-            os.fchmod(f.fileno(),0o600);json.dump({'account_key':key,'created':time.time(),'native':native,'model':MODEL},f);f.flush();os.fsync(f.fileno())
+            os.fchmod(f.fileno(),0o600);json.dump({'account_key':key,'created':time.time(),'native':native,'model':MODEL,'total_seconds':budget.total_seconds,'idle_seconds':budget.idle_seconds},f);f.flush();os.fsync(f.fileno())
         started=time.monotonic();first=None;answer=None;error=None;rc=None;proc=None
         selector=selectors.DefaultSelector();buffers={'stdout':b'','stderr':b''};total=0
-        auth_markers=set();stdout_lines=0;chunks=[]
+        auth_markers=set();stdout_lines=0;chunks=[];timeout_kind=None
         def event_line(channel,line):
             nonlocal first,answer,error,stdout_lines
             if channel=='stderr':
@@ -199,6 +201,8 @@ class OfficialRuntime:
             if event.get('event')=='step_update':
                 step=event.get('step_update',{})
                 delta=step.get('text_delta')
+                if isinstance(delta,str) and delta:
+                    budget.progress()
                 if step.get('step_type')=='agent_response' and isinstance(delta,str) and delta:
                     chunks.append(delta)
                     if first is None:first=round((time.monotonic()-started)*1000)
@@ -220,7 +224,8 @@ class OfficialRuntime:
                 for name,stream in [('stdout',proc.stdout),('stderr',proc.stderr)]:
                     os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ,name)
                 while selector.get_map() and not error:
-                    if time.monotonic()-started>180:error='timeout_unconfirmed';break
+                    timeout_kind=budget.expired()
+                    if timeout_kind:error='timeout_unconfirmed';break
                     for key_event,_ in selector.select(.2):
                         raw=os.read(key_event.fileobj.fileno(),65536)
                         if not raw:selector.unregister(key_event.fileobj);continue
@@ -273,6 +278,7 @@ class OfficialRuntime:
         result={'submitted':submitted,'status':'completed' if success else 'failed' if terminal or explicit_failure or not submitted else 'unknown',
                 'reason':reason,'response':response if nonempty else ''.join(chunks) or None,
                 'native':answer.get('conversation_id') if terminal else native,'first_text_ms':first,'total_ms':elapsed,
+                'timeout_kind':timeout_kind,
                 'token_count':(answer.get('usage') or {}).get('total_tokens') if isinstance(answer,dict) else None}
         # Set only for a terminal CLI receipt, after that process has exited.
         if print_timeout and not error and submitted:

@@ -2021,8 +2021,11 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         return self.json_response(503, {"error": "现有账号池暂不可读取。"})
                     if self.path in {'/api/real-pool/image-analysis', '/api/real-pool/image-analysis-validate'}:
                         import gemini_image_input as vision
-                        if set(data) != {'account', 'prompt', 'attachments'}:
+                        if not {'account', 'prompt', 'attachments'} <= data.keys() or data.keys() - {'account', 'prompt', 'attachments', 'retry_policy'}:
                             raise ValueError('识图需要账号、问题和图片回执。')
+                        if data.get('retry_policy') not in (None, 'never'):
+                            raise ValueError('Invalid retry policy')
+                        retry_kwargs={'retry_policy':data['retry_policy']} if 'retry_policy' in data else {}
                         request_id = real_pool.conversation_id(self.headers.get('Idempotency-Key', ''))
                         account, prompt = data['account'], data['prompt']
                         if not isinstance(account, str):
@@ -2037,7 +2040,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                             vision.prompt_parts(prompt, attachments, paths)
                             return self.json_response(200, {'valid': True, 'submitted': False, 'image_count': len(attachments)})
                         record, created = real_pool.official.generate(
-                            account, prompt, request_id, account_data['items'], attachments, image_analysis=True)
+                            account, prompt, request_id, account_data['items'], attachments, image_analysis=True, **retry_kwargs)
                         return self.json_response(201 if created else 200, record)
                     if self.path.endswith('/flow-retry-project'):
                         if set(data) != {'account', 'project'} or not isinstance(data['account'], str) or not re.fullmatch(r'[0-9a-f]{64}', data['account']):

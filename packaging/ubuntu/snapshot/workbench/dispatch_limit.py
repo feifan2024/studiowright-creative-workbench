@@ -49,13 +49,18 @@ def _lock(fd):
 
 
 class Slot:
-    def __init__(self, fd, root):
+    def __init__(self, fd, root, extra_fd=None):
         self.fd, self.root, self.pid = fd, root, os.getpid()
+        self.extra_fd = extra_fd
 
     def close(self):
         if self.fd is not None:
             fd, self.fd = self.fd, None
-            os.close(fd)
+            try:os.close(fd)
+            finally:
+                if self.extra_fd is not None:
+                    os.close(self.extra_fd)
+                    self.extra_fd = None
 
 
 class DispatchLimit:
@@ -181,6 +186,33 @@ class DispatchLimit:
             # Invalid/unavailable configuration must not start provider work.
             return None
         finally:
+            for fd in free:
+                os.close(fd)
+
+    def try_acquire_probe(self):
+        """At most one probe, reserving one business slot when maximum > 1."""
+        if self.paused():
+            return None
+        free, probe_fd = [], None
+        try:
+            with self._guard(timeout=0):
+                if self.paused():
+                    return None
+                maximum = self._limit()
+                probe_fd = _open(self.root / 'gemini-probe.lock')
+                if not _lock(probe_fd):
+                    return None
+                active, free = self._slots()
+                if active >= max(1, maximum - 1):
+                    return None
+                result = Slot(free.pop(0), self.root, extra_fd=probe_fd)
+                probe_fd = None
+                return result
+        except (OSError, ValueError):
+            return None
+        finally:
+            if probe_fd is not None:
+                os.close(probe_fd)
             for fd in free:
                 os.close(fd)
 

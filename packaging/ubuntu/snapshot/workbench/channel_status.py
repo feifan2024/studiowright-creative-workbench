@@ -126,7 +126,7 @@ def read_status(database, runtime=None):
             if runtime:
                 result.update(channel='official_antigravity_cli', production_send_available=runtime.get('available') is True,
                               authorization_source='saved_verified_identity',
-                              dispatch={k:runtime.get(k) for k in ('queued','active','selection','max_concurrency','retry','failover','model','shared_dispatch')})
+                              dispatch={k:runtime.get(k) for k in ('queued','active','selection','max_concurrency','retry','failover','model','shared_dispatch','account_dispatch','concurrency_scope','per_account_concurrency')})
             result['available'] = True
     except (sqlite3.Error, OSError):
         # Do not forward DB errors, private native metadata, response bodies or URLs.

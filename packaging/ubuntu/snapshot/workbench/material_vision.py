@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from official_runtime import MODEL, official_network_env
+from gemini_execution import call_budget
 
 MAX_MEDIA = 100 * 1024 * 1024
 MIMES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp',
@@ -133,8 +134,9 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
                     def call(i,method,params,timeout):
                         nonlocal buffer,size
                         send({'id':i,'method':method,'params':params})
-                        deadline=time.monotonic()+timeout
-                        while time.monotonic()<deadline and io.get_map():
+                        deadline=time.monotonic()+timeout if timeout is not None else None
+                        budget=call_budget(runtime, 'image') if i==4 else None
+                        while (budget.expired() is None if budget else time.monotonic()<deadline) and io.get_map():
                             for fd,_ in io.select(.2):
                                 data=os.read(fd.fd,65536)
                                 if not data:
@@ -162,10 +164,12 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
                                     update=msg.get('params',{}).get('update',{})
                                     if i==4 and update.get('sessionUpdate')=='agent_message_chunk':
                                         content=update.get('content',{})
-                                        if content.get('type')=='text':chunks.append(content['text'])
+                                        if content.get('type')=='text' and content.get('text'):
+                                            chunks.append(content['text'])
+                                            budget.progress()
                                     if update.get('sessionUpdate') in ('tool_call','tool_call_update'):
                                         raise ValueError('unexpected_tool_call')
-                        raise ValueError('protocol_timeout_'+str(i))
+                        raise ValueError(('protocol_idle_timeout_' if budget and budget.expired()=='idle' else 'protocol_timeout_')+str(i))
                     cap=call(1,'initialize',{'protocolVersion':1,'clientCapabilities':{}},12)
                     if cap.get('agentCapabilities',{}).get('promptCapabilities',{}).get('image') is not True:
                         raise ValueError('image_input_unavailable')
@@ -178,7 +182,7 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
                         json.dump({'account_key':key,'model':MODEL,'created':time.time()},f)
                         f.flush();os.fsync(f.fileno())
                     submitted=True
-                    result=call(4,'session/prompt',{'sessionId':sid,'prompt':parts},145)
+                    result=call(4,'session/prompt',{'sessionId':sid,'prompt':parts},None)
                     text=''.join(chunks).strip()
                     if keep_partial and (result.get('stopReason')=='max_tokens' or
                                          result.get('stopReason')=='end_turn' and not text):
@@ -198,6 +202,6 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
                     for f in (proc.stdin,proc.stdout,proc.stderr):f.close()
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         reason=str(exc) if type(exc) is ValueError and re.fullmatch(r'[a-z0-9_]{1,60}',str(exc)) else 'material_transport_error'
-        result={'status':'unknown' if submitted else 'failed','submitted':submitted,'reason':reason}
+        result={'status':'unknown' if submitted else 'failed','submitted':submitted,'reason':reason,'total_ms':round((time.monotonic()-started)*1000)}
         if keep_partial and chunks:result['response']=''.join(chunks)
         return result

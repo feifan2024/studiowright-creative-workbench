@@ -8,7 +8,7 @@ from pathlib import Path
 
 from material_backfill import has_labels
 from material_vision import analyze, read_media, PROMPT, SHOT_PROMPT, clean_shot_notes
-from official_pool import busy_official
+from official_pool import busy_official, DEFAULT_MAX_CONCURRENCY
 from official_runtime import MODEL
 
 
@@ -76,6 +76,7 @@ def claim(pool, auto):
             if not shot and db.execute('SELECT 1 FROM material_analyses WHERE asset_id=? LIMIT 1',(ident,)).fetchone():
                 db.execute(f"UPDATE {table} SET status='skipped',updated=?,note='已有分析记录，未重复提交' WHERE asset_id=?",(now,ident))
                 return None
+            if db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]>=DEFAULT_MAX_CONCURRENCY:return None
             # A material job only uses an idle eligible account; normal dialogue has priority.
             if db.execute("SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued' LIMIT 1").fetchone():
                 return None
@@ -154,33 +155,29 @@ def finish(pool, sources, job, result, video):
 
 
 def run_once(sources,pool,backfill=None):
-    slot=pool.dispatch_limit.try_acquire()
-    if not slot:return
+    if pool.maintenance():return
     job=None; result=None; video=False
+    job=claim(pool,backfill is None)
+    if not job:return
+    ident=job['ident'];rid=job['request_id']
+    shot=job['table']=='material_shot_jobs'
+    receipt=pool.state_dir/'material-vision-audit'/f'{rid}.json'
     try:
-        job=claim(pool,backfill is None)
-        if not job:return
-        ident=job['ident'];rid=job['request_id']
-        shot=job['table']=='material_shot_jobs'
-        receipt=pool.state_dir/'material-vision-audit'/f'{rid}.json'
-        try:
-            with sources.library('GET',f'/api/library/{ident}') as response:
-                if response.status!=200:raise ValueError('asset_unavailable')
-                item=json.load(response)
-            video=item.get('media_type')=='video'
-            extra=pool.material_extra(ident)
-            if not shot and any(has_labels(x) for x in (item.get('tags'),item.get('structured_tags'),extra.get('manual'),extra.get('suggested'))):
-                result={'status':'skipped'}
-            else:
-                with tempfile.TemporaryDirectory(prefix='sw-material-') as directory:
-                    parts=read_media(sources,ident,Path(directory))
-                    if shot:
-                        parts[0]={'type':'text','text':SHOT_PROMPT}
-                    result=analyze(pool.official.runtime,job['account'],parts,receipt)
-        except Exception:
-            result={'status':'unknown' if receipt.exists() else 'failed','reason':'material_preparation_or_call_failed'}
-        finish(pool,sources,job,result,video)
-        if not shot and result['status']!='skipped':
-            (backfill.finish if backfill else pool.finish_auto_material)(rid)
-    finally:
-        slot.close()
+        with sources.library('GET',f'/api/library/{ident}') as response:
+            if response.status!=200:raise ValueError('asset_unavailable')
+            item=json.load(response)
+        video=item.get('media_type')=='video'
+        extra=pool.material_extra(ident)
+        if not shot and any(has_labels(x) for x in (item.get('tags'),item.get('structured_tags'),extra.get('manual'),extra.get('suggested'))):
+            result={'status':'skipped'}
+        else:
+            with tempfile.TemporaryDirectory(prefix='sw-material-') as directory:
+                parts=read_media(sources,ident,Path(directory))
+                if shot:
+                    parts[0]={'type':'text','text':SHOT_PROMPT}
+                result=analyze(pool.official.runtime,job['account'],parts,receipt)
+    except Exception:
+        result={'status':'unknown' if receipt.exists() else 'failed','reason':'material_preparation_or_call_failed'}
+    finish(pool,sources,job,result,video)
+    if not shot and result['status']!='skipped':
+        (backfill.finish if backfill else pool.finish_auto_material)(rid)
