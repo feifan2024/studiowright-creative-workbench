@@ -794,3 +794,5 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .music-form-actions span { color:var(--muted); font-size:12px; }
 .music-result-item { display:flex; flex-direction:column; gap:8px; padding:14px 18px; border-top:1px solid #edf1ed; }
 .music-result-item audio { width:100%; max-width:520px; }
+.insight-ring--music { background:conic-gradient(#9a7ab5 var(--fill),#ece7f1 0); }
+.insight-ring--music.is-unknown { background:#ece7f1; }
