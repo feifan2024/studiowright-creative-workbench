@@ -153,10 +153,10 @@
   "workbench/material_backfill.py": "68f24be18e97a662501d7870e91b907a2df49e0c90b021b679be7bce44dbf60b",
   "workbench/material_dispatch.py": "99d52eb3ff7886cebb93c6df07b2f3e3777332bf6ecc78de0e5829bec356918a",
   "workbench/material_vision.py": "8b7c1f89c53087528ced48338434001269f42ce9974ba8100c04f01efe858d99",
-  "workbench/official_pool.py": "c319db3620e1315fb3dcbd6e30f21aefe303c24f1b05437cafec26bbb8d3528b",
+  "workbench/official_pool.py": "f1bd17cbca99abe4757df3a9feb48dd29e0c7b5f773a7ac3847e90093c44b3b0",
   "workbench/official_quota.py": "4aef9c5502e13b29ca8348465fcc27fd2d3401dd4f47d32dbb7115f519236188",
   "workbench/official_reauth.py": "f66a62f9ef90f994f7c5f61dc4e708e148311bcd3e85ea0f260d978554011bf9",
-  "workbench/official_runtime.py": "eb4a50d104464351d5960a4d5479686ee9e1af27eb37387f833d8e6b9f0c778a",
+  "workbench/official_runtime.py": "9c805ce68d114ba46749139c8240d138588d6de1380754ed312427413fc6e27c",
   "workbench/pointer_sequence.py": "b940e1427b7813d08b5eb02e051fad2600870b4b78a7df880132094f3872aeb2",
   "workbench/portal_keyboard_client.py": "b04fd626d2815b2ee8bcb72cac5656576c8cc17bf325f61bff68bd16479f3f03",
   "workbench/portal_pointer_client.py": "42d3645a8db161964eabfd5aa71476cd4babd723dca5b2bd05cc003954910c30",
@@ -175,5 +175,6 @@
   "workbench/unified_keys.py": "f57ec533b62589b0e3202b2eb259c430f8af0da7a97b8153ea677469d5f2ad99",
   "workbench/wayland_desktop_driver.py": "97fc5255aec67ca07992d045f62e34404e81ca1f3492a0479408a536d92059ca",
   "workbench/window_binding.py": "bfeaa6be75d4132c9f84258f5b81b9ae1267d80b8ca6d43f19626b1f14954bf3",
-  "workbench/gemini_execution.py": "4b3fc73939be49161727e240bc6de490b9a3a96d7681e4e8271855cdc24c3924"
+  "workbench/gemini_execution.py": "4b3fc73939be49161727e240bc6de490b9a3a96d7681e4e8271855cdc24c3924",
+  "workbench/gemini_completion.py": "68ac759c4c0e24b5acfc153c059fd6a6b5e18057e6832c7fdaba1a3713a81b87"
 }

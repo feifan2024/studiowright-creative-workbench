@@ -3,6 +3,7 @@ import ast,errno,http.client,json,os,re,selectors,signal,subprocess,time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from gemini_execution import call_budget
+from gemini_completion import completed_after_capacity_error, RECOVERED
 
 CHANNEL='official_antigravity_cli'
 MODEL='gemini-3.8-flash-medium'
@@ -188,7 +189,7 @@ class OfficialRuntime:
             os.fchmod(f.fileno(),0o600);json.dump({'account_key':key,'created':time.time(),'native':native,'model':MODEL,'total_seconds':budget.total_seconds,'idle_seconds':budget.idle_seconds},f);f.flush();os.fsync(f.fileno())
         started=time.monotonic();first=None;answer=None;error=None;rc=None;proc=None
         selector=selectors.DefaultSelector();buffers={'stdout':b'','stderr':b''};total=0
-        auth_markers=set();stdout_lines=0;chunks=[];timeout_kind=None
+        auth_markers=set();stdout_lines=0;chunks=[];timeout_kind=None;steps=[]
         def event_line(channel,line):
             nonlocal first,answer,error,stdout_lines
             if channel=='stderr':
@@ -199,7 +200,9 @@ class OfficialRuntime:
             try:event=json.loads(line)
             except ValueError:return
             if event.get('event')=='step_update':
+                if answer is not None:error='event_after_terminal_result'
                 step=event.get('step_update',{})
+                steps.append(step)
                 delta=step.get('text_delta')
                 if isinstance(delta,str) and delta:
                     budget.progress()
@@ -252,7 +255,8 @@ class OfficialRuntime:
                     rc=proc.wait(timeout=5)
                 proc.stdout.close();proc.stderr.close()
         elapsed=round((time.monotonic()-started)*1000)
-        terminal=bool(not error and rc==0 and isinstance(answer,dict) and answer.get('status')=='SUCCESS'
+        recovered=bool(not error and rc in (0,1) and completed_after_capacity_error(answer,steps,native))
+        terminal=bool(not error and (rc==0 or recovered) and isinstance(answer,dict) and (answer.get('status')=='SUCCESS' or recovered)
                      and isinstance(answer.get('conversation_id'),str) and re.fullmatch(r'[0-9a-f-]{36}',answer['conversation_id'])
                      and (native is None or answer['conversation_id']==native))
         response=answer.get('response') if isinstance(answer,dict) else None
@@ -273,6 +277,7 @@ class OfficialRuntime:
                 'provider_error' if answer and not success else error)
         if submitted and not error and first is None and auth_failure_proven(auth_markers,answer,stdout_lines):
             submitted=False;reason=AUTH_UNSENT
+        if success:reason=None
         if incomplete or bad:reason=INCOMPLETE_REPLY if incomplete else BAD_REPLY
         explicit_failure=not error and not print_timeout and isinstance(answer,dict) and answer.get('status')=='ERROR' and first is None and not nonempty
         result={'submitted':submitted,'status':'completed' if success else 'failed' if terminal or explicit_failure or not submitted else 'unknown',
@@ -280,6 +285,9 @@ class OfficialRuntime:
                 'native':answer.get('conversation_id') if terminal else native,'first_text_ms':first,'total_ms':elapsed,
                 'timeout_kind':timeout_kind,
                 'token_count':(answer.get('usage') or {}).get('total_tokens') if isinstance(answer,dict) else None}
+        result['returncode']=rc
+        if recovered and success:
+            result.update(completion_source=RECOVERED,provider_warning='recovered_capacity_503')
         # Set only for a terminal CLI receipt, after that process has exited.
         if print_timeout and not error and submitted:
             result['cli_print_timeout']=True

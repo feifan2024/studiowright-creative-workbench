@@ -5,6 +5,7 @@ from official_runtime import (OfficialRuntime,MODEL,CHANNEL,TEMPORARY_LAUNCH_FAI
                               BAD_REPLY,INCOMPLETE_REPLY,generic_refusal)
 from official_reauth import Reauthorization,SCHEMA as REAUTH_SCHEMA,private_bytes
 import gemini_image_input as vision
+from gemini_completion import saved_capacity_completion, RECOVERED
 
 # Ownership is explicit: queued official jobs or a saved native official conversation.
 # Titles, model names and old monitor state never determine channel ownership.
@@ -127,7 +128,7 @@ class OfficialPool:
             db.execute('COMMIT')
         return len(rows)
 
-    def reconcile_saved_replies(self):
+    def reconcile_saved_replies(self, request_ids=None):
         """Restore only proven replies from original CLI receipts. Never call a model."""
         from contextlib import suppress
         restored=0
@@ -144,6 +145,7 @@ class OfficialPool:
         for row in rows:
             with suppress(OSError,ValueError,TypeError,AttributeError,KeyError):
                 rid=row['request_id']
+                if request_ids is not None and rid not in request_ids:continue
                 if str(uuid.UUID(rid))!=rid:continue
                 audit=self.pool.state_dir/'official-audit'/rid
                 if audit.is_symlink():continue
@@ -151,6 +153,7 @@ class OfficialPool:
                 if audit.is_symlink():continue
                 proof=json.loads(private_bytes(audit/'submission.json',4096))
                 result=json.loads(private_bytes(audit/'result.json',8*1024*1024))
+                result=saved_capacity_completion(audit,result,row['native_before'],private_bytes)
                 response=result.get('response');native=result.get('native')
                 if (proof.get('account_key')!=row['account_key'] or proof.get('model')!=MODEL
                     or type(proof.get('created')) not in (int,float) or not row['started']<=proof['created']<=time.time()
@@ -168,7 +171,7 @@ class OfficialPool:
                     now=time.time()
                     updated=db.execute("""UPDATE requests SET status='completed',response=?,finished=?,note=?
                         WHERE request_id=? AND status='unknown' AND finished IS ?""",
-                        (response,now,'已从原调用记录找回完整回复；没有重新发送。',rid,row['finished']))
+                        (response,now,('已核对原调用：早期容量503后收到完整结束回执；没有重新发送。' if result.get('completion_source')==RECOVERED else '已从原调用记录找回完整回复；没有重新发送。'),rid,row['finished']))
                     if not updated.rowcount:
                         db.execute('ROLLBACK');continue
                     db.execute("UPDATE official_attempts SET status='completed',reason=NULL,submitted=1,finished=?,total_ms=?,response=? WHERE request_id=? AND ordinal=?",
@@ -535,6 +538,8 @@ class OfficialPool:
     def finish(self,job,result):
         status=result.get('status','unknown');reason=result.get('reason');now=time.time()
         note=('官方调用完成。' if status=='completed' else '原账号需要重新授权，消息尚未发送。' if reason in (AUTH_UNSENT,'authorization_still_required','readiness_authorization_required') else '图片文件无法读取或校验失败，未发送。' if reason=='invalid_image_input' else 'Google要求额外核验，已停止。' if reason=='verification_required' else '官方额度或频率受限，已停止。' if reason=='quota_or_rate_limit' else '调用结果需要核对，已停止。' if status=='unknown' else '回复已结束，但未能正常回答。' if reason in (BAD_REPLY,INCOMPLETE_REPLY,'readiness_unexpected_reply') else '本轮未成功，已停止。')+' 全程使用原账号。'
+        if status=='completed' and result.get('completion_source')==RECOVERED:
+            note+=' 早期容量503已恢复，完整结束回执已核对。'
         if status=='unknown' and reason=='timeout_unconfirmed':
             note='等待 Gemini 回复超时，'+('已保留部分回复；' if result.get('response') else '')+'最终结果未确认，未重发。'
         with self.pool.connection() as db:
