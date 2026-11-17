@@ -79,7 +79,16 @@ class Library(TagIndex):
             width = height = None
             with stage.open("rb") as f:
                 header = f.read(32)
-            if (
+            if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+                kind, mime, ext = "audio", "audio/wav", ".wav"
+            elif (
+                len(header) >= 12
+                and header[4:8] == b"ftyp"
+                and header[8:12].startswith(b"M4A")
+            ):
+                # Flow Music 产出的 AAC 音轨（ISO 容器，主品牌 M4A）。
+                kind, mime, ext = "audio", "audio/mp4", ".m4a"
+            elif (
                 len(header) >= 12
                 and header[4:8] == b"ftyp"
                 and not any(b in header[8:] for b in (b"avif", b"avis"))
@@ -258,7 +267,7 @@ class Library(TagIndex):
     def search(self, q="", kind="", tag="", account="", page=1, *, dimensions=None,
                model="", project_id="", created_from="", created_to="", index_status="",
                limit=24, offset=None, account_id="", storage_status=""):
-        if kind not in {"", "image", "video"} or page < 1:
+        if kind not in {"", "image", "video", "audio"} or page < 1:
             raise ValueError("筛选条件不正确。")
         filters, args = [], []
         if len(q) > 500 or not 1 <= limit <= 100 or offset is not None and offset < 0:

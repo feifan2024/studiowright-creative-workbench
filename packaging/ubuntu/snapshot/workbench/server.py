@@ -1154,7 +1154,10 @@ def music_call(method, path, *, body=None, token=None, timeout=30):
     try:
         connection.request(method, path, body=json.dumps(body).encode() if body is not None else None, headers=headers)
         response = connection.getresponse()
-        return json.load(response)
+        payload = json.load(response)
+        if response.status >= 400:
+            raise ValueError(str(payload.get('error') or payload)[:200])
+        return payload
     finally:
         connection.close()
 
@@ -1221,10 +1224,31 @@ def music_generate(prompt, model):
         clips.append({'title': clip.get('title') or '未命名',
                       'audio_url': (clip.get('audio') or {}).get('url', ''),
                       'wav_url': (clip.get('wav') or {}).get('url', ''),
-                      'cover_url': (clip.get('cover') or {}).get('url', '')})
+                      'cover_url': (clip.get('cover') or {}).get('url', ''),
+                      'job_id': (result.get('flowmusic') or {}).get('job_id', ''),
+                      'clip_id': clip.get('id') or clip.get('clip_id') or '',
+                      'prompt': prompt})
     if not clips:
         raise ValueError('音乐服务未返回音频，稍后再试。')
     return {'schema_version': 1, 'model': model, 'clips': clips}
+
+
+def music_library_ingest(clips):
+    """Best-effort: hand the finished clips to the Flow console material library."""
+    connection = http.client.HTTPConnection('127.0.0.1', 18888, timeout=180)
+    try:
+        connection.request('POST', '/api/library/music',
+                           body=json.dumps({'clips': clips}).encode(),
+                           headers={'Content-Type': 'application/json',
+                                    'Origin': 'http://127.0.0.1:18888',
+                                    'X-Console-Request': '1'})
+        response = connection.getresponse()
+        payload = json.load(response)
+        if response.status >= 400:
+            raise ValueError(str(payload.get('error') or payload)[:200])
+        return payload
+    finally:
+        connection.close()
 
 
 def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
@@ -1623,6 +1647,13 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(400, {'error':str(exc)})
                 except (OSError,TimeoutError) as exc:
                     return self.json_response(504, {'error':f'音乐生成未完成：{exc}'})
+                # 自动送进素材池：失败不影响生成结果本身，仅附带提示。
+                try:
+                    ingest = music_library_ingest(result['clips'])
+                    result['ingested'] = sum(1 for item in ingest.get('ingested', []) if item.get('ok'))
+                except (OSError, ValueError, KeyError) as exc:
+                    result['ingested'] = 0
+                    result['ingest_error'] = f'素材池登记未完成：{exc}'
                 return self.json_response(200, result)
             if self.path == '/api/host-shutdown':
                 # Only the Ubuntu deployment may power off its own host, and only

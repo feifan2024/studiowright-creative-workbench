@@ -1966,7 +1966,7 @@ $("musicGenerate")?.addEventListener("click", async () => {
   try {
     const result = await postJson("/api/music/generate", {prompt, model: $("musicModel").value});
     const clips = result.clips || [];
-    $("musicResultSummary").textContent = `模型 ${result.model} · 完成 ${clips.length} 首 · ${dateTime(Date.now()/1000)}`;
+    $("musicResultSummary").textContent = `模型 ${result.model} · 完成 ${clips.length} 首 · 已进素材池 ${result.ingested ?? 0} 件${result.ingest_error ? "（" + result.ingest_error + "）" : ""} · ${dateTime(Date.now()/1000)}`;
     $("musicResult").innerHTML = clips.map(clip => `
       <div class="music-result-item"><strong>${esc(clip.title)}</strong>
       ${clip.audio_url ? `<audio controls preload="metadata" src="${esc(clip.audio_url)}"></audio>` : ''}
@@ -3382,15 +3382,18 @@ function materialCard(item) {
   const id = encodeURIComponent(item.id);
   const origin = item.origins?.[0] || {};
   const title = origin.prompt || '原记录未保存提示词';
+  const audio = item.media_type === 'audio';
   const video = item.media_type === 'video';
   const url = '/api/library/' + id + '/file';
-  const media = video
+  const media = audio
+    ? '<span class="material-audio-icon" aria-hidden="true">♪</span>'
+    : video
     ? '<video preload="metadata" muted playsinline src="' + url + '#t=0.1" aria-hidden="true"></video><span class="material-play" aria-hidden="true">▶</span>'
     : '<img loading="lazy" src="/api/library/' + id + '/thumbnail" alt="">';
   const source = materialSource(origin) + ((item.origins || []).length > 1 ? ' · ' + item.origins.length + ' 条来源' : '');
-  return '<article class="material-card"><button type="button" class="material-cover" data-material="' + esc(item.id)
-    + '" aria-label="查看' + (video ? '视频' : '图片') + '：' + esc(title.slice(0, 60)) + '">' + media
-    + '<span class="material-kind">' + (video ? '视频' : '图片') + ' · ' + esc(materialSize(item.size))
+  return '<article class="material-card"><button type="button" class="material-cover' + (audio ? ' is-audio' : '') + '" data-material="' + esc(item.id)
+    + '" aria-label="查看' + (audio ? '音频' : video ? '视频' : '图片') + '：' + esc(title.slice(0, 60)) + '">' + media
+    + '<span class="material-kind">' + (audio ? '音频' : video ? '视频' : '图片') + ' · ' + esc(materialSize(item.size))
     + '</span></button><div class="material-card-body"><h3 title="' + esc(title) + '">' + esc(title) + '</h3>'
     + '<p class="material-card-meta">' + esc(origin.account_email || origin.account_id || '原账号未记录') + '</p>'
     + '<p class="material-card-meta">' + esc(source) + '</p>' + materialTagGroups(item, true)
@@ -3403,9 +3406,9 @@ function updateLibraryFilters(data) {
     updateOptions($('libraryFilter_' + key), '全部' + label, data.facets?.dimensions?.[key] || []);
   }
   if (data.stats) {
-    $('libraryTotal').innerHTML = esc((data.stats.image || 0) + (data.stats.video || 0)) + '<small>份已保存素材</small>';
+    $('libraryTotal').innerHTML = esc((data.stats.image || 0) + (data.stats.video || 0) + (data.stats.audio || 0)) + '<small>份已保存素材</small>';
     $('libraryBreakdown').innerHTML = esc(data.stats.image || 0) + ' 张图片 · ' + esc(data.stats.video || 0)
-      + ' 段视频<small>' + esc(materialSize(data.stats.bytes || 0)) + ' · Ubuntu 素材库</small>';
+      + ' 段视频 · ' + esc(data.stats.audio || 0) + ' 段音频<small>' + esc(materialSize(data.stats.bytes || 0)) + ' · Ubuntu 素材库</small>';
   }
 }
 $('libraryDimensionFilters').innerHTML = Object.entries(materialDimensions).map(([key, label]) =>
@@ -3809,7 +3812,9 @@ async function showMaterial(id) {
   const suggested = materialSuggestions(extra);
   const analysisBusy = ['preparing', 'saving', 'unknown'].includes(extra.analysis?.status);
   const origin = item.origins?.[0] || {};
-  const preview = item.media_type === 'image'
+  const preview = item.media_type === 'audio'
+    ? '<audio src="' + url + '" controls preload="metadata" style="width:100%;max-width:560px"></audio>'
+    : item.media_type === 'image'
     ? '<img src="' + url + '" alt="素材原图">'
     : '<video src="' + url + '" controls playsinline preload="metadata"></video>';
   const editFields = Object.entries(materialDimensions).map(([key, label]) =>

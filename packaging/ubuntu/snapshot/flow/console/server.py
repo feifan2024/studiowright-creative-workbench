@@ -440,7 +440,7 @@ class Console:
     async def balance_worker(self):
         if self.test:
             return
-        from balance_reader import read_balance
+        from balance_reader import read_balance, BalanceReadDeferred
         from playwright.async_api import async_playwright
         while True:
             if self.dispatch_limit.paused():
@@ -465,8 +465,10 @@ class Console:
                         # account queued while the balance reader owns its window.
                         self.balance_busy.add(profile)
                         try:
-                            balance = await asyncio.wait_for(read_balance(account, pw, include_details=True), timeout=12)
+                            balance = await asyncio.wait_for(read_balance(account, pw, include_details=True), timeout=20)
                             self.insights.record(profile, balance["balance"], next_credit_date=balance.get("next_credit_date"))
+                        except BalanceReadDeferred:
+                            continue
                         except Exception as exc:
                             message = str(exc) if isinstance(exc, ValueError) else '余额读取暂未完成，保留上次记录。'
                             self.insights.record(profile, error=message)
@@ -941,6 +943,86 @@ def create_app(root, adapter, test=False):
         item = await asyncio.to_thread(c.library.get, request.path_params["ident"])
         return JSONResponse(item or {"error": "素材不存在。"}, status_code=200 if item else 404)
 
+    async def library_music_ingest(request):
+        # Register Flow Music clips into the material library. Downloads are
+        # restricted to the pinned Flow Music storage host with DNS-resolution
+        # and redirect checks, and every clip is deduplicated inside archive.
+        try:
+            body = await payload(request)
+            clips = body.get("clips")
+            if not isinstance(clips, list) or not clips or len(clips) > 10:
+                raise ValueError("clips 格式不正确。")
+            import socket as _socket
+            import tempfile
+            import urllib.request
+            from ipaddress import ip_address, ip_network
+            from urllib.parse import urlsplit
+            storage_host = 'storage.googleapis.com'
+
+            class _PinnedRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    parts = urlsplit(newurl)
+                    if parts.scheme != 'https' or parts.hostname != storage_host:
+                        raise ValueError('音频下载重定向离开了固定存储域，已阻止。')
+                    return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+            def open_pinned_storage(url, timeout=120):
+                parts = urlsplit(url)
+                if (parts.scheme != 'https' or parts.hostname != storage_host
+                        or parts.username or parts.password):
+                    raise ValueError('音频地址不正确，未导入。')
+                # 本机 sing-box 透明代理使用 fake-ip DNS：固定域解析到 198.18.0.0/15
+                # 保留段，连接会被代理接管并转出真实目标——该段需要显式放行。
+                fake_ip = ip_network('198.18.0.0/15')
+                for _, _, _, _, sockaddr in _socket.getaddrinfo(parts.hostname, 443, proto=_socket.IPPROTO_TCP):
+                    address = ip_address(sockaddr[0])
+                    if address in fake_ip:
+                        continue
+                    if (address.is_private or address.is_loopback or address.is_link_local
+                            or address.is_reserved or address.is_multicast):
+                        raise ValueError('存储域解析到非公开地址，已阻止。')
+                return urllib.request.build_opener(_PinnedRedirect).open(url, timeout=timeout)
+
+            results = []
+            for clip in clips[:10]:
+                if not isinstance(clip, dict):
+                    continue
+                title = str(clip.get("title") or "未命名音乐").strip()[:120]
+                prompt = str(clip.get("prompt") or "").strip()[:500]
+                email = str(clip.get("email") or "").strip()[:120]
+                job_id = re.sub(r"[^0-9a-zA-Z/_-]", "", str(clip.get("job_id") or ""))[:80]
+                clip_id = re.sub(r"[^0-9a-zA-Z/_-]", "", str(clip.get("clip_id") or ""))[:80]
+                targets = [("audio", str(clip.get("audio_url") or ""))]
+                if clip.get("wav_url"):
+                    targets.append(("wav", str(clip.get("wav_url"))))
+                for kind, url in targets:
+                    if not url:
+                        continue
+                    source_id = "/".join(filter(None, (job_id or clip_id, clip_id if job_id and clip_id else "", kind)))
+                    with open_pinned_storage(url) as resp:
+                        data = resp.read(64 * 1024 * 1024 + 1)
+                    if not data or len(data) > 64 * 1024 * 1024:
+                        raise ValueError("音频文件超出 64MB 限制，未导入。")
+                    tmp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as tmp:
+                            tmp.write(data)
+                            tmp_path = Path(tmp.name)
+                        meta = {"source": "flow_music", "source_id": source_id, "media_type": "audio",
+                                "prompt": (title + "：" + prompt) if prompt else title,
+                                "account_email": email, "media_id": clip_id or source_id,
+                                "model": "flow-music", "created": time.time()}
+                        c.library.archive(tmp_path, meta)
+                        results.append({"source_id": source_id, "kind": kind, "title": title, "ok": True})
+                    finally:
+                        if tmp_path is not None:
+                            Path(tmp_path).unlink(missing_ok=True)
+            if not results:
+                raise ValueError("没有可登记的音频。")
+            return JSONResponse({"success": True, "ingested": results})
+        except (ValueError, TypeError, OSError) as exc:
+            return JSONResponse({"error": safe_error(exc)}, status_code=400)
+
     async def material_file(request):
         ident = request.path_params["ident"]
         item = c.library.get(ident)
@@ -1261,6 +1343,7 @@ def create_app(root, adapter, test=False):
         Route("/api/remote/{ident}/finish", remote_finish, methods=["POST"]),
         WebSocketRoute("/api/remote/{ident}/ws", remote_ws),
         Route("/api/library", materials),
+        Route("/api/library/music", library_music_ingest, methods=["POST"]),
         Route("/api/library/facets", material_facets),
         Route("/api/library/config", index_config, methods=["GET", "POST"]),
         Route("/api/material-library/facets", material_facets),
