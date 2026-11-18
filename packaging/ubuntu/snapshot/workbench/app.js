@@ -367,7 +367,7 @@ function syncQuickGeminiControls() {
   $('geminiSend').disabled = !geminiSelectionReady($('geminiAccount').value);
 }
 
-const workViews = new Set(["tasks", "conversations"]);
+const workViews = new Set(["tasks", "conversations", "music"]);
 let lastWorkView = "tasks";
 
 function setView(view) {
@@ -380,7 +380,7 @@ function setView(view) {
   const inWork = workViews.has(view);
   if (inWork) lastWorkView = view;
   $("workBar").hidden = !inWork;
-  $("breadcrumb").textContent = inWork ? "工作台 / " + (view === "tasks" ? "Flow" : "自定义对话") : display[view];
+  $("breadcrumb").textContent = inWork ? "工作台 / " + ({tasks:"Flow",conversations:"自定义对话",music:"音乐生成"}[view]) : display[view];
   $("workBar").querySelectorAll("[data-view]").forEach((link) => {
     if (link.dataset.view === view) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
