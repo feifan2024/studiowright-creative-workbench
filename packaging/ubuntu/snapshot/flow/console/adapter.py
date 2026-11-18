@@ -40,13 +40,16 @@ class AccountWindowBusy(ValueError):
     """An account operation owns the window lock; login was not checked."""
 
 
-def flow_home_projects(state):
+def flow_home_projects(state, known_titles=None):
+    known_titles = known_titles or {}
     projects = {}
     for item in state["projects"]:
         match = re.search(r"/project/([0-9a-f-]{36})", item["url"], re.I)
         if match:
             ident = match[1].lower()
-            projects[ident] = {"id": ident, "title": item["title"] or "未命名项目"}
+            title = item["title"].strip() or known_titles.get(ident) or "未命名项目"
+            if ident not in projects or item["title"].strip():
+                projects[ident] = {"id": ident, "title": title}
     return list(projects.values())
 
 
@@ -243,6 +246,14 @@ class RealAdapter:
                 await page.goto(FLOW_ROOT, wait_until="domcontentloaded", timeout=45000)
             if kind == "session_import":
                 from login_sessions import Vault, inject_verified
+                from console_store import Store
+                from task_window_registry import canonical_project_url
+
+                known_titles = {row["id"]: row["title"] for row in Store(self.root / "console-data").projects(profile)}
+                try:
+                    previous_project = canonical_project_url(page.url)
+                except ValueError:
+                    previous_project = None
 
                 vault = Vault(self.root / "console-data")
                 bundle = vault.get(p["bundle_id"])
@@ -261,7 +272,10 @@ class RealAdapter:
                         state = await read_when_ready(page, READ_STATE)
                         if not state.get("signed_in") or state.get("emails") != [bundle["email"]]:
                             raise ValueError("Flow 首页登录状态变化。")
-                    projects = flow_home_projects(state)
+                    projects = flow_home_projects(state, known_titles)
+                    if previous_project and (previous_project.rsplit("/", 1)[-1] in known_titles
+                                             or any(p["id"] == previous_project.rsplit("/", 1)[-1] for p in projects)):
+                        await page.goto(previous_project, wait_until="domcontentloaded", timeout=30000)
                     await studio.session.register_verified_identity(bundle["email"])
                     message = f"登录及窗口已核对，已同步 {len(projects)} 个首页项目。"
                     if not projects:

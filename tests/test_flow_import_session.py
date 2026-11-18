@@ -46,3 +46,14 @@ class ImportSessionTest(unittest.IsolatedAsyncioTestCase):
             await inject_verified(self.context, self.page, self.bundle, "state", self.vault, finalize=finalize)
         finalize.assert_not_called()
         self.context.add_cookies.assert_awaited_with(self.old)
+
+
+class ImportedProjectsTest(unittest.TestCase):
+    def test_blank_home_title_preserves_known_name_and_duplicate_title(self):
+        from adapter import flow_home_projects
+        ident = "72591c35-415f-41c7-b2a2-835e716eb303"
+        href = "https://flow.google.com/project/" + ident
+        empty = {"url": href, "title": " "}
+        self.assertEqual(flow_home_projects({"projects": [empty]}, {ident: "Saved name"})[0]["title"], "Saved name")
+        named = {"url": href, "title": "Observed name"}
+        self.assertEqual(flow_home_projects({"projects": [named, empty]}, {ident: "Saved name"})[0]["title"], "Observed name")
