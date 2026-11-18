@@ -52,13 +52,25 @@ class RenderingSession(ChromeSession):
     async def _safe_editor(self, page):
         from studiowright.flow import selectors as s
         from task_coordinator import CoordinationBlocked
-        boxes = page.locator(s.COMPOSER)
+        boxes = page.locator("flow-base-prompt-box [contenteditable='true'], " + s.COMPOSER)
         for index in range(await boxes.count()):
             if (await boxes.nth(index).inner_text()).strip():
                 raise CoordinationBlocked('existing_flow_draft')
         for selector in (s.BOUND_CHIP, s.MENTION_CHIP):
             if await page.locator(selector).count():
                 raise CoordinationBlocked('existing_flow_attachments')
+
+    async def register_verified_identity(self, email):
+        import hashlib
+        from flow_readiness_recovery import _discover_chrome
+        from flow_browser_state import register_flow
+        found = await asyncio.to_thread(_discover_chrome, self._profile)
+        if not found or found[1] != self.port:
+            raise ValueError('flow_browser_identity_unconfirmed')
+        for page in self.context.pages:
+            if page.url.startswith('https://flow.google.com/'):
+                await self._safe_editor(page)
+        return await register_flow(hashlib.sha256(self._profile.encode()).hexdigest(), found[0], found[1], email)
 
     async def _target_id(self, page):
         channel = await self.context.new_cdp_session(page)
@@ -76,7 +88,7 @@ class RenderingSession(ChromeSession):
         target = row.get('target_id') if row else None
         pages=[page]
         for page in self.context.pages:
-            if page.is_closed():
+            if page.is_closed() or not page.url.startswith('https://flow.google.com/'):
                 continue
             if page not in pages and ((target and await self._target_id(page)==target) or await self.role_of(page)==self._task_role):
                 pages.append(page)
@@ -126,6 +138,13 @@ class RenderingSession(ChromeSession):
         return page
 
     async def page_for(self, url_prefix: str, role: str = ""):
+        if getattr(self, '_onboarding', False):
+            candidates = [p for p in self.context.pages if not p.is_closed() and p.url.startswith('https://flow.google.com/')]
+            for candidate in candidates:
+                await self._safe_editor(candidate)
+            page = candidates[0] if candidates else await self._new_window()
+            await self._safe_editor(page)
+            return page
         if hasattr(self, '_task_role'):
             # All operations of this task use one retained account-owned window.
             page = next((p for p in self._task_pages if not p.is_closed()), None)

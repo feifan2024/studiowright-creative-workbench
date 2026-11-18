@@ -224,9 +224,11 @@ class RealAdapter:
         if reference_files:
             studio.configure_reference_uploads(project, reference_files)
         async with studio:
+            if kind in {'sync', 'session_import'}:
+                studio.session._onboarding = True
             from studiowright.flow.page import FLOW_ROOT
 
-            page = await studio.session.page_for(FLOW_ROOT)
+            page = await asyncio.wait_for(studio.session.page_for(FLOW_ROOT), timeout=35)
             if not page.url.startswith(FLOW_ROOT):
                 await page.goto(FLOW_ROOT, wait_until="domcontentloaded", timeout=45000)
             if kind == "session_import":
@@ -243,6 +245,7 @@ class RealAdapter:
                 result = await inject_verified(
                     studio.session.context, page, bundle, READ_STATE, vault
                 )
+                await studio.session.register_verified_identity(bundle["email"])
                 result["projects"] = []
                 return result
             state = None
@@ -288,6 +291,7 @@ class RealAdapter:
             if account["email"] and email != account["email"].lower():
                 raise ValueError("此浏览器的邮箱与已登记账号不一致，已停止操作，避免串号。")
             if kind == "sync":
+                await studio.session.register_verified_identity(email)
                 await page.goto(FLOW_ROOT, wait_until="domcontentloaded", timeout=45000)
                 for _ in range(12):
                     state = await read_when_ready(page, READ_STATE)

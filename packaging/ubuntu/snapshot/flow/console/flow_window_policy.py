@@ -58,6 +58,12 @@ async def safe_page(session,page):
     flags=await page.evaluate(SAFETY_JS)
     for key in ('uploads','busy','dialog'):
         if flags.get(key):raise ValueError('flow_window_protected_'+key)
+    # New accounts default to an empty creative-agent panel. Leave it only
+    # after draft/attachment/busy/dialog guards have passed.
+    if '/project/' in page.url:
+        from studiowright.flow.page import FlowPage
+        await FlowPage(page, page.url.rsplit('/',1)[-1], session)._leave_agent_mode(5)
+
 
 async def inventory(session):
     rows=[]
