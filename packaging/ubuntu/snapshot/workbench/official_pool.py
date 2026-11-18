@@ -78,7 +78,10 @@ class OfficialPool:
             db.execute("UPDATE official_attempts SET status='unknown',reason='workbench_restarted',finished=? WHERE status='running'",(time.time(),))
             db.execute("UPDATE official_reauth SET state='stopped' WHERE state IN ('queued','resending')")
         self.reauth=Reauthorization(self)
-        self.ready=any(self.runtime.inventory().values())
+
+    @property
+    def ready(self):
+        return any(self.runtime.inventory().values())
 
     def start(self):
         if self.threads:return
@@ -86,7 +89,6 @@ class OfficialPool:
         self.threads.append(monitor);monitor.start()
         replies=threading.Thread(target=self.monitor_saved_replies,name='official-saved-replies',daemon=True)
         self.threads.append(replies);replies.start()
-        if not self.ready:return
         for i in range(DEFAULT_MAX_CONCURRENCY):
             t=threading.Thread(target=self.worker,name='official-worker-'+str(i),daemon=True);self.threads.append(t);t.start()
 
@@ -632,7 +634,10 @@ class OfficialPool:
         if result.get('status')=='completed' and generic_refusal(result.get('response')):
             result={**result,'status':'failed','reason':BAD_REPLY}
         if result.get('capacity_retry_safe') is True:
-            return self.capacity_retries(job,result,lambda n:analyze(self.runtime,job['account_key'],parts,receipt.with_suffix(f'.attempt-{n}.json'),keep_partial=True))
+            result=self.capacity_retries(job,result,lambda n:analyze(self.runtime,job['account_key'],parts,receipt.with_suffix(f'.attempt-{n}.json'),keep_partial=True))
+            if result.get('status')=='completed' and generic_refusal(result.get('response')):
+                result={**result,'status':'failed','reason':BAD_REPLY}
+            return result
         if not job.get('no_retry') and self.reserve_retry(job,result):
             result=analyze(self.runtime,job['account_key'],parts,receipt.with_suffix('.attempt-2.json'),keep_partial=True)
             if result.get('status')=='completed' and generic_refusal(result.get('response')):

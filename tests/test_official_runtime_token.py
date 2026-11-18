@@ -50,13 +50,14 @@ class OfficialTokenProtectionTest(unittest.TestCase):
             self.assertEqual(account['email'], EMAIL)
             self.assertEqual((cli / 'antigravity-oauth-token').read_text(), token_body)
 
-    def test_corrupt_token_is_restored_from_backup(self):
+    def test_partial_token_is_not_overwritten_during_refresh(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime, _, cli, token_body = make_runtime(Path(tmp))
             self.assertTrue(runtime.account(KEY))
             (cli / 'antigravity-oauth-token').write_text('{"id_token_')  # interrupted write
-            self.assertTrue(runtime.account(KEY))
-            self.assertEqual((cli / 'antigravity-oauth-token').read_text(), token_body)
+            self.assertIsNone(runtime.account(KEY))
+            self.assertEqual(runtime._token_backup(KEY).read_text(), token_body)
+            self.assertEqual((cli / 'antigravity-oauth-token').read_text(), '{"id_token_')
 
     def test_without_backup_missing_token_stays_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp:

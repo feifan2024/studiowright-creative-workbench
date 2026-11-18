@@ -128,7 +128,6 @@ class ProbePriority(unittest.TestCase):
             with sqlite3.connect(dbpath) as db:
                 db.execute("UPDATE requests SET status='completed',finished=? WHERE request_id='probe'", (time.time(),))
                 db.execute("DELETE FROM requests WHERE request_id='business'")
-            pool.ready = True
             pool.runtime.inventory = lambda: {'a': True}
             pool.generate = Mock()
             self.assertEqual(pool.queue_readiness_probes([], {}), [])

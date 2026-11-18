@@ -99,7 +99,7 @@ class OfficialRuntime:
         return self.config.parent/'official-token-backups'/f'{key}.token'
 
     def _restore_token(self,key,token,item):
-        """Restore the last known-good token after the CLI lost or corrupted its own.
+        """Restore a missing token without overwriting a concurrent CLI refresh.
 
         A run terminated during the CLI's internal token rotation can leave the
         oauth token file deleted or half-written. The backup taken at the last
@@ -108,15 +108,19 @@ class OfficialRuntime:
         backup=self._token_backup(key)
         if backup.is_symlink() or not backup.is_file():return False
         try:
-            payload=json.loads(backup.read_bytes())
-            identity=payload.get('id_token_email','').lower() if isinstance(payload,dict) else ''
+            data=backup.read_bytes()
+            payload=json.loads(data)
+            identity=payload.get('id_token_email','') if isinstance(payload,dict) else ''
+            identity=identity.lower() if isinstance(identity,str) else ''
             if not identity or not isinstance(item.get('email'),str) or identity!=item['email'].lower():
                 return False
-            data=backup.read_bytes()
             temporary=token.with_name(f'.token-{time.time_ns()}.tmp')
             with temporary.open('xb') as stream:
                 os.fchmod(stream.fileno(),0o600);stream.write(data)
-            temporary.replace(token)
+            try:
+                os.link(temporary,token)
+            finally:
+                temporary.unlink(missing_ok=True)
             print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} restored missing CLI token for {key[:8]} from backup', flush=True)
             return True
         except (OSError,ValueError):return False
@@ -125,6 +129,10 @@ class OfficialRuntime:
         """Keep a private copy of the current validated token for recovery."""
         try:
             backup=self._token_backup(key);data=token.read_bytes()
+            payload=json.loads(data)
+            item=(self.settings() or {}).get("accounts",{}).get(key,{})
+            identity=payload.get("id_token_email") if isinstance(payload,dict) else None
+            if not isinstance(identity,str) or not identity or identity.lower()!=str(item.get("email", "")).lower():return
             if backup.is_symlink() or (backup.is_file() and backup.read_bytes()==data):return
             backup.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
             temporary=backup.with_name(f'.{time.time_ns()}.tmp')
@@ -146,14 +154,11 @@ class OfficialRuntime:
             if not self._restore_token(key,token,item):return None
         try:
             payload=json.loads(token.read_text())
-            identity=payload.get('id_token_email','').lower() if isinstance(payload,dict) else ''
+            identity=payload.get('id_token_email','') if isinstance(payload,dict) else ''
+            identity=identity.lower() if isinstance(identity,str) else ''
         except (OSError,ValueError):
-            # Half-written by an interrupted refresh: recover from the last backup.
-            if not self._restore_token(key,token,item):return None
-            try:
-                payload=json.loads(token.read_text())
-                identity=payload.get('id_token_email','').lower() if isinstance(payload,dict) else ''
-            except (OSError,ValueError):return None
+            # An existing partial file may be undergoing a live CLI refresh.
+            return None
         if not isinstance(item.get('email'),str) or identity!=item['email'].lower():return None
         if token.stat().st_size>100000:return None
         policy=json.loads(settings.read_text())
