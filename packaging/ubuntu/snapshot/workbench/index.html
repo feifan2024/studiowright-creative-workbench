@@ -263,7 +263,7 @@
           <div class="page-heading api-page-heading"><div><div class="eyebrow"><span></span> API / INTEGRATION</div><h1 id="apiHeading">API 文档</h1><p>查看请求地址、参数和返回结果。</p></div><div class="api-page-actions"><button id="apiCopyAll" class="button button-primary" type="button">一键复制完整文档</button><span id="apiCopyAllStatus" role="status" aria-live="polite"></span></div></div>
           <div class="api-intro"><div><span class="api-intro-label">创作工作台 · 统一接口</span><h2>请求与返回</h2><p>工作台按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow；音乐生成走音乐服务。不会根据正文改派通道。以上功能使用同一把工作台密钥，无需 Google API 密钥。</p></div><div class="api-base"><span>统一 API 地址</span><code>http://127.0.0.1:18922</code><small>当前电脑或已建立转发的客户端</small></div></div>
           <section class="api-key-manager" aria-labelledby="api-key-heading"><div class="api-key-heading"><div><span class="api-intro-label">API KEYS</span><h2 id="api-key-heading">密钥管理</h2><p>同一把密钥可调用本页所有需要鉴权的接口。</p></div></div><form id="apiKeyForm" class="api-key-form"><label for="apiKeyName">密钥名称</label><input id="apiKeyName" maxlength="48" required placeholder="例如：视频制作项目" autocomplete="off"><button id="apiKeyCreate" class="button button-primary" type="submit">创建密钥</button></form><p id="apiKeyStatus" class="api-key-status" role="status" aria-live="polite">正在读取密钥…</p><div id="apiKeyList" class="api-key-list"></div></section>
-          <nav class="api-jump" aria-label="API 文档目录"><button type="button" data-api-target="api-start">请求准备</button><button type="button" data-api-target="api-reasoning">对话与推理</button><button type="button" data-api-target="api-gemini-vision">上传图片并识别</button><button type="button" data-api-target="api-aigc">生成图片或视频</button><button type="button" data-api-target="api-reference">结果与下载</button></nav>
+          <nav class="api-jump" aria-label="API 文档目录"><button type="button" data-api-target="api-start">请求准备</button><button type="button" data-api-target="api-reasoning">对话与推理</button><button type="button" data-api-target="api-gemini-vision">上传图片并识别</button><button type="button" data-api-target="api-aigc">生成图片或视频</button><button type="button" data-api-target="api-music">音乐生成与音频</button><button type="button" data-api-target="api-reference">结果与下载</button></nav>
           <div class="api-main">
             <section class="api-panel" aria-labelledby="api-start">
               <div class="api-heading"><span>01</span><div><h2 id="api-start" tabindex="-1">请求准备</h2></div></div>
@@ -354,29 +354,7 @@ payload = {
 print(call("/api/real-pool/flow-validate", payload, rid))
 # 正式提交：将 confirm 改成 True，再调用 /api/real-pool/flow。</code></pre>
             </section>
-            <section class="api-panel" aria-labelledby="api-reference">
-              <div class="api-heading"><span>05</span><div><h2 id="api-reference" tabindex="-1">结果与下载</h2></div></div>
-              <div class="api-endpoint"><b>GET</b><code>/api/real-pool/requests/{请求编号}</code><span>查询文字或识图。status 为 completed 时，response 是回复；处理中继续查，失败或未知时读 note。</span></div>
-              <div class="api-endpoint"><b>GET</b><code>/api/real-pool/flow-requests/{请求编号}</code><span>查询提交记录。task_id 始终是原任务号，task 是最新执行结果。</span></div>
-              <div class="api-endpoint"><b>GET</b><code>/api/tasks/{原任务编号}</code><span>直接查询最新状态和下载路径，换号重试后仍用原任务号。</span></div>
-              <div class="api-endpoint"><b>GET</b><code>/api/tasks/{任务编号}/files/{序号}</code><span>下载生成文件。使用任务的 downloads[].path，带同一密钥，返回文件字节。</span></div>
-              <div class="api-code-head"><span>复制查询与下载</span><button type="button" data-copy-code="api-code-result">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-result"># rid 为发送时保存的编号。查文字或识图：
-# print(call("/api/real-pool/requests/" + rid))
-record = call("/api/real-pool/flow-requests/" + rid)
-print(record)
-if record.get("task_id"):
-    task = call("/api/tasks/" + record["task_id"])
-    if task:
-        print(task["status"])
-        for item in task["downloads"]:
-            with HTTP.open(Request(BASE + item["path"], headers=AUTH), timeout=180) as res:
-                with open(Path(item["name"]).name, "xb") as output:
-                    while chunk := res.read(65536):
-                        output.write(chunk)</code></pre>
-              <p>已入库素材：<code>GET /api/library?page=1&amp;limit=24</code> 查列表，<code>GET /api/library/{素材ID}</code> 查详情，<code>GET /api/library/{素材ID}/file</code> 下载原文件。</p>
-              <p>错误通常返回 <code>{"error":"原因"}</code>。<code>401</code> 检查密钥，<code>400</code> 检查请求参数，<code>404</code> 核对路径或编号。<code>GET /health</code> 检查 API 是否可访问，无需密钥。</p>
-            </section>
-            <section class="api-panel" id="apiMusic"><div class="api-heading"><h2>音乐 · 生成、标签与下载</h2><p>使用同一工作台密钥和 18922 端口；音乐独立生成，不改派其他通道。</p></div>
+            <section class="api-panel" aria-labelledby="api-music"><div class="api-heading"><span>05</span><div><h2 id="api-music" tabindex="-1">音乐生成与音频</h2><p>在 18922 端口提交音乐生成任务、查询进度，并从素材库筛选和下载音频。沿用工作台密钥。</p></div></div>
               <div class="api-endpoint"><b>POST</b><code>/api/music/jobs</code><span>返回202和job。request_id 必填 UUID，保存后用于查询；Idempotency-Key 如传入必须一致。</span></div>
               <div class="api-endpoint"><b>GET</b><code>/api/music/jobs/{request_id}</code><span>只查询原任务，不重新生成；不存在返回404。</span></div>
               <p>prompt：1～2000字。model：lyria-fast（默认，Lyria 3.5 Fast）、lyria（Lyria 3.5）、lyria-pro（Lyria 3 Pro）、lyria-pro-fast（Lyria 3 Pro Fast）。时长写进提示词，不保证精确时长。</p>
@@ -413,8 +391,31 @@ if job[&quot;status&quot;] == &quot;completed&quot;:
                 with open(f&quot;{rid}-{i}.audio&quot;, &quot;xb&quot;) as output:
                     while chunk := res.read(65536):
                         output.write(chunk)
-query = urlencode({&quot;kind&quot;: &quot;audio&quot;, &quot;tag&quot;: &quot;钢琴&quot;, &quot;style_id&quot;: &quot;STYLE-001&quot;})
+query = urlencode({&quot;kind&quot;: &quot;audio&quot;, &quot;audio_category&quot;: &quot;music&quot;,
+                   &quot;duration_min&quot;: 30, &quot;duration_max&quot;: 65, &quot;tag&quot;: &quot;钢琴&quot;, &quot;style_id&quot;: &quot;STYLE-001&quot;})
 print(call(&quot;/api/library?&quot; + query))</code></pre>
+            </section>
+            <section class="api-panel" aria-labelledby="api-reference">
+              <div class="api-heading"><span>06</span><div><h2 id="api-reference" tabindex="-1">结果与下载</h2></div></div>
+              <div class="api-endpoint"><b>GET</b><code>/api/real-pool/requests/{请求编号}</code><span>查询文字或识图。status 为 completed 时，response 是回复；处理中继续查，失败或未知时读 note。</span></div>
+              <div class="api-endpoint"><b>GET</b><code>/api/real-pool/flow-requests/{请求编号}</code><span>查询提交记录。task_id 始终是原任务号，task 是最新执行结果。</span></div>
+              <div class="api-endpoint"><b>GET</b><code>/api/tasks/{原任务编号}</code><span>直接查询最新状态和下载路径，换号重试后仍用原任务号。</span></div>
+              <div class="api-endpoint"><b>GET</b><code>/api/tasks/{任务编号}/files/{序号}</code><span>下载生成文件。使用任务的 downloads[].path，带同一密钥，返回文件字节。</span></div>
+              <div class="api-code-head"><span>复制查询与下载</span><button type="button" data-copy-code="api-code-result">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-result"># rid 为发送时保存的编号。查文字或识图：
+# print(call("/api/real-pool/requests/" + rid))
+record = call("/api/real-pool/flow-requests/" + rid)
+print(record)
+if record.get("task_id"):
+    task = call("/api/tasks/" + record["task_id"])
+    if task:
+        print(task["status"])
+        for item in task["downloads"]:
+            with HTTP.open(Request(BASE + item["path"], headers=AUTH), timeout=180) as res:
+                with open(Path(item["name"]).name, "xb") as output:
+                    while chunk := res.read(65536):
+                        output.write(chunk)</code></pre>
+              <p>已入库素材：<code>GET /api/library?page=1&amp;limit=24</code> 查列表，<code>GET /api/library/{素材ID}</code> 查详情，<code>GET /api/library/{素材ID}/file</code> 下载原文件。</p>
+              <p>错误通常返回 <code>{"error":"原因"}</code>。<code>401</code> 检查密钥，<code>400</code> 检查请求参数，<code>404</code> 核对路径或编号。<code>GET /health</code> 检查 API 是否可访问，无需密钥。</p>
             </section>
           </div>
           <dialog id="apiKeyDialog" class="api-copy-dialog api-key-dialog" aria-labelledby="apiKeyDialogHeading"><h2 id="apiKeyDialogHeading">密钥创建成功</h2><p id="apiKeyDialogHelp">密钥已加密保存，以后可在列表中再次复制。</p><label for="apiKeySecret">密钥</label><textarea id="apiKeySecret" readonly rows="2"></textarea><div class="api-key-dialog-actions"><button id="apiKeyCopy" class="button button-primary" type="button">复制密钥</button><button id="apiKeyDone" class="button button-light" type="button">完成</button></div><p id="apiKeyCopyStatus" role="status" aria-live="polite"></p></dialog>

@@ -370,7 +370,16 @@ function syncQuickGeminiControls() {
 const workViews = new Set(["tasks", "conversations", "music"]);
 let lastWorkView = "tasks";
 
+function focusApiSection(id) {
+  const target = $(id);
+  if (!target) return;
+  target.scrollIntoView({block: 'start'});
+  target.focus({preventScroll: true});
+}
+
 function setView(view) {
+  const apiTarget = view === 'api-music' ? view : null;
+  if (apiTarget) view = 'api';
   if (view === "work") view = lastWorkView;
   if (!["overview", "accounts", "projects", "tasks", "records", "music", "conversations", "library", "api"].includes(view)) view = "overview";
   if (view === 'tasks' && state.view !== 'tasks') $('taskWindowsPanel').open = false;
@@ -390,8 +399,11 @@ function setView(view) {
     button.classList.toggle("active", selected);
     if (selected) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
   });
-  history.replaceState(null, "", view === "overview" ? "/" : `/#${view}`);
+  history.replaceState(null, "", view === "overview" ? "/" : `/#${apiTarget || view}`);
   window.scrollTo({ top: 0, behavior: "auto" });
+  if (apiTarget) requestAnimationFrame(() => {
+    if (state.view === 'api' && location.hash === '#' + apiTarget) focusApiSection(apiTarget);
+  });
   if (view === 'projects') lastProjectCountsRead = 0;
   if (state.snapshot) renderVisibleSnapshot(true);
   scheduleRecentTasks(true);
@@ -4474,10 +4486,8 @@ document.querySelectorAll("[data-view]").forEach((button) => button.addEventList
   setView(button.dataset.view);
 }));
 document.querySelectorAll('[data-api-target]').forEach((button) => button.addEventListener('click', () => {
-  const target = $(button.dataset.apiTarget);
-  if (!target) return;
-  target.scrollIntoView({block: 'start'});
-  target.focus({preventScroll: true});
+  history.replaceState(null, '', button.dataset.apiTarget === 'api-music' ? '/#api-music' : '/#api');
+  focusApiSection(button.dataset.apiTarget);
 }));
 document.querySelectorAll('[data-copy-code]').forEach((button) => button.addEventListener('click', async () => {
   const source = $(button.dataset.copyCode);
