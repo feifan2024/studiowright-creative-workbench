@@ -10,6 +10,30 @@ import uuid
 from music_metadata import validate_metadata, attach_metadata
 
 
+def recent_music_jobs(state):
+    """Read recent records without starting job recovery or changing state."""
+    path = Path(state).resolve() / "music-jobs.sqlite3"
+    if not path.is_file():
+        return []
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            "SELECT id,prompt,model,status,error,created,result FROM jobs ORDER BY created DESC,id DESC LIMIT 50"
+        ).fetchall()
+    records = []
+    for row in rows:
+        record = dict(row)
+        result = json.loads(record.pop("result") or "null") or {}
+        record["clips"] = len(result.get("clips") or [])
+        record["assets"] = [
+            {"id": item["asset_id"], "kind": item.get("kind")}
+            for item in (result.get("library") or []) if item.get("ok") and item.get("asset_id")
+        ]
+        record["note"] = record.pop("error") or result.get("ingest_error") or ""
+        records.append(record)
+    return records
+
+
 class MusicJobs:
     def __init__(self, state, generate, ingest, paused=lambda:False, recover=None):
         self.path=Path(state)/'music-jobs.sqlite3'

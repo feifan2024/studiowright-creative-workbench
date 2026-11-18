@@ -1270,7 +1270,7 @@ def music_library_ingest(clips):
 
 def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
     from task_feed import TaskFeed
-    from music_jobs import MusicJobs
+    from music_jobs import MusicJobs, recent_music_jobs
     from music_readiness import MusicReadiness
     from contextlib import closing
     def music_busy():
@@ -1425,6 +1425,12 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 if real_pool and data.get('available'):
                     data['account_order'] = real_pool.official.saved_account_order()
                 return self.json_response(200 if data.get('available') else 503, data)
+            if self.path == '/api/music/records':
+                state_dir = real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench'
+                try:
+                    return self.json_response(200, {'items': recent_music_jobs(state_dir)})
+                except (OSError, sqlite3.Error, ValueError):
+                    return self.json_response(503, {'error': '音乐生成记录暂时无法读取。'})
             if self.path == '/api/music/jobs/latest':
                 return self.json_response(200, {'job':get_music_jobs().latest()})
             if self.path.startswith('/api/music/jobs/'):

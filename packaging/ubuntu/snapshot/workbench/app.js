@@ -463,9 +463,46 @@ $('geminiShowChecks')?.addEventListener('change',async ()=>{
   if (geminiRecordLoad) await geminiRecordLoad;
   void refreshGeminiRecords();
 });
+let musicRecordLoad = null;
+async function refreshMusicRecords() {
+  if (musicRecordLoad) return musicRecordLoad;
+  const summary = $('musicRecordSummary');
+  const table = $('musicRecordTable');
+  musicRecordLoad = (async () => {
+    try {
+      const {items} = await getJson('/api/music/records', {timeoutMs:8000});
+      const statuses = {generating:'生成中', ingesting:'入库中', recovering:'正在找回结果',
+        completed:'已完成', unknown:'结果待核对', failed:'失败'};
+      const rows = items.map(row => {
+        const downloads = row.assets.filter(asset => /^[0-9a-f]{64}$/.test(asset.id))
+          .map((asset, index) => `<a class="text-link" href="/api/library/${asset.id}/file?download=1" download>${asset.kind === 'wav' ? 'WAV' : '音频'} ${index + 1}</a>`).join(' · ');
+        const result = row.clips ? `${row.clips} 首 · 入库 ${row.assets.length} 件` : '—';
+        const description = row.prompt.length > 80 ? row.prompt.slice(0, 80) + '…' : row.prompt;
+        return `<tr><td title="${esc(row.prompt)}">${esc(description)}</td><td>${esc(row.model)}</td>
+          <td>${esc(statuses[row.status] || '状态待核对')}</td><td>${esc(dateTime(row.created))}</td>
+          <td><code>${esc(row.id)}</code></td><td>${result}${row.note ? '<br>' + esc(row.note) : ''}
+          ${downloads ? '<br>' + downloads : ''}</td></tr>`;
+      }).join('');
+      const markup = rows ? `<table><thead><tr><th>描述</th><th>模型</th><th>状态</th><th>提交时间</th><th>请求编号</th><th>结果</th></tr></thead><tbody>${rows}</tbody></table>`
+        : empty('还没有音乐生成记录');
+      if (table.innerHTML !== markup) table.innerHTML = markup;
+      summary.textContent = `最近 ${items.length} 条音乐请求`;
+    } catch (_) {
+      summary.textContent = '音乐生成记录暂时无法读取。';
+    }
+  })().finally(() => { musicRecordLoad = null; });
+  return musicRecordLoad;
+}
+
+const recordsTabs = [
+  ['flow','flowRecordsTab','taskRecords'],
+  ['gemini','geminiRecordsTab','geminiRecords'],
+  ['music','musicRecordsTab','musicRecords']
+];
+
 function selectRecordsTab(tab, focus=false) {
   recordsTab=tab;
-  for (const [name,id,panel] of [['flow','flowRecordsTab','taskRecords'],['gemini','geminiRecordsTab','geminiRecords']]) {
+  for (const [name,id,panel] of recordsTabs) {
     const selected=name===tab;
     const tabEl=$(id),panelEl=$(panel);
     if (!tabEl || !panelEl) continue;
@@ -475,18 +512,23 @@ function selectRecordsTab(tab, focus=false) {
     if (selected && focus) tabEl.focus();
   }
   if (tab==='gemini') void refreshGeminiRecords();
+  if (tab==='music') void refreshMusicRecords();
 }
-for (const [name,id] of [['flow','flowRecordsTab'],['gemini','geminiRecordsTab']]) {
+for (const [index,[name,id]] of recordsTabs.entries()) {
   $(id)?.addEventListener('click',()=>selectRecordsTab(name));
   $(id)?.addEventListener('keydown',event=>{
     if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
     event.preventDefault();
-    selectRecordsTab(event.key==='Home'?'flow':event.key==='End'?'gemini':name==='flow'?'gemini':'flow',true);
+    const last = recordsTabs.length - 1;
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? last
+      : (index + (event.key === 'ArrowRight' ? 1 : last)) % recordsTabs.length;
+    selectRecordsTab(recordsTabs[next][0],true);
   });
 }
 
 function syncVisiblePage(view, background) {
   if (view==='records' && recordsTab==='gemini') void refreshGeminiRecords();
+  if (view==='records' && recordsTab==='music') void refreshMusicRecords();
   if (view==='music' || view==='overview') void refreshMusicStatus();
   const read = (key, fn) => {
     if (viewReads.has(key)) return;
