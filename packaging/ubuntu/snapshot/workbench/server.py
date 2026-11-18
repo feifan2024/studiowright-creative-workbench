@@ -1198,12 +1198,17 @@ def music_service_status():
                                'ready': bool(row.get('is_active')) and str(row.get('at_expires') or '') > now_utc}
                               for row in rows if isinstance(row, dict)]
     except (OSError, ValueError, KeyError) as exc:
+        status['available'] = False
         status['reason'] = f'音乐服务暂不可读取：{exc}'
     return status
 
 
 def music_generate(prompt, model):
-    prompt = (prompt or '').strip()
+    if not isinstance(prompt, str):
+        raise ValueError('请填写音乐描述。')
+    if model is not None and not isinstance(model, str):
+        raise ValueError('音乐模型不正确。')
+    prompt = prompt.strip()
     if not prompt:
         raise ValueError('请填写音乐描述。')
     if len(prompt) > 2000:
