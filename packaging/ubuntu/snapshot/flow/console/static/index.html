@@ -1,9 +1,17 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>StudioWright · 管理后台</title><link rel="stylesheet" href="/static/style.css?v=20261031-insights-1"><script defer src="/static/library-tools.js?v=multidim-1"></script><script defer src="/static/account-insights.js?v=20261031-insights"></script><script defer src="/static/app.js?v=20261031-insights-1"></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>StudioWright · 管理后台</title><link rel="stylesheet" href="/static/style.css?v=20261031-insights-1"><script defer src="/static/library-tools.js?v=multidim-1"></script><script defer src="/static/account-insights.js?v=20261031-insights"></script><script defer src="/static/app.js?v=20261118-chrome-import"></script></head>
 <body>
-<a class="skip" href="#main">跳到主要内容</a>
-<aside class="sidebar">
+<main id="chromeImport" hidden>
+  <section class="connect-panel" aria-labelledby="chromeImportTitle">
+    <h1 id="chromeImportTitle">导入 Flow 账号</h1>
+    <p id="chromeImportStatus" role="status" aria-live="polite">正在读取导入请求…</p>
+    <p id="chromeImportHelp" class="hint"></p>
+    <a id="chromeImportReturn" href="http://127.0.0.1:18920/#accounts" hidden>返回创作工作台的账号管理 →</a>
+  </section>
+</main>
+<a class="skip" id="legacySkip" hidden href="#main">跳到主要内容</a>
+<aside class="sidebar" id="legacySidebar" hidden>
   <a class="brand" href="/" aria-label="StudioWright 首页"><span class="brandmark">S<span>W</span></span><span>StudioWright<small>创作管理后台</small></span></a>
   <div class="nav-caption">工作空间</div>
   <nav aria-label="主要导航">
@@ -16,7 +24,7 @@
   </nav>
   <div class="sidebar-bottom"><span class="dot"></span> Ubuntu 执行端<small>StudioWright 原版引擎<br><span id="sourceVersion">0.2.12</span> · 独立部署</small></div>
 </aside>
-<div class="workspace">
+<div class="workspace" id="legacyWorkspace" hidden>
   <header class="topbar"><span>工作空间 <span class="slash">/</span> <b id="breadcrumb">工作台</b></span><div><span class="connection" id="connection">正在连接…</span><button class="quiet" id="webAuthSettings" hidden>后台账号密码</button><button class="quiet" id="logout">退出后台</button></div></header>
   <main id="main" tabindex="-1">
     <section id="connectPanel" hidden class="connect-panel"><span class="eyebrow">连接管理后台</span><h1>登录 StudioWright</h1><p id="loginHint">使用独立的后台账号密码登录，与 Google 账号无关。</p><form id="webLoginForm"><label>后台账号<input id="webLoginUsername" autocomplete="username" maxlength="64" required></label><label>后台密码<input id="webLoginPassword" type="password" autocomplete="current-password" maxlength="200" required></label><label><input id="webLoginRemember" type="checkbox" checked> 记住登录 30 天（仅在自己的电脑勾选）</label><button class="primary" type="submit">登录后台</button></form><p id="connectError" class="error-text" role="alert"></p></section>

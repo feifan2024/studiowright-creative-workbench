@@ -128,7 +128,20 @@ async function loadWebAuthStatus(){try{const status=await api('/api/auth/status'
 $('webLoginForm').onsubmit=async e=>{e.preventDefault();await withButton(e.submitter,async()=>{try{await api('/api/auth/login',{username:$('webLoginUsername').value.trim(),password:$('webLoginPassword').value,remember:$('webLoginRemember').checked});$('webLoginPassword').value='';$('connectError').textContent='';await refresh(true);}catch(e){$('connectError').textContent=e.message;}});};
 $('webAuthSettings').onclick=async()=>{const configured=await loadWebAuthStatus();$('webAuthForm').reset();$('webAuthError').textContent='';$('webAuthCurrentLabel').hidden=!configured;$('webAuthCurrent').required=!!configured;$('webAuthTitle').textContent=configured?'修改后台账号密码':'首次设置后台账号密码';$('webAuthDialog').showModal();};
 $('webAuthForm').onsubmit=async e=>{e.preventDefault();if($('webAuthPassword').value!==$('webAuthConfirm').value){$('webAuthError').textContent='两次新密码不一致。';return;}await withButton(e.submitter,async()=>{try{await api('/api/auth/settings',{username:$('webAuthUsername').value.trim(),password:$('webAuthPassword').value,current_password:$('webAuthCurrent').value});$('webAuthForm').reset();$('webAuthDialog').close();await loadWebAuthStatus();toast('后台登录已保存，其他浏览器现在可用账号密码登录。');}catch(e){$('webAuthError').textContent=e.message;}});};
-async function start(){const localJob=new URLSearchParams(location.hash.slice(1)).get('chrome-job');if(localJob)runChromeJob(localJob);if(location.hash.startsWith('#connect='))history.replaceState(null,'',location.pathname);await refresh(true);if(!data){connected(false);$('webLoginForm').hidden=true;$('loginHint').textContent='后台连接暂未恢复，请稍后刷新页面，无需账号密码。';}setInterval(()=>{if(!document.hidden)refresh(true);},3000);}
+async function start(){
+ const params=new URLSearchParams(location.hash.slice(1));
+ if(params.has('chrome-job')){
+  document.title='导入 Flow 账号 · StudioWright';
+  $('chromeImport').hidden=false;
+  await runChromeJob(params.get('chrome-job'));
+  return;
+ }
+ for(const id of ['legacySkip','legacySidebar','legacyWorkspace'])$(id).hidden=false;
+ if(location.hash.startsWith('#connect='))history.replaceState(null,'',location.pathname);
+ await refresh(true);
+ if(!data){connected(false);$('webLoginForm').hidden=true;$('loginHint').textContent='后台连接暂未恢复，请稍后刷新页面，无需账号密码。';}
+ setInterval(()=>{if(!document.hidden)refresh(true);},3000);
+}
 start();
 let libraryPage=1, libraryRequest=0, selectedMaterial=null;
 const fileSize = n => n>=1024**3?(n/1024**3).toFixed(1)+' GB':n>=1024**2?(n/1024**2).toFixed(1)+' MB':Math.ceil(n/1024)+' KB';
@@ -182,19 +195,54 @@ setupAccountInsights();
 
 function pluginCommand(id,message,timeout=15000){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('插件响应超时')),timeout);try{if(!globalThis.chrome?.runtime?.sendMessage)throw Error('当前窗口尚未接通插件');chrome.runtime.sendMessage(id,message,result=>{clearTimeout(timer);const error=chrome.runtime.lastError;if(error)reject(Error('插件未接通，请安装或重新加载 1.4.2'));else if(!result?.ok)reject(Error(result?.error||'插件未响应'));else resolve(result);});}catch(e){clearTimeout(timer);reject(e);}});}
 async function runChromeJob(nonce){
- if(!/^[A-Za-z0-9_-]{40,60}$/.test(nonce))return;
+ const statusText=$('chromeImportStatus');
+ const help=$('chromeImportHelp');
+ const back=$('chromeImportReturn');
+ function showResult(message, confirmed=false){
+  statusText.textContent=message;
+  help.textContent=confirmed?'即将返回创作工作台的账号管理。':'可返回创作工作台查看账号状态。';
+  back.hidden=false;
+  if(confirmed)setTimeout(()=>location.replace(back.href),1400);
+ }
+ if(!/^[A-Za-z0-9_-]{40,60}$/.test(nonce)){
+  showResult('导入链接无效，请从账号管理重新发起。');
+  return;
+ }
  const base='http://127.0.0.1:18890/api/job/'+nonce;
- async function report(status,message){await fetch(base,{method:'POST',headers:{'Content-Type':'application/json','X-Console-Request':'1'},body:JSON.stringify({status,message})});}
+ async function report(status,message){
+  const response=await fetch(base,{method:'POST',headers:{'Content-Type':'application/json','X-Console-Request':'1'},body:JSON.stringify({status,message})});
+  if(!response.ok)throw Error((await response.json()).error||'无法更新本机导入状态');
+ }
+ let started=false;
  try{
-  const response=await fetch(base);const job=await response.json();if(!response.ok)throw Error(job.error);
-  if(['succeeded','running'].includes(job.status))return;
-  $('pluginPairDialog').showModal();$('pluginPairStatus').textContent='本次勾选的 Chrome 用户：'+job.profile+'。正在等待插件…';$('pluginPairHelp').textContent='未安装或旧版插件，请打开此用户的扩展管理页，安装／重新加载 1.4.2；完成后这里会自动继续。';
-  let ready=false;for(let i=0;i<75;i++){try{await pluginCommand('kbnibljeinmjmmpholicjkaiehmilbbk',{action:'sw_probe'},3000);ready=true;break;}catch(e){await report('waiting',e.message);await new Promise(r=>setTimeout(r,8000));}}
+  const response=await fetch(base);
+  const job=await response.json();
+  if(!response.ok)throw Error(job.error||'无法读取本机导入请求');
+  if(job.status!=='waiting'){
+   showResult(job.message||'请在账号管理中查看本次同步状态。',job.status==='succeeded');
+   return;
+  }
+  started=true;
+  statusText.textContent='正在连接 Chrome 插件（'+job.profile+'）…';
+  help.textContent='如尚未安装插件，请在此 Chrome 用户下安装或重新加载插件。连接成功后会自动继续。';
+  let ready=false;
+  for(let i=0;i<75;i++){
+   try{await pluginCommand('kbnibljeinmjmmpholicjkaiehmilbbk',{action:'sw_probe'},3000);ready=true;break;}
+   catch(e){await report('waiting',e.message);await new Promise(resolve=>setTimeout(resolve,8000));}
+  }
   if(!ready)throw Error('等待插件超过 10 分钟，请安装后从本机账号管理重新同步。');
-  const config=await api('/api/bridge/pair',{});await pluginCommand(config.extensionId,{action:'sw_pair',config});
-  await report('running','插件已连接，正在采集并等待 Ubuntu 核对');$('pluginPairStatus').textContent='插件已连接，正在同步 Google／Flow 登录资料，并由 Ubuntu 核对实际邮箱…';
+  const config=await api('/api/bridge/pair',{});
+  await pluginCommand(config.extensionId,{action:'sw_pair',config});
+  await report('running','插件已连接，正在同步并核对账号');
+  statusText.textContent='正在同步 Flow 登录并核对实际邮箱…';
+  help.textContent='请保持此窗口打开，直到显示导入结果。';
   const result=await pluginCommand(config.extensionId,{action:'sw_sync'},180000);
-  const confirmed=(result.message||'').startsWith('Ubuntu 登录核对成功：');
-  await report(confirmed?'succeeded':'running',result.message||'后台仍在核对，请查看任务队列');$('pluginPairStatus').textContent=result.message||'后台仍在核对，请查看任务队列';$('pluginPairHelp').textContent='只同步登录，不创建项目、不提交生成。';history.replaceState(null,'',location.pathname);await refresh(true);
- }catch(e){$('pluginPairStatus').textContent='本次同步未完成：'+e.message;try{await report('failed',e.message);}catch{}}
+  const message=result.message||'后台仍在核对，请在创作工作台的任务队列查看。';
+  const confirmed=message.startsWith('Ubuntu 登录核对成功：');
+  await report(confirmed?'succeeded':'running',message);
+  showResult(message,confirmed);
+ }catch(e){
+  showResult('本次同步未完成：'+e.message);
+  if(started)try{await report('failed',e.message);}catch{}
+ }
 }
