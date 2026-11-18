@@ -289,3 +289,7 @@ print(call("/api/library?" + query))
 ### 工作台内部兼容接口
 
 18920 同源接口仍校验 Origin 和 `X-Workbench-Request: 1`。工作台使用同一持久化任务逻辑；`GET /api/music/jobs/latest` 仅供页面恢复，旧同步 `/api/music/generate` 保留兼容但不开放到统一 API。重启恢复依据提交时间、完整提示词、模型和唯一上游回执；标签及画风 ID 从本地原任务恢复，不作为再次生成的理由。
+
+### 历史音乐标签补录
+
+维护工具 `workbench/music_tag_backfill.py <素材库library.db>` 默认只预览，`--apply` 才写入。执行前在线备份数据库。仅按 Flow Music 音频的已保存提示词追加缺少的 `music_prompt` 标签，旧记录去除标题前缀；不重生成、不改文件或原始来源，不改手动标签及画风 ID，手动编辑过关键词维度的素材跳过。重复执行不重复添加。

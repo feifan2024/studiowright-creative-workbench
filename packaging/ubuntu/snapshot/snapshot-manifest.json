@@ -182,5 +182,6 @@
   "workbench/music_recovery.py": "19cb86256f502fff5e26c3c322212689c76ecd94c777b33e90f8395e28aa5b50",
   "workbench/music_readiness.py": "a38a7bb28c9e7a89671ee94025ecb921eee2e479d3edde4e5b884d8aba2f85a3",
   "workbench/music_metadata.py": "81dcb26afcd13d3cb396a9147fc646ce46526b515cfbde868fc0374cbff2c1e2",
-  "flow/console/music_import.py": "e64236bbce3d25ae6bd6a8f0b03e6749f98b139cb0bbd9e12583aeee7cf7c799"
+  "flow/console/music_import.py": "e64236bbce3d25ae6bd6a8f0b03e6749f98b139cb0bbd9e12583aeee7cf7c799",
+  "workbench/music_tag_backfill.py": "f9c2299cae2eb75967df4381b8b2d7e3c3869095690d49cd7773b853524e0c57"
 }
