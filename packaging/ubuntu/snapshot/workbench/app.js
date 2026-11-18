@@ -2001,6 +2001,7 @@ function renderMusicJob(job) {
     $("musicResultSummary").textContent = `模型 ${result.model} · 完成 ${clips.length} 首 · 已进素材池 ${result.ingested ?? 0} 件${result.ingest_error ? "（" + result.ingest_error + "）" : ""} · ${dateTime(Date.now()/1000)}`;
     $("musicResult").innerHTML = clips.map(clip => `
       <div class="music-result-item"><strong>${esc(clip.title)}</strong>
+      <p>提示词标签：${esc((clip.auto_tags||[]).join("、"))} · 手动标签：<span style="white-space:pre-wrap">${esc((clip.tags||[]).join("、"))}</span>${typeof clip.style_id==="string" ? ` · 画风 ID：<code style="white-space:pre-wrap">${esc(clip.style_id)}</code>` : ""}</p>
       ${clip.audio_url ? `<audio controls preload="metadata" src="${esc(clip.audio_url)}"></audio>` : ''}
       <div>${clip.audio_url ? `<a class="text-link" href="${esc(clip.audio_url)}" download>下载音频</a>` : ''}${clip.wav_url ? ` <a class="text-link" href="${esc(clip.wav_url)}" download>下载 WAV</a>` : ''}${clip.cover_url ? ` <a class="text-link" href="${esc(clip.cover_url)}" target="_blank" rel="noopener noreferrer">封面</a>` : ''}</div></div>`).join('');
     $("musicResultPanel").hidden = false;
@@ -2027,7 +2028,9 @@ $("musicGenerate")?.addEventListener("click", async () => {
     localStorage.setItem('workbench.music.request',id);
     $("musicGenerate").disabled=true;
     $("musicStatus").textContent='正在提交音乐任务…';
-    const data = await postJson('/api/music/jobs',{request_id:id,prompt,model:$("musicModel").value});
+    const metadata={tags:$('musicTags').value.split(/\r?\n/).filter(t=>t.trim())};
+    if ($('musicStyleId').value!=='') metadata.style_id=$('musicStyleId').value;
+    const data = await postJson('/api/music/jobs',{request_id:id,prompt,model:$("musicModel").value,...metadata});
     renderMusicJob(data.job);
   } catch (error) {
     $("musicStatus").textContent=error.message || '提交结果待核对，不会重复发送。';
@@ -3418,15 +3421,18 @@ function materialValues(list) {
 }
 function materialTagGroups(item, compact = false) {
   const fields = {...item.structured_tags, ...item.shot_tags, custom: item.tags};
+  const styleIds=[...new Set((item.origins||[]).filter(o=>typeof o.style_id==='string').map(o=>o.style_id))];
   const labels = {...materialDimensions, ...extraDimensions, custom: '自定义'};
   const order = ['subject', 'scene', 'viewpoint', 'composition', 'movement', 'shot_size', 'action', 'style', 'camera', 'color', 'keywords', 'custom'];
   const rows = order.flatMap((key) => {
     if (key === 'movement' && item.media_type !== 'video') return [];
-    const values = materialValues(fields[key]);
+    const values = key==='custom' && item.media_type==='audio' ? (fields[key]||[]) : materialValues(fields[key]);
     if (!values.length) return [];
     return ['<div class="material-tag-row"><dt>' + esc(labels[key]) + '：</dt><dd>'
       + esc(values.join('、')) + '</dd></div>'];
   });
+  if (styleIds.length) rows.push('<div class="material-tag-row"><dt>画风 ID：</dt><dd style="white-space:pre-wrap">'+styleIds.map(esc).join('、')+'</dd></div>');
+  if (item.media_type==='audio' && (item.tag_sources||[]).some(t=>t.source==='music_prompt')) rows.push('<div class="subtle">自动标签来自生成要求，未做音频分析</div>');
   if (!rows.length) return '<p class="material-tag-empty">暂无标签</p>';
   const groups = (list, label) => '<dl class="material-tag-groups" aria-label="' + label + '">' + list.join('') + '</dl>';
   if (!compact) return groups(rows, '分类标签');
@@ -3458,6 +3464,7 @@ function materialCard(item) {
     + '">预览与管理 →</button><a href="' + url + '?download=1" download>下载</a></div></div></article>';
 }
 function updateLibraryFilters(data) {
+  updateOptions($('libraryTag'), '全部标签', data.tags || []);
   updateOptions($('libraryAccount'), '全部账号', data.accounts || []);
   for (const [key, label] of Object.entries(materialDimensions)) {
     updateOptions($('libraryFilter_' + key), '全部' + label, data.facets?.dimensions?.[key] || []);
@@ -3486,6 +3493,8 @@ async function loadLibrary({background = false} = {}) {
   const query = new URLSearchParams({page: String(libraryPage), limit: '12'});
   const text = $('librarySearch').value.trim();
   if (text) query.set('q', text);
+  if ($('libraryTag').value) query.set('tag',$('libraryTag').value);
+  if ($('libraryStyleId').value) query.set('style_id',$('libraryStyleId').value);
   if ($('libraryKind').value) query.set('kind', $('libraryKind').value);
   if ($('libraryAccount').value) query.set('account', $('libraryAccount').value);
   for (const key of Object.keys(materialDimensions)) {
@@ -3740,7 +3749,7 @@ function materialTagSources(item, extra) {
     if (!tag || typeof tag.dimension !== 'string' || typeof tag.value !== 'string') continue;
     known.add(tag.dimension + '\u0000' + tag.value);
     const matches = extra.analysis?.status === 'completed' && Array.isArray(extra.suggested?.[tag.dimension]) && extra.suggested[tag.dimension].includes(tag.value);
-    const group = tag.source === 'prompt_analysis' ? '提示词标签' : tag.source === 'visual_analysis' ? (matches ? '视觉分析（与 Gemini 结果一致）' : '视觉分析（来源待核实）') : '其他或来源未记录';
+    const group = ['prompt_analysis','music_prompt'].includes(tag.source) ? '提示词标签' : tag.source === 'visual_analysis' ? (matches ? '视觉分析（与 Gemini 结果一致）' : '视觉分析（来源待核实）') : '其他或来源未记录';
     groups[group].push((labels[tag.dimension] || tag.dimension) + '：' + tag.value);
   }
   for (const [key, values] of Object.entries(item.structured_tags || {})) {
@@ -4012,12 +4021,15 @@ $('libraryFind').addEventListener('click', () => { libraryPage = 1; loadLibrary(
 $('librarySearch').addEventListener('input', () => { libraryRequest++; });
 $('librarySearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); libraryPage = 1; loadLibrary(); } });
 $('libraryKind').addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
+$('libraryTag').addEventListener('change',()=>{libraryPage=1;loadLibrary();});
+$('libraryStyleId').addEventListener('change',()=>{libraryPage=1;loadLibrary();});
 $('libraryAccount').addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
 $('libraryDimensionFilters').addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
 $('librarySearchScope').addEventListener('change', () => {
   const extra = $('librarySearchScope').value === 'analysis';
   $('libraryKind').disabled = extra;
   $('libraryAccount').disabled = extra;
+  $('libraryTag').disabled=extra; $('libraryStyleId').disabled=extra;
   $('libraryDimensionFilters').querySelectorAll('select').forEach((control) => { control.disabled = extra; });
   libraryPage = 1; loadLibrary();
 });
@@ -4025,6 +4037,8 @@ $('libraryReset').addEventListener('click', () => {
   $('librarySearch').value = '';
   $('libraryKind').value = '';
   $('libraryAccount').value = '';
+  $('libraryTag').value=''; $('libraryStyleId').value='';
+  $('libraryTag').disabled=false; $('libraryStyleId').disabled=false;
   $('librarySearchScope').value = 'original';
   $('libraryKind').disabled = false;
   $('libraryAccount').disabled = false;

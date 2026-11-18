@@ -701,7 +701,7 @@ class Sources:
         item_path = re.fullmatch(r'/api/library/[0-9a-f]{64}(?:/(?:file|thumbnail|tags))?', path)
         allowed_query = {'q', 'kind', 'tag', 'account', 'page', 'limit', 'offset', 'subject', 'scene',
                          'action', 'style', 'camera', 'color', 'keywords', 'model', 'project_id', 'account_id',
-                         'created_from', 'created_to', 'index_status', 'storage_status', 'download'}
+                         'created_from', 'created_to', 'index_status', 'storage_status', 'download', 'style_id'}
         query = parse_qsl(parts.query, keep_blank_values=True, max_num_fields=30)
         if (parts.scheme or parts.netloc or parts.fragment or len(parts.query) > 3000
                 or any(k not in allowed_query or len(v) > 500 for k, v in query)
@@ -1483,7 +1483,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         kind = upstream.headers.get_content_type()
                         length = upstream.headers.get('Content-Length', '')
                         is_media = bool(re.fullmatch(r'/api/library/[0-9a-f]{64}/(?:file|thumbnail)', urlsplit(self.path).path))
-                        if is_media and status in (200, 206) and (kind.startswith('image/') or kind.startswith('video/')) and length.isdigit() and int(length) <= 1024**3:
+                        if is_media and status in (200, 206) and kind.startswith(('image/', 'video/', 'audio/')) and length.isdigit() and int(length) <= 1024**3:
                             self.send_response(status)
                             self.send_header('Content-Type', kind)
                             self.send_header('Content-Length', length)
@@ -1696,8 +1696,10 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     length=int(self.headers.get('Content-Length','0'))
                     if not 0 < length <= 16000:raise ValueError('请求大小不正确。')
                     body=json.loads(self.rfile.read(length))
-                    if not isinstance(body,dict):raise ValueError('请求格式不正确。')
-                    job=get_music_jobs().submit(body.get('request_id'),body.get('prompt'),body.get('model') or 'lyria-fast')
+                    if not isinstance(body,dict) or set(body)-{'request_id','prompt','model','tags','style_id'}:raise ValueError('请求格式不正确。')
+                    header_id=self.headers.get('Idempotency-Key')
+                    if header_id and header_id!=body.get('request_id'):raise ValueError('请求编号与 Idempotency-Key 不一致。')
+                    job=get_music_jobs().submit(body.get('request_id'),body.get('prompt'),body.get('model') or 'lyria-fast', {k:body[k] for k in ('tags','style_id') if k in body})
                     return self.json_response(202, {'job':job})
                 except (ValueError,TypeError) as exc:
                     return self.json_response(400, {'error':str(exc)})
@@ -1712,7 +1714,9 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 prompt = raw.get('prompt') if isinstance(raw,dict) else None
                 model = raw.get('model') if isinstance(raw,dict) else None
                 try:
-                    result = music_generate(prompt, model)
+                    from music_metadata import validate_metadata, attach_metadata
+                    metadata=validate_metadata({k:raw[k] for k in ('tags','style_id') if k in raw})
+                    result = attach_metadata(music_generate(prompt, model),prompt,model or 'lyria-fast','',metadata)
                 except ValueError as exc:
                     return self.json_response(400, {'error':str(exc)})
                 except (OSError,TimeoutError) as exc:
@@ -1720,7 +1724,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 # 自动送进素材池：失败不影响生成结果本身，仅附带提示。
                 try:
                     ingest = music_library_ingest(result['clips'])
-                    result['ingested'] = sum(1 for item in ingest.get('ingested', []) if item.get('ok'))
+                    result['library'] = ingest.get('ingested', [])
+                    result['ingested'] = sum(1 for item in result['library'] if item.get('ok'))
                 except (OSError, ValueError, KeyError) as exc:
                     result['ingested'] = 0
                     result['ingest_error'] = f'素材池登记未完成：{exc}'

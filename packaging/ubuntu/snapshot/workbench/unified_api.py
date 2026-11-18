@@ -23,6 +23,8 @@ def allowed_route(method, target):
     if len(target) > 3500:
         return None
     if method == 'GET':
+        if re.fullmatch(r'/api/music/jobs/[0-9a-f-]{36}', path):
+            return 'workbench'
         if path in ('/api/health', '/api/snapshot', '/api/conversations'):
             return 'workbench'
         if re.fullmatch(r'/api/(?:conversations|real-pool/requests|real-pool/flow-requests)/[0-9a-f-]{36}', path):
@@ -34,7 +36,7 @@ def allowed_route(method, target):
         if re.fullmatch(r'/api/tasks/[A-Za-z0-9_-]{1,128}(?:/files/[0-9]{1,4})?', path):
             return 'flow'
     if method == 'POST' and not parts.query:
-        if path in ('/api/conversations', '/api/real-pool/chat', '/api/real-pool/image-analysis',
+        if path in ('/api/music/jobs', '/api/conversations', '/api/real-pool/chat', '/api/real-pool/image-analysis',
                     '/api/real-pool/image-analysis-validate', '/api/real-pool/flow', '/api/real-pool/flow-validate'):
             return 'workbench'
         if FLOW_REFERENCE_UPLOAD.fullmatch(path):

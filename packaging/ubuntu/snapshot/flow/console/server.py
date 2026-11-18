@@ -932,7 +932,7 @@ def create_app(root, adapter, test=False):
                 model=p.get("model", ""), project_id=p.get("project_id", ""),
                 account_id=p.get("account_id", ""), created_from=p.get("created_from", ""),
                 created_to=p.get("created_to", ""), index_status=p.get("index_status", ""),
-                storage_status=p.get("storage_status", ""),
+                storage_status=p.get("storage_status", ""), style_id=p.get("style_id", ""),
                 limit=int(p.get("limit", "24")), offset=int(p["offset"]) if "offset" in p else None,
             )
             return JSONResponse(result)
@@ -988,7 +988,7 @@ def create_app(root, adapter, test=False):
                 if not isinstance(clip, dict):
                     continue
                 title = str(clip.get("title") or "未命名音乐").strip()[:120]
-                prompt = str(clip.get("prompt") or "").strip()[:500]
+                prompt = str(clip.get("prompt") or "")[:2000]
                 email = str(clip.get("email") or "").strip()[:120]
                 job_id = re.sub(r"[^0-9a-zA-Z/_-]", "", str(clip.get("job_id") or ""))[:80]
                 clip_id = re.sub(r"[^0-9a-zA-Z/_-]", "", str(clip.get("clip_id") or ""))[:80]
@@ -1008,12 +1008,11 @@ def create_app(root, adapter, test=False):
                         with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as tmp:
                             tmp.write(data)
                             tmp_path = Path(tmp.name)
-                        meta = {"source": "flow_music", "source_id": source_id, "media_type": "audio",
-                                "prompt": (title + "：" + prompt) if prompt else title,
-                                "account_email": email, "media_id": clip_id or source_id,
-                                "model": "flow-music", "created": time.time()}
-                        c.library.archive(tmp_path, meta)
-                        results.append({"source_id": source_id, "kind": kind, "title": title, "ok": True})
+                        from music_import import music_metadata
+                        meta = music_metadata(clip, title, prompt, source_id, clip_id, email)
+                        ident = c.library.archive(tmp_path, meta)
+                        results.append({"source_id": source_id, "kind": kind, "title": title, "ok": True,
+                                        "asset_id": ident, "path": f"/api/library/{ident}/file"})
                     finally:
                         if tmp_path is not None:
                             Path(tmp_path).unlink(missing_ok=True)
@@ -1086,7 +1085,7 @@ def create_app(root, adapter, test=False):
                 dimensions={d: p[d] for d in DIMENSIONS if d in p}, model=p.get("model", ""),
                 account_id=p.get("account_id", ""), project_id=p.get("project_id", ""),
                 created_from=p.get("created_from", ""), created_to=p.get("created_to", ""),
-                storage_status=p.get("storage_status", ""), index_status=p.get("index_status", ""),
+                storage_status=p.get("storage_status", ""), style_id=p.get("style_id", ""), index_status=p.get("index_status", ""),
                 limit=int(p.get("limit", "30")), offset=int(p.get("offset", "0")))
             return JSONResponse({"items": [legacy_item(i) for i in result["items"]], "total": result["total"], "limit": result["limit"], "offset": result["offset"]})
         except (ValueError, TypeError) as exc:

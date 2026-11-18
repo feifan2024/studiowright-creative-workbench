@@ -179,13 +179,14 @@
         </section>
 
         <section id="libraryView" class="view" aria-labelledby="libraryHeading" hidden>
-          <div class="page-heading library-page-heading"><div><div class="eyebrow"><span></span> MATERIAL LIBRARY</div><h1 id="libraryHeading">素材库</h1><p>集中查找、预览和管理你的图片与视频。</p></div><button id="libraryStorageOpen" class="button button-light" type="button">◫ 保存位置</button></div>
-          <section class="library-intro" aria-label="素材库概览"><div><span class="section-kicker">YOUR MATERIALS</span><h2>让每一份成果，都找得到。</h2><p>图片与视频保存在已有素材库，可以直接预览和下载；历史 Gemini 分析结果保留。</p></div><div class="library-stats"><strong id="libraryTotal">—<small>份已保存素材</small></strong><div id="libraryBreakdown">正在读取素材库…</div></div></section>
+          <div class="page-heading library-page-heading"><div><div class="eyebrow"><span></span> MATERIAL LIBRARY</div><h1 id="libraryHeading">素材库</h1><p>集中查找、预览和管理你的图片、视频与音乐。</p></div><button id="libraryStorageOpen" class="button button-light" type="button">◫ 保存位置</button></div>
+          <section class="library-intro" aria-label="素材库概览"><div><span class="section-kicker">YOUR MATERIALS</span><h2>让每一份成果，都找得到。</h2><p>图片、视频与音乐保存在已有素材库，可以直接预览和下载；历史 Gemini 分析结果保留。</p></div><div class="library-stats"><strong id="libraryTotal">—<small>份已保存素材</small></strong><div id="libraryBreakdown">正在读取素材库…</div></div></section>
           <section class="auto-analysis" hidden aria-label="素材自动分析"><div><strong>新素材自动分析</strong><p id="autoAnalysisStatus" role="status">正在读取设置…</p><small>使用已有 Gemini；只处理开启后的新素材，可能产生费用。补打会补充尚未进行 Gemini 分析的素材，保留已有标签；失败或结果未确认时不会自动重试。</small><p id="backfillStatus" role="status" aria-live="polite"></p><p id="backfillMessage" role="status" aria-live="polite"></p><div id="backfillIssues" aria-label="需要核对的素材"></div></div><div class="auto-analysis-actions"><button id="backfillOpen" class="button button-primary" type="button" disabled>读取中…</button><button id="backfillResume" class="button button-light" type="button" hidden>继续剩余素材</button><button id="autoAnalysisToggle" class="button button-light" type="button" disabled>读取中…</button></div></section>
           <details id="materialActivityPanel" class="panel list-panel"><summary><strong>Gemini 素材分析记录</strong> · 查看对应素材、调用账号和历史结果</summary><p class="panel-caption">按每次分析显示历史记录，账号来自该次请求；无法核实的信息会明确标出。点击素材可查看标签来源。</p><button id="materialActivityRefresh" class="button button-light" type="button">刷新分析记录</button><p id="materialActivityStatus" role="status"></p><div id="materialActivityList" class="table-wrap"></div><div class="library-pagination"><button id="materialActivityPrev" class="button button-light" type="button">← 上一页</button><span id="materialActivityPage"></span><button id="materialActivityNext" class="button button-light" type="button">下一页 →</button></div></details>
           <section class="library-filters" aria-label="素材筛选"><div class="library-filter-grid">
             <label class="library-query">搜索素材<input id="librarySearch" type="search" maxlength="500" placeholder="提示词、项目、模型或标签"></label>
             <label>素材类型<select id="libraryKind"><option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option></select></label>
+            <label>标签<select id="libraryTag"><option value="">全部标签</option></select></label><label>画风 ID<input id="libraryStyleId" maxlength="256" placeholder="精确匹配，可选"></label>
             <label>来源账号<select id="libraryAccount"><option value="">全部账号</option></select></label>
             <label>搜索范围<select id="librarySearchScope"><option value="original">素材与原标签</option><option value="analysis">Gemini 与补充标签</option></select></label>
             <button id="libraryFind" class="button button-primary" type="button">搜索</button>
@@ -240,6 +241,9 @@
               <select id="musicModel"><option value="lyria-fast">Lyria 3.5 Fast（快 · 省）</option><option value="lyria">Lyria 3.5</option><option value="lyria-pro">Lyria 3 Pro</option><option value="lyria-pro-fast">Lyria 3 Pro Fast</option></select>
               <label for="musicPrompt">描述（可写风格、情绪、乐器、歌词或时长，例如"无人声钢琴 BGM，约 1 分钟"）</label>
               <textarea id="musicPrompt" rows="4" maxlength="2000" placeholder="轻快的钢琴背景音乐，无人声，适合短视频背景"></textarea>
+              <label for="musicTags">手动标签（可选，每行一个，原样保存）</label><textarea id="musicTags" rows="2" placeholder="项目配乐&#10;片头备选"></textarea>
+              <label for="musicStyleId">画风 ID（可选，原样保存）</label><input id="musicStyleId" maxlength="256">
+              <p class="subtle">从描述自动提取风格、情绪和用途标签，表示生成要求，不代表音频已经分析。</p>
               <div class="music-form-actions"><button id="musicGenerate" class="button button-primary" type="button">生成音乐</button><span id="musicStatus" role="status" aria-live="polite"></span></div>
             </div>
           </section>
@@ -250,7 +254,7 @@
         </section>
         <section id="apiView" class="view api-view" aria-labelledby="apiHeading" hidden>
           <div class="page-heading api-page-heading"><div><div class="eyebrow"><span></span> API / INTEGRATION</div><h1 id="apiHeading">API 文档</h1><p>查看请求地址、参数和返回结果。</p></div><div class="api-page-actions"><button id="apiCopyAll" class="button button-primary" type="button">一键复制完整文档</button><span id="apiCopyAllStatus" role="status" aria-live="polite"></span></div></div>
-          <div class="api-intro"><div><span class="api-intro-label">创作工作台 · 统一接口</span><h2>请求与返回</h2><p>工作台只按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow。不会根据正文改派，也不会自动串联两条路线。两条路线使用同一把工作台密钥，无需 Google API 密钥。</p></div><div class="api-base"><span>统一 API 地址</span><code>http://127.0.0.1:18922</code><small>当前电脑或已建立转发的客户端</small></div></div>
+          <div class="api-intro"><div><span class="api-intro-label">创作工作台 · 统一接口</span><h2>请求与返回</h2><p>工作台按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow；音乐生成走音乐服务。不会根据正文改派通道。以上功能使用同一把工作台密钥，无需 Google API 密钥。</p></div><div class="api-base"><span>统一 API 地址</span><code>http://127.0.0.1:18922</code><small>当前电脑或已建立转发的客户端</small></div></div>
           <section class="api-key-manager" aria-labelledby="api-key-heading"><div class="api-key-heading"><div><span class="api-intro-label">API KEYS</span><h2 id="api-key-heading">密钥管理</h2><p>同一把密钥可调用本页所有需要鉴权的接口。</p></div></div><form id="apiKeyForm" class="api-key-form"><label for="apiKeyName">密钥名称</label><input id="apiKeyName" maxlength="48" required placeholder="例如：视频制作项目" autocomplete="off"><button id="apiKeyCreate" class="button button-primary" type="submit">创建密钥</button></form><p id="apiKeyStatus" class="api-key-status" role="status" aria-live="polite">正在读取密钥…</p><div id="apiKeyList" class="api-key-list"></div></section>
           <nav class="api-jump" aria-label="API 文档目录"><button type="button" data-api-target="api-start">请求准备</button><button type="button" data-api-target="api-reasoning">对话与推理</button><button type="button" data-api-target="api-gemini-vision">上传图片并识别</button><button type="button" data-api-target="api-aigc">生成图片或视频</button><button type="button" data-api-target="api-reference">结果与下载</button></nav>
           <div class="api-main">
@@ -364,6 +368,44 @@ if record.get("task_id"):
                         output.write(chunk)</code></pre>
               <p>已入库素材：<code>GET /api/library?page=1&amp;limit=24</code> 查列表，<code>GET /api/library/{素材ID}</code> 查详情，<code>GET /api/library/{素材ID}/file</code> 下载原文件。</p>
               <p>错误通常返回 <code>{"error":"原因"}</code>。<code>401</code> 检查密钥，<code>400</code> 检查请求参数，<code>404</code> 核对路径或编号。<code>GET /health</code> 检查 API 是否可访问，无需密钥。</p>
+            </section>
+            <section class="api-panel" id="apiMusic"><div class="api-heading"><h2>音乐 · 生成、标签与下载</h2><p>使用同一工作台密钥和 18922 端口；音乐独立生成，不改派其他通道。</p></div>
+              <div class="api-endpoint"><b>POST</b><code>/api/music/jobs</code><span>返回202和job。request_id 必填 UUID，保存后用于查询；Idempotency-Key 如传入必须一致。</span></div>
+              <div class="api-endpoint"><b>GET</b><code>/api/music/jobs/{request_id}</code><span>只查询原任务，不重新生成；不存在返回404。</span></div>
+              <p>prompt：1～2000字。model：lyria-fast（默认，Lyria 3.5 Fast）、lyria（Lyria 3.5）、lyria-pro（Lyria 3 Pro）、lyria-pro-fast（Lyria 3 Pro Fast）。时长写进提示词，不保证精确时长。</p>
+              <p>tags：可选字符串数组，最多30个，每个1～80字；style_id：可选1～256字非空字符串。手动标签和画风 ID 原样保存，不传照常生成入库。auto_tags 从提示词自动提取，表示生成要求，不代表音频分析；未识别内容不猜测，不调用额外模型，不覆盖手动标签。</p>
+              <p>状态：generating生成中、ingesting入库中、recovering恢复原任务、completed已取得结果、unknown待核对。同编号同内容只生成一次，修改标签或画风 ID 也算不同内容，返回400。断线、刷新和重启后只查询原编号，不自动重发。</p>
+              <p>result.clips：音频/WAV地址和标签；result.library：入库回执，含asset_id、path、kind、ok。result.ingested 是文件数。completed若带ingest_error或ingested=0，表示音乐已有结果但入库未完成，不能为了入库重复生成。</p>
+              <p>GET /api/library?kind=audio&amp;tag=钢琴 可筛选标签，叠加style_id精确筛选画风ID；参数使用URL编码。GET /api/library/{asset_id} 查详情，GET /api/library/{asset_id}/file 带同一密钥下载。优先使用入库路径，外部音频地址可能过期。</p>
+              <p>统一 API 不开放音乐账号管理、就绪操作、同步generate或jobs/latest。手动标签和画风 ID 保存在原任务，重启恢复不会丢失。</p>
+              <div class="api-code-head"><span>音乐生成、查询与下载示例（沿用公共准备）</span><button type="button" data-copy-code="api-code-music">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-music"># 沿用上文的 call、BASE、AUTH、HTTP。
+from urllib.parse import urlencode
+import time
+rid = str(uuid4())  # 保存此编号；网络中断后只查询它
+job = call(&quot;/api/music/jobs&quot;, {
+    &quot;request_id&quot;: rid,
+    &quot;prompt&quot;: &quot;轻快钢琴背景音乐，无人声，适合口播，约30秒&quot;,
+    &quot;model&quot;: &quot;lyria-fast&quot;,
+    &quot;tags&quot;: [&quot;项目A&quot;, &quot;片头备选&quot;],
+    &quot;style_id&quot;: &quot;STYLE-001&quot;
+}, rid)[&quot;job&quot;]
+for _ in range(180):
+    if job[&quot;status&quot;] in (&quot;completed&quot;, &quot;unknown&quot;):
+        break
+    time.sleep(5)
+    job = call(&quot;/api/music/jobs/&quot; + rid)[&quot;job&quot;]
+print(rid, job)
+# unknown 或仍在执行：保留 rid，稍后 GET；不要换编号重新生成。
+if job[&quot;status&quot;] == &quot;completed&quot;:
+    for i, item in enumerate(job[&quot;result&quot;].get(&quot;library&quot;, [])):
+        if item.get(&quot;ok&quot;) and item.get(&quot;path&quot;):
+            # path 为同一统一 API 的素材下载路径；格式见素材详情 mime。
+            with HTTP.open(Request(BASE + item[&quot;path&quot;], headers=AUTH), timeout=180) as res:
+                with open(f&quot;{rid}-{i}.audio&quot;, &quot;xb&quot;) as output:
+                    while chunk := res.read(65536):
+                        output.write(chunk)
+query = urlencode({&quot;kind&quot;: &quot;audio&quot;, &quot;tag&quot;: &quot;钢琴&quot;, &quot;style_id&quot;: &quot;STYLE-001&quot;})
+print(call(&quot;/api/library?&quot; + query))</code></pre>
             </section>
           </div>
           <dialog id="apiKeyDialog" class="api-copy-dialog api-key-dialog" aria-labelledby="apiKeyDialogHeading"><h2 id="apiKeyDialogHeading">密钥创建成功</h2><p id="apiKeyDialogHelp">密钥已加密保存，以后可在列表中再次复制。</p><label for="apiKeySecret">密钥</label><textarea id="apiKeySecret" readonly rows="2"></textarea><div class="api-key-dialog-actions"><button id="apiKeyCopy" class="button button-primary" type="button">复制密钥</button><button id="apiKeyDone" class="button button-light" type="button">完成</button></div><p id="apiKeyCopyStatus" role="status" aria-live="polite"></p></dialog>

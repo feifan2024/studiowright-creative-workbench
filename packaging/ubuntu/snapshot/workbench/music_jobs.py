@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from music_metadata import validate_metadata, attach_metadata
 
 
 class MusicJobs:
@@ -16,6 +17,7 @@ class MusicJobs:
         self.generate,self.ingest,self.paused=generate,ingest,paused
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,digest TEXT,prompt TEXT,model TEXT,status TEXT,result TEXT,error TEXT,created REAL,updated REAL)')
+            db.execute("CREATE TABLE IF NOT EXISTS job_metadata(id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             db.execute("UPDATE jobs SET status='unknown',error='服务重启，原任务结果待核对；不会重新生成。',updated=? WHERE status IN ('generating','ingesting','recovering')",(time.time(),))
         self.path.chmod(0o600)
         self.recover=recover
@@ -42,10 +44,11 @@ class MusicJobs:
                     if found['status']=='recovering':
                         self.save(row['id'],'recovering',error='已找到原任务，继续等待生成结果。')
                         continue
-                    result=found['result']
+                    result=attach_metadata(found['result'],row['prompt'],row['model'],row['id'],self.metadata(row['id']))
                     self.save(row['id'],'recovering',result)
                     receipt=self.ingest(result['clips'])
-                    result['ingested']=sum(bool(i.get('ok')) for i in receipt.get('ingested',[]))
+                    result['library']=receipt.get('ingested',[])
+                    result['ingested']=sum(bool(i.get('ok')) for i in result['library'])
                     self.save(row['id'],'completed',result)
                 except Exception:continue
         finally:self.recovery_lock.release()
@@ -58,19 +61,24 @@ class MusicJobs:
     def get(self, ident):
         with self.db() as db:row=db.execute('SELECT * FROM jobs WHERE id=?',(ident,)).fetchone()
         if not row:return None
-        return {k:row[k] for k in ('id','status','error','created','updated')} | {'result':json.loads(row['result']) if row['result'] else None}
+        return {k:row[k] for k in ('id','status','error','created','updated')} | {'prompt':row['prompt'],'model':row['model'],**self.metadata(ident),'result':json.loads(row['result']) if row['result'] else None}
+
+    def metadata(self, ident):
+        with self.db() as db:row=db.execute('SELECT payload FROM job_metadata WHERE id=?',(ident,)).fetchone()
+        return json.loads(row[0]) if row else {}
 
     def latest(self):
         with self.db() as db:row=db.execute('SELECT id FROM jobs ORDER BY created DESC LIMIT 1').fetchone()
         return self.get(row['id']) if row else None
 
-    def submit(self,ident,prompt,model):
+    def submit(self,ident,prompt,model,metadata=None):
+        metadata=validate_metadata({} if metadata is None else metadata)
         try:
             if str(uuid.UUID(ident))!=ident:raise ValueError()
         except (ValueError,TypeError,AttributeError):raise ValueError('请求编号不正确。')
         if not isinstance(prompt,str) or not prompt.strip() or len(prompt.strip())>2000:raise ValueError('请填写1～2000字的音乐描述。')
         if model not in ('lyria','lyria-fast','lyria-pro','lyria-pro-fast'):raise ValueError('音乐模型不正确。')
-        prompt=prompt.strip();digest=hashlib.sha256(json.dumps([prompt,model]).encode()).hexdigest()
+        prompt=prompt.strip();digest=hashlib.sha256(json.dumps([prompt,model]+([metadata] if metadata else []),sort_keys=True).encode()).hexdigest()
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT digest FROM jobs WHERE id=?',(ident,)).fetchone()
@@ -81,6 +89,7 @@ class MusicJobs:
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('generating','ingesting','recovering')").fetchone():raise ValueError('已有音乐任务正在执行，请等待完成。')
             now=time.time()
             db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,NULL,NULL,?,?)',(ident,digest,prompt,model,'generating',now,now))
+            db.execute('INSERT INTO job_metadata VALUES(?,?)',(ident,json.dumps(metadata,ensure_ascii=False)))
             db.execute('COMMIT')
         threading.Thread(target=self.run,args=(ident,prompt,model),daemon=True,name='music-'+ident).start()
         return self.get(ident)
@@ -91,11 +100,12 @@ class MusicJobs:
     def run(self,ident,prompt,model):
         result=None
         try:
-            result=self.generate(prompt,model)
+            result=attach_metadata(self.generate(prompt,model),prompt,model,ident,self.metadata(ident))
             self.save(ident,'ingesting',result)
             try:
                 receipt=self.ingest(result['clips'])
-                result['ingested']=sum(bool(i.get('ok')) for i in receipt.get('ingested',[]))
+                result['library']=receipt.get('ingested',[])
+                result['ingested']=sum(bool(i.get('ok')) for i in result['library'])
             except Exception:
                 result['ingested']=0;result['ingest_error']='音乐已生成，素材登记未完成；请保留原结果。'
             self.save(ident,'completed',result)

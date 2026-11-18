@@ -1,12 +1,12 @@
 # 创作工作台 API
 
-工作台只按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow。不会根据正文改派，也不会自动串联两条路线。两条路线使用同一把工作台密钥，无需 Google API 密钥。
+工作台按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow；音乐生成走音乐服务。不会根据正文改派通道。以上功能使用同一把工作台密钥，无需 Google API 密钥。
 
 ## 请求准备
 
 调用地址是 `http://127.0.0.1:18922`。远程连接时需保持工作台的端口转发。请求带 `Authorization: Bearer <工作台密钥>`；JSON 用 `application/json`，文件原始字节用 `application/octet-stream`。
 
-提交对话、识图或生成前，用 `Idempotency-Key` 传入并保存一个 UUID。超时或返回 `unknown` 时用原编号查询。
+提交对话、识图或 Flow 生成前，用 `Idempotency-Key` 传入并保存一个 UUID。音乐生成的 UUID 放在正文 `request_id` 中。超时或返回 `unknown` 时用原编号查询。
 
 **`GET /api/snapshot`** · 用 flow_models 取模型 ID，用 tasks 查任务状态和下载路径。
 
@@ -229,12 +229,63 @@ if record.get("task_id"):
 
 错误通常返回 `{"error":"原因"}`。`401` 检查密钥，`400` 检查请求参数，`404` 核对路径或编号。`GET /health` 检查 API 是否可访问，无需密钥。
 
-### 工作台音乐任务恢复
+## 音乐 · 生成、标签与下载
 
-以下是工作台同源接口（18920 端口），沿用工作台的 Origin 和 `X-Workbench-Request: 1` 校验，不是统一 API 密钥端口的接口。
+使用同一统一 API 地址 `http://127.0.0.1:18922` 和工作台 Bearer 密钥。音乐走音乐服务，不改派 Gemini 或 Flow 图片/视频。
 
-- `POST /api/music/jobs`：传入 `request_id`（标准 UUID）、`prompt`、`model`，返回 `202` 和 `job`。相同编号、相同内容只创建一次；同编号不同内容拒绝。
-- `GET /api/music/jobs/{request_id}`：只读取原任务，不发起生成。
-- `GET /api/music/jobs/latest`：读取最近任务，供页面首次恢复使用。
+- `POST /api/music/jobs`：提交一次，返回 `202 {"job": {...}}`。
+- `GET /api/music/jobs/{request_id}`：查询原任务，返回 `{"job": {...}}`；不存在返回404，不会生成。
+- `GET /api/library?kind=audio&tag=钢琴`：筛选音乐标签。可叠加 `style_id` 精确匹配，参数请 URL 编码。
+- `GET /api/library/{asset_id}`：素材详情；`GET /api/library/{asset_id}/file`：携带相同密钥下载原文件。
 
-状态依次为 `generating`（生成中）、`ingesting`（结果已收到、正在入库）、`completed`。完成后的 `result` 保存音频地址和入库结果。`unknown` 表示结果待核对，不会自动重发。页面刷新、网络恢复仅查询原编号；后台服务重启后自动只读核对原音乐服务回执；原任务仍执行时显示 `recovering` 并继续查询，成功后恢复结果并去重入库。核对同时要求提交时间、完整提示词和模型一致且候选唯一；没有明确证据时保持待核对，绝不重新生成。旧同步接口 `/api/music/generate` 保留兼容，新页面使用持久化任务接口。
+参数：`request_id` 为必填标准小写 UUID；`prompt` 为1～2000字；`model` 可选，默认 `lyria-fast`。如同时传 `Idempotency-Key`，必须与 `request_id` 一致。
+
+| 模型 ID | 模型 |
+|---|---|
+| `lyria-fast` | Lyria 3.5 Fast |
+| `lyria` | Lyria 3.5 |
+| `lyria-pro` | Lyria 3 Pro |
+| `lyria-pro-fast` | Lyria 3 Pro Fast |
+
+`tags` 可选，字符串数组，最多30个，每个1～80字；`style_id` 可选，1～256字非空字符串。不传照常生成入库。手动标签及画风 ID 原样记录，不翻译、不改大小写、不删除首尾空格；同文件多来源保留各自原始记录。自动标签依据提示词中的已识别风格、情绪、乐器、用途和人声要求，以 `auto_tags` 返回；来源标记 `prompt_intent`，不是听音后的事实，不调用额外模型，不覆盖手动标签。未识别内容不猜测。标签规则不是自由文本语义理解，复杂否定句需要人工核对。
+
+任务状态：`generating` 生成中；`ingesting` 入库中；`recovering` 重启后查询原任务；`completed` 已取得结果；`unknown` 结果待核对，禁止自动重发。查询结果含 `prompt`、`model` 和传入的可选字段；`result.clips` 保存音频/WAV地址、标签及画风 ID，`result.library` 保存入库回执（`asset_id`、`path`、`kind`、`ok`），`result.ingested` 为入库文件数，不是歌曲数。一首歌可能同时入库音频和 WAV。
+
+同一编号、相同内容（包括标签和画风 ID）只生成一次；相同编号更换内容返回400。刷新、断线及后台重启后只查原编号，不重复生成。`completed` 不一定代表入库成功：若有 `ingest_error` 或 `ingested=0`，保留音频结果，不能为了入库再生成。上游音频链接可能过期，优先使用素材库下载路径。
+
+生成时长通过提示词描述，并非精确时长参数。接口不接受指定账号、管理账号或一键就绪操作。统一 API 不开放 `/api/music/jobs/latest`；每个调用方自行保存自己的请求编号。
+
+```python
+# 沿用上文的 call、BASE、AUTH、HTTP。
+from urllib.parse import urlencode
+import time
+rid = str(uuid4())  # 保存此编号；网络中断后只查询它
+job = call("/api/music/jobs", {
+    "request_id": rid,
+    "prompt": "轻快钢琴背景音乐，无人声，适合口播，约30秒",
+    "model": "lyria-fast",
+    "tags": ["项目A", "片头备选"],
+    "style_id": "STYLE-001"
+}, rid)["job"]
+for _ in range(180):
+    if job["status"] in ("completed", "unknown"):
+        break
+    time.sleep(5)
+    job = call("/api/music/jobs/" + rid)["job"]
+print(rid, job)
+# unknown 或仍在执行：保留 rid，稍后 GET；不要换编号重新生成。
+if job["status"] == "completed":
+    for i, item in enumerate(job["result"].get("library", [])):
+        if item.get("ok") and item.get("path"):
+            # path 为同一统一 API 的素材下载路径；格式见素材详情 mime。
+            with HTTP.open(Request(BASE + item["path"], headers=AUTH), timeout=180) as res:
+                with open(f"{rid}-{i}.audio", "xb") as output:
+                    while chunk := res.read(65536):
+                        output.write(chunk)
+query = urlencode({"kind": "audio", "tag": "钢琴", "style_id": "STYLE-001"})
+print(call("/api/library?" + query))
+```
+
+### 工作台内部兼容接口
+
+18920 同源接口仍校验 Origin 和 `X-Workbench-Request: 1`。工作台使用同一持久化任务逻辑；`GET /api/music/jobs/latest` 仅供页面恢复，旧同步 `/api/music/generate` 保留兼容但不开放到统一 API。重启恢复依据提交时间、完整提示词、模型和唯一上游回执；标签及画风 ID 从本地原任务恢复，不作为再次生成的理由。

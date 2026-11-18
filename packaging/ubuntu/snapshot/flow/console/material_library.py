@@ -195,10 +195,10 @@ class Library(TagIndex):
                     )
                 for tag in meta.get("tags", []):
                     if isinstance(tag, str) and 0 < len(tag.strip()) <= 80:
-                        c.execute("INSERT OR IGNORE INTO tags VALUES(?,?)", (sha, tag.strip()))
+                        c.execute("INSERT OR IGNORE INTO tags VALUES(?,?)", (sha, tag if source == "flow_music" else tag.strip()))
                 if meta.get("structured_tags"):
                     manual = {r[0] for r in c.execute("SELECT dimension FROM manual_dimensions WHERE asset_id=?", (sha,))}
-                    self.write_dimensions(c, sha, {d: v for d, v in meta["structured_tags"].items() if d not in manual}, "legacy_import")
+                    self.write_dimensions(c, sha, {d: v for d, v in meta["structured_tags"].items() if d not in manual}, "music_prompt" if source == "flow_music" else "legacy_import")
                 c.execute("INSERT OR IGNORE INTO index_jobs(asset_id) VALUES(?)", (sha,))
                 if meta.get("index_provenance"):
                     c.execute("UPDATE index_jobs SET provenance=?,state=? WHERE asset_id=? AND state='pending'", (json.dumps(meta["index_provenance"]), meta.get("index_status", "pending"), sha))
@@ -266,7 +266,7 @@ class Library(TagIndex):
 
     def search(self, q="", kind="", tag="", account="", page=1, *, dimensions=None,
                model="", project_id="", created_from="", created_to="", index_status="",
-               limit=24, offset=None, account_id="", storage_status=""):
+               limit=24, offset=None, account_id="", storage_status="", style_id=""):
         if kind not in {"", "image", "video", "audio"} or page < 1:
             raise ValueError("筛选条件不正确。")
         filters, args = [], []
@@ -295,6 +295,11 @@ class Library(TagIndex):
         if account:
             origin_filters.append("(o.account_email=? OR o.source || ':' || o.account_id=?)")
             origin_args += [account, account]
+        if style_id:
+            if not isinstance(style_id, str) or len(style_id)>256:
+                raise ValueError("画风 ID 不正确。")
+            origin_filters.append("json_extract(o.details,'$.style_id')=?")
+            origin_args.append(style_id)
         if origin_filters:
             filters.append("EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND " + " AND ".join(origin_filters) + ")")
             args += origin_args
@@ -311,8 +316,8 @@ class Library(TagIndex):
             filters.append("a.media_type=?")
             args.append(kind)
         if tag:
-            filters.append("EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND t.value=?)")
-            args.append(tag)
+            filters.append("(EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND t.value=?) OR EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND d.source='music_prompt' AND d.value=?))")
+            args.extend([tag,tag])
         if q:
             filters.append(
                 "(EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND (instr(lower(coalesce(o.prompt,'')),lower(?))>0 OR instr(lower(coalesce(o.model,'')),lower(?))>0 OR instr(lower(coalesce(o.project_id,'')),lower(?))>0 OR instr(lower(coalesce(o.account_email,'')),lower(?))>0 OR instr(lower(coalesce(o.media_id,'')),lower(?))>0)) OR EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND instr(lower(t.value),lower(?))>0) OR EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND instr(lower(d.value),lower(?))>0))"
@@ -338,7 +343,7 @@ class Library(TagIndex):
                     "SELECT DISTINCT CASE WHEN account_email!='' THEN account_email ELSE source || ':' || account_id END FROM origins ORDER BY 1"
                 )
             ]
-            tags = [r[0] for r in c.execute("SELECT DISTINCT value FROM tags ORDER BY value")]
+            tags = [r[0] for r in c.execute("SELECT value FROM tags UNION SELECT value FROM dimension_tags WHERE source='music_prompt' ORDER BY value")]
             pending = c.execute(
                 "SELECT count(*) FROM archive_queue WHERE state!='done'"
             ).fetchone()[0]
