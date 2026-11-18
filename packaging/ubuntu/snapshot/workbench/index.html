@@ -375,7 +375,7 @@ if record.get("task_id"):
               <p>prompt：1～2000字。model：lyria-fast（默认，Lyria 3.5 Fast）、lyria（Lyria 3.5）、lyria-pro（Lyria 3 Pro）、lyria-pro-fast（Lyria 3 Pro Fast）。时长写进提示词，不保证精确时长。</p>
               <p>tags：可选字符串数组，最多30个，每个1～80字；style_id：可选1～256字非空字符串。手动标签和画风 ID 原样保存，不传照常生成入库。auto_tags 从提示词自动提取，表示生成要求，不代表音频分析；未识别内容不猜测，不调用额外模型，不覆盖手动标签。</p>
               <p>状态：generating生成中、ingesting入库中、recovering恢复原任务、completed已取得结果、unknown待核对。同编号同内容只生成一次，修改标签或画风 ID 也算不同内容，返回400。断线、刷新和重启后只查询原编号，不自动重发。</p>
-              <p>result.clips：音频/WAV地址和标签；result.library：入库回执，含asset_id、path、kind、ok。result.ingested 是文件数。completed若带ingest_error或ingested=0，表示音乐已有结果但入库未完成，不能为了入库重复生成。</p>
+              <p>result.music_tags 和 clips[].music_tags 按 music_style（音乐风格）、music_mood（情绪）、music_instrument（乐器）、music_use（用途）、music_voice（人声）分类；auto_tags 平铺列表保留兼容。素材库可用同名参数叠加筛选，例如 kind=audio&amp;music_instrument=钢琴&amp;music_mood=舒缓。result.clips：音频/WAV地址和标签；result.library：入库回执，含asset_id、path、kind、ok。result.ingested 是文件数。completed若带ingest_error或ingested=0，表示音乐已有结果但入库未完成，不能为了入库重复生成。</p>
               <p>GET /api/library?kind=audio&amp;tag=钢琴 可筛选标签，叠加style_id精确筛选画风ID；参数使用URL编码。GET /api/library/{asset_id} 查详情，GET /api/library/{asset_id}/file 带同一密钥下载。优先使用入库路径，外部音频地址可能过期。</p>
               <p>统一 API 不开放音乐账号管理、就绪操作、同步generate或jobs/latest。手动标签和画风 ID 保存在原任务，重启恢复不会丢失。</p>
               <div class="api-code-head"><span>音乐生成、查询与下载示例（沿用公共准备）</span><button type="button" data-copy-code="api-code-music">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-music"># 沿用上文的 call、BASE、AUTH、HTTP。

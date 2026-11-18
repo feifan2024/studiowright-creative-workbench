@@ -9,13 +9,15 @@ import time
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler
 
-DIMENSIONS = ("subject", "scene", "action", "style", "camera", "color", "keywords")
-DIMENSION_LABELS = dict(zip(DIMENSIONS, ("主体", "场景", "动作", "风格", "镜头", "色调", "关键词")))
+VISUAL_DIMENSIONS = ("subject", "scene", "action", "style", "camera", "color", "keywords")
+MUSIC_LABELS = {"music_style":"音乐风格", "music_mood":"情绪", "music_instrument":"乐器", "music_use":"用途", "music_voice":"人声"}
+DIMENSIONS = VISUAL_DIMENSIONS + tuple(MUSIC_LABELS)
+DIMENSION_LABELS = dict(zip(VISUAL_DIMENSIONS, ("主体", "场景", "动作", "风格", "镜头", "色调", "关键词"))) | MUSIC_LABELS
 
 
 def clean_dimensions(value, complete=False):
-    if not isinstance(value, dict) or set(value) - set(DIMENSIONS) or complete and set(value) != set(DIMENSIONS):
-        raise ValueError("请使用主体、场景、动作、风格、镜头、色调、关键词这七类标签。")
+    if not isinstance(value, dict) or set(value) - set(DIMENSIONS) or complete and set(value) != set(VISUAL_DIMENSIONS):
+        raise ValueError("标签分类不正确，请使用支持的素材或音乐分类。")
     result = {}
     for dim, labels in value.items():
         if not isinstance(labels, list) or len(labels) > 30 or any(

@@ -62,8 +62,8 @@ class MusicMetadata(unittest.TestCase):
             for tag in ['钢琴',' 手工标签 ']:self.assertEqual(library.search(kind='audio',tag=tag,style_id=' Style-A ')['total'],1)
             self.assertEqual(library.search(style_id='Style-A')['total'],0)
             self.assertEqual(library.archive(audio,meta),ident)
-            library.set_dimensions(ident,{'keywords':['人工改过']});library.archive(audio,meta)
-            self.assertEqual(library.get(ident)['structured_tags']['keywords'],['人工改过'])
+            library.set_dimensions(ident,{'music_instrument':['人工改过']});library.archive(audio,meta)
+            self.assertEqual(library.get(ident)['structured_tags']['music_instrument'],['人工改过'])
             self.assertEqual(library.search()['total'],1)
 
     def test_authenticated_gateway_forwards_job_metadata_and_duplicate_once(self):

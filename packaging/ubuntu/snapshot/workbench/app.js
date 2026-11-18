@@ -2919,7 +2919,7 @@ let autoMaterialState = null;
 let backfillState = null;
 let backfillRequest = null;
 let backfillBusy = false;
-const materialDimensions = {subject:"主体", scene:"场景", action:"动作", style:"风格", camera:"镜头", color:"色调", keywords:"关键词"};
+const materialDimensions = {subject:"主体", scene:"场景", action:"动作", style:"风格", camera:"镜头", color:"色调", keywords:"关键词",music_style:"音乐风格",music_mood:"情绪",music_instrument:"乐器",music_use:"用途",music_voice:"人声"};
 const extraDimensions = {shot_size:"景别", viewpoint:"拍摄角度", composition:"构图", movement:"运镜"};
 
 async function postJson(path, body, key) {
@@ -3423,7 +3423,7 @@ function materialTagGroups(item, compact = false) {
   const fields = {...item.structured_tags, ...item.shot_tags, custom: item.tags};
   const styleIds=[...new Set((item.origins||[]).filter(o=>typeof o.style_id==='string').map(o=>o.style_id))];
   const labels = {...materialDimensions, ...extraDimensions, custom: '自定义'};
-  const order = ['subject', 'scene', 'viewpoint', 'composition', 'movement', 'shot_size', 'action', 'style', 'camera', 'color', 'keywords', 'custom'];
+  const order = ['subject', 'scene', 'viewpoint', 'composition', 'movement', 'shot_size', 'action', 'style', 'camera', 'color', 'music_style', 'music_mood', 'music_instrument', 'music_use', 'music_voice', 'keywords', 'custom'];
   const rows = order.flatMap((key) => {
     if (key === 'movement' && item.media_type !== 'video') return [];
     const values = key==='custom' && item.media_type==='audio' ? (fields[key]||[]) : materialValues(fields[key]);

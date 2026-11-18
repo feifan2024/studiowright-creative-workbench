@@ -293,3 +293,7 @@ print(call("/api/library?" + query))
 ### 历史音乐标签补录
 
 维护工具 `workbench/music_tag_backfill.py <素材库library.db>` 默认只预览，`--apply` 才写入。执行前在线备份数据库。仅按 Flow Music 音频的已保存提示词追加缺少的 `music_prompt` 标签，旧记录去除标题前缀；不重生成、不改文件或原始来源，不改手动标签及画风 ID，手动编辑过关键词维度的素材跳过。重复执行不重复添加。
+
+### 音乐分类标签
+
+`result.music_tags` 和 `result.clips[].music_tags` 返回分类自动标签：`music_style`（音乐风格）、`music_mood`（情绪）、`music_instrument`（乐器）、`music_use`（用途）、`music_voice`（人声）。`auto_tags` 平铺列表继续保留兼容。素材详情 `structured_tags` 使用相同字段；`GET /api/library?kind=audio&music_instrument=钢琴&music_mood=舒缓` 可叠加分类筛选，所有非英文参数需 URL 编码。分类不影响手动 `tags` 与 `style_id`。历史分类迁移只移动来源为 `music_prompt` 的已识别自动关键词，保留其他来源及手动编辑过的维度。

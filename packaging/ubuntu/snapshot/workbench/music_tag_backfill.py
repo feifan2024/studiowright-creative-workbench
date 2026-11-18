@@ -32,7 +32,7 @@ def backfill(path,apply=False):
         for ident,origins in groups.items():
             if db.execute("SELECT 1 FROM manual_dimensions WHERE asset_id=? AND dimension='keywords'",(ident,)).fetchone():
                 result['manual_skipped']+=1;continue
-            existing={r[0] for r in db.execute("SELECT value FROM dimension_tags WHERE asset_id=? AND dimension='keywords'",(ident,))}
+            existing={r[0] for r in db.execute("SELECT value FROM dimension_tags WHERE asset_id=? ",(ident,))}
             wanted=list(dict.fromkeys(t for _,_,tags in origins for t in tags))
             missing=[t for t in wanted if t not in existing]
             if not missing:continue

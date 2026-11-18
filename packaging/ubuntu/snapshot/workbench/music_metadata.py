@@ -45,10 +45,21 @@ def prompt_tags(prompt):
             result.append(label);break
     return result
 
+CATEGORIES = {
+    'music_style': ('电子','古风','爵士','摇滚','史诗'),
+    'music_mood': ('轻快','舒缓','紧张','悬疑','悲伤'),
+    'music_instrument': ('钢琴','吉他','弦乐','鼓点'),
+    'music_use': ('背景音乐','音效','口播','打斗','片头','短视频','环境音','雨声','鸟鸣'),
+    'music_voice': ('纯音乐','男声','女声'),
+}
+
+def grouped_tags(tags):
+    return {key:[tag for tag in tags if tag in values] for key,values in CATEGORIES.items()}
+
 def attach_metadata(result,prompt,model,request_id,metadata):
     metadata=validate_metadata(metadata)
     auto=prompt_tags(prompt)
-    return {**result, **metadata, 'auto_tags':auto, 'tag_source':'prompt_intent',
-            'clips':[{**clip,**metadata,'auto_tags':auto,'tag_source':'prompt_intent',
+    return {**result, **metadata, 'auto_tags':auto, 'music_tags':grouped_tags(auto), 'tag_source':'prompt_intent',
+            'clips':[{**clip,**metadata,'auto_tags':auto,'music_tags':grouped_tags(auto),'tag_source':'prompt_intent',
                       'prompt':prompt,'model':model,'request_id':request_id}
                      for clip in result['clips']]}
