@@ -88,6 +88,49 @@ class MusicMetadata(unittest.TestCase):
                                                     'details':{'audio_category':'sound_effect'}}),ident)
             self.assertEqual(library.search(kind='audio')['items'][0]['audio_category'],'sound_effect')
 
+    def test_audio_filters_use_displayed_category_and_inclusive_duration(self):
+        from PIL import Image
+        with fixture_directory() as d:
+            library=Library(d/'library')
+            samples={}
+            for category,frames,metadata in (
+                ('music',8000,{'source':'flow_music','tags':[' 钢琴 '],
+                               'details':{'style_id':' Exact '}}),
+                ('sound_effect',16000,{'source':'import','details':{'audio_category':'sound_effect'}}),
+                ('other',24000,{'source':'import'}),
+                ('unknown_duration',32000,{'source':'flow_music'}),
+            ):
+                path=d/(category+'.wav')
+                with wave.open(str(path),'wb') as audio:
+                    audio.setparams((1,2,8000,0,'NONE','not compressed'))
+                    audio.writeframes(b'\0\0'*frames)
+                samples[category]=library.archive(path,{'source_id':category,**metadata})
+            with library.connect() as db:
+                db.execute('UPDATE assets SET duration=NULL WHERE id=?',(samples['unknown_duration'],))
+            photo=d/'photo.png'
+            Image.new('RGB',(1,1)).save(photo)
+            library.archive(photo,{'source':'import','source_id':'photo','duration':2})
+
+            def ids(**filters):
+                return {item['id'] for item in library.search(**filters)['items']}
+
+            for category in ('music','sound_effect','other'):
+                expected={samples[category]}
+                if category=='music': expected.add(samples['unknown_duration'])
+                self.assertEqual(ids(audio_category=category),expected)
+            self.assertEqual(ids(duration_min=2,duration_max=2),{samples['sound_effect']})
+            self.assertEqual(ids(duration_min=2),{samples['sound_effect'],samples['other']})
+            self.assertEqual(ids(duration_max='1.5'),{samples['music']})
+            self.assertEqual(ids(audio_category='music',duration_min=1,duration_max=1,tag=' 钢琴 ',
+                                 style_id=' Exact '),{samples['music']})
+            self.assertEqual(library.search(audio_category='music',limit=1)['total'],2)
+            for filters in ({'audio_category':'invalid'},{'duration_min':'nan'},{'duration_max':'inf'},
+                            {'duration_min':-1},{'duration_min':3,'duration_max':1}):
+                with self.assertRaises(ValueError):
+                    library.search(**filters)
+            self.assertEqual(library.get(samples['music'])['origins'][0]['style_id'],' Exact ')
+            self.assertEqual(library.get(samples['music'])['tags'],[' 钢琴 '])
+
     def test_authenticated_gateway_forwards_job_metadata_and_duplicate_once(self):
         import threading
         import time

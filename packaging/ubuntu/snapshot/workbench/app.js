@@ -3496,6 +3496,21 @@ async function refreshLibraryView({background = true} = {}) {
   finally { libraryViewRefreshing = false; }
 }
 
+const libraryAudioFilters = {
+  audio_category: $('libraryAudioCategory'),
+  duration_min: $('libraryDurationMin'),
+  duration_max: $('libraryDurationMax')
+};
+
+function updateLibraryAudioFilters() {
+  const disabled = $('librarySearchScope').value === 'analysis'
+    || !['', 'audio'].includes($('libraryKind').value);
+  for (const control of Object.values(libraryAudioFilters)) {
+    control.disabled = disabled;
+    control.closest('label').hidden = disabled;
+  }
+}
+
 async function loadLibrary({background = false} = {}) {
   const sequence = ++libraryRequest;
   const isExtra = $('librarySearchScope').value === 'analysis';
@@ -3505,6 +3520,15 @@ async function loadLibrary({background = false} = {}) {
   if ($('libraryTag').value) query.set('tag',$('libraryTag').value);
   if ($('libraryStyleId').value) query.set('style_id',$('libraryStyleId').value);
   if ($('libraryKind').value) query.set('kind', $('libraryKind').value);
+  const {duration_min: min, duration_max: max} = libraryAudioFilters;
+  if (!min.disabled && (!min.validity.valid || !max.validity.valid
+      || (min.value !== '' && max.value !== '' && min.valueAsNumber > max.valueAsNumber))) {
+    if (!background) $('librarySummary').textContent = '请输入有效秒数，最短时长不能大于最长时长。';
+    return;
+  }
+  for (const [name, control] of Object.entries(libraryAudioFilters)) {
+    if (!control.disabled && control.value !== '') query.set(name, control.value);
+  }
   if ($('libraryAccount').value) query.set('account', $('libraryAccount').value);
   for (const key of Object.keys(materialDimensions)) {
     if ($('libraryFilter_' + key).value) query.set(key, $('libraryFilter_' + key).value);
@@ -4029,7 +4053,15 @@ $('libraryClose').addEventListener('click', () => {
 $('libraryFind').addEventListener('click', () => { libraryPage = 1; loadLibrary(); });
 $('librarySearch').addEventListener('input', () => { libraryRequest++; });
 $('librarySearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); libraryPage = 1; loadLibrary(); } });
-$('libraryKind').addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
+$('libraryKind').addEventListener('change', () => { updateLibraryAudioFilters(); libraryPage = 1; loadLibrary(); });
+for (const control of Object.values(libraryAudioFilters)) {
+  control.addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
+  if (control.type === 'number') {
+    control.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); libraryPage = 1; loadLibrary(); }
+    });
+  }
+}
 $('libraryTag').addEventListener('change',()=>{libraryPage=1;loadLibrary();});
 $('libraryStyleId').addEventListener('change',()=>{libraryPage=1;loadLibrary();});
 $('libraryAccount').addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
@@ -4039,6 +4071,7 @@ $('librarySearchScope').addEventListener('change', () => {
   $('libraryKind').disabled = extra;
   $('libraryAccount').disabled = extra;
   $('libraryTag').disabled=extra; $('libraryStyleId').disabled=extra;
+  updateLibraryAudioFilters();
   $('libraryDimensionFilters').querySelectorAll('select').forEach((control) => { control.disabled = extra; });
   libraryPage = 1; loadLibrary();
 });
@@ -4051,6 +4084,8 @@ $('libraryReset').addEventListener('click', () => {
   $('librarySearchScope').value = 'original';
   $('libraryKind').disabled = false;
   $('libraryAccount').disabled = false;
+  for (const control of Object.values(libraryAudioFilters)) control.value = '';
+  updateLibraryAudioFilters();
   $('libraryDimensionFilters').querySelectorAll('select').forEach((control) => { control.value = ''; control.disabled = false; });
   libraryPage = 1; loadLibrary();
 });

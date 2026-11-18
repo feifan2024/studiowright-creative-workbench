@@ -286,6 +286,8 @@ query = urlencode({"kind": "audio", "tag": "钢琴", "style_id": "STYLE-001"})
 print(call("/api/library?" + query))
 ```
 
+素材列表可叠加 `audio_category=music|sound_effect|other` 和 `duration_min`、`duration_max`。时长以非负秒数填写，含边界，可以只填写一端。使用这些参数时结果只包含音频。带时长条件时，只返回已读取时长的音频。例如 `GET /api/library?kind=audio&audio_category=music&duration_min=30&duration_max=65`。
+
 音频素材详情中的 `duration` 是从入库文件读取的实际秒数，无法读取时为 `null`。`audio_category` 为 `music`（音乐）、`sound_effect`（音效）或 `other`（其他）。Flow Music 入库标记为音乐。这两个字段由素材库返回，生成时无需传入。
 
 ### 工作台内部兼容接口

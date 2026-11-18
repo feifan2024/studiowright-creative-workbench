@@ -6,6 +6,7 @@ archival approach. Provenance remains a separate immutable record per source.
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -17,6 +18,32 @@ from pathlib import Path
 from PIL import Image
 from material_tags import TagIndex, DIMENSIONS
 from media_analysis import audio_duration
+
+
+AUDIO_CATEGORIES = ("music", "sound_effect", "other")
+# Keep the displayed category and database filter identical for shared files.
+AUDIO_CATEGORY_SQL = """
+    COALESCE(
+        (SELECT json_extract(o.details, '$.audio_category')
+         FROM origins o WHERE o.asset_id=a.id
+         AND json_extract(o.details, '$.audio_category') IN ('music', 'sound_effect', 'other')
+         ORDER BY o.source, o.source_id LIMIT 1),
+        CASE WHEN EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND o.source='flow_music')
+             THEN 'music' ELSE 'other' END
+    )
+"""
+
+
+def duration_bound(value):
+    if value is None or value == "":
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("音频时长必须是非负秒数。") from None
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("音频时长必须是非负秒数。")
+    return seconds
 
 
 def digest(path):
@@ -212,7 +239,10 @@ class Library(TagIndex):
 
     def get(self, ident):
         with self.connect() as c:
-            row = c.execute("SELECT * FROM assets WHERE id=?", (ident,)).fetchone()
+            row = c.execute(
+                f"SELECT a.*, CASE WHEN a.media_type='audio' THEN {AUDIO_CATEGORY_SQL} END AS audio_category "
+                "FROM assets a WHERE a.id=?", (ident,)
+            ).fetchone()
             if not row:
                 return None
             result = dict(row)
@@ -228,15 +258,8 @@ class Library(TagIndex):
                 origin["details"] = json.loads(origin["details"])
                 if isinstance(origin["details"], dict) and "style_id" in origin["details"]:
                     origin["style_id"] = origin["details"]["style_id"]
-            if result["media_type"] == "audio":
-                categories = [
-                    origin["details"].get("audio_category")
-                    for origin in result["origins"] if isinstance(origin["details"], dict)
-                ]
-                default = "music" if any(origin["source"] == "flow_music" for origin in result["origins"]) else "other"
-                result["audio_category"] = next(
-                    (category for category in categories if category in ("music", "sound_effect", "other")), default
-                )
+            if result["media_type"] != "audio":
+                result.pop("audio_category")
             result["tags"] = [
                 r[0]
                 for r in c.execute(
@@ -295,10 +318,25 @@ class Library(TagIndex):
 
     def search(self, q="", kind="", tag="", account="", page=1, *, dimensions=None,
                model="", project_id="", created_from="", created_to="", index_status="",
-               limit=24, offset=None, account_id="", storage_status="", style_id=""):
+               limit=24, offset=None, account_id="", storage_status="", style_id="",
+               audio_category="", duration_min=None, duration_max=None):
         if kind not in {"", "image", "video", "audio"} or page < 1:
             raise ValueError("筛选条件不正确。")
         filters, args = [], []
+        if audio_category and audio_category not in AUDIO_CATEGORIES:
+            raise ValueError("音频分类不正确。")
+        minimum, maximum = duration_bound(duration_min), duration_bound(duration_max)
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError("最短时长不能大于最长时长。")
+        if audio_category or minimum is not None or maximum is not None:
+            filters.append("a.media_type='audio'")
+        if audio_category:
+            filters.append(AUDIO_CATEGORY_SQL + "=?")
+            args.append(audio_category)
+        for operator, boundary in ((">=", minimum), ("<=", maximum)):
+            if boundary is not None:
+                filters.append(f"a.duration{operator}?")
+                args.append(boundary)
         if len(q) > 500 or not 1 <= limit <= 100 or offset is not None and offset < 0:
             raise ValueError("检索长度或分页不正确。")
         for dim, value in (dimensions or {}).items():

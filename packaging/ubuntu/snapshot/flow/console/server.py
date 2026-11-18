@@ -935,6 +935,8 @@ def create_app(root, adapter, test=False):
                 account_id=p.get("account_id", ""), created_from=p.get("created_from", ""),
                 created_to=p.get("created_to", ""), index_status=p.get("index_status", ""),
                 storage_status=p.get("storage_status", ""), style_id=p.get("style_id", ""),
+                audio_category=p.get("audio_category", ""),
+                duration_min=p.get("duration_min"), duration_max=p.get("duration_max"),
                 limit=int(p.get("limit", "24")), offset=int(p["offset"]) if "offset" in p else None,
             )
             return JSONResponse(result)
