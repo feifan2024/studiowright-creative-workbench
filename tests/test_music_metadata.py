@@ -56,6 +56,13 @@ class MusicMetadata(unittest.TestCase):
             clip=attach_metadata({'clips':[{}]},'轻快钢琴背景音乐','lyria-fast','request',m)['clips'][0]
             meta=music_metadata(clip,'title',clip['prompt'],'job/clip/audio','clip','')
             ident=library.archive(audio,meta);item=library.get(ident)
+            self.assertAlmostEqual(item['duration'],0.1)
+            self.assertEqual(item['audio_category'],'music')
+            with library.connect() as db:
+                db.execute('UPDATE assets SET duration=NULL WHERE id=?',(ident,))
+            self.assertEqual(library.backfill_audio_durations(),{'scanned':1,'updated':1})
+            self.assertAlmostEqual(library.get(ident)['duration'],0.1)
+            self.assertEqual(library.backfill_audio_durations(),{'scanned':0,'updated':0})
             self.assertEqual(item['origins'][0]['style_id'],' Style-A ')
             self.assertEqual(item['origins'][0]['details']['manual_tags'],[' 手工标签 '])
             self.assertEqual(item['tags'],[' 手工标签 ']);self.assertEqual(library.file(ident).read_bytes(),audio.read_bytes())
@@ -65,6 +72,21 @@ class MusicMetadata(unittest.TestCase):
             library.set_dimensions(ident,{'music_instrument':['人工改过']});library.archive(audio,meta)
             self.assertEqual(library.get(ident)['structured_tags']['music_instrument'],['人工改过'])
             self.assertEqual(library.search()['total'],1)
+
+    def test_audio_category_uses_explicit_source_or_other(self):
+        with fixture_directory() as d:
+            audio=d/'effect.wav'
+            with wave.open(str(audio),'wb') as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(8000)
+                w.writeframes(b'\0\0'*400)
+            library=Library(d/'library')
+            ident=library.archive(audio,{'source':'import','source_id':'generic'})
+            self.assertEqual(library.get(ident)['audio_category'],'other')
+            self.assertEqual(library.archive(audio,{'source':'import','source_id':'effect',
+                                                    'details':{'audio_category':'sound_effect'}}),ident)
+            self.assertEqual(library.search(kind='audio')['items'][0]['audio_category'],'sound_effect')
 
     def test_authenticated_gateway_forwards_job_metadata_and_duplicate_once(self):
         import threading

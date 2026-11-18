@@ -16,6 +16,7 @@ from pathlib import Path
 
 from PIL import Image
 from material_tags import TagIndex, DIMENSIONS
+from media_analysis import audio_duration
 
 
 def digest(path):
@@ -129,6 +130,7 @@ class Library(TagIndex):
                 )
             if meta.get("media_type") and meta["media_type"] != kind:
                 raise ValueError("素材类型与原记录不一致。")
+            duration = audio_duration(stage, mime) if kind == "audio" else meta.get("duration")
             rel = Path("objects") / sha[:2] / (sha + ext)
             dest = self.root / rel
             dest.parent.mkdir(exist_ok=True)
@@ -161,10 +163,12 @@ class Library(TagIndex):
                         dest.stat().st_size,
                         width or meta.get("width"),
                         height or meta.get("height"),
-                        meta.get("duration"),
+                        duration,
                         time.time(),
                     ),
                 )
+                if kind == "audio" and duration is not None:
+                    c.execute("UPDATE assets SET duration=? WHERE id=? AND duration IS NULL", (duration, sha))
                 columns = [
                     "account_id",
                     "account_email",
@@ -224,6 +228,15 @@ class Library(TagIndex):
                 origin["details"] = json.loads(origin["details"])
                 if isinstance(origin["details"], dict) and "style_id" in origin["details"]:
                     origin["style_id"] = origin["details"]["style_id"]
+            if result["media_type"] == "audio":
+                categories = [
+                    origin["details"].get("audio_category")
+                    for origin in result["origins"] if isinstance(origin["details"], dict)
+                ]
+                default = "music" if any(origin["source"] == "flow_music" for origin in result["origins"]) else "other"
+                result["audio_category"] = next(
+                    (category for category in categories if category in ("music", "sound_effect", "other")), default
+                )
             result["tags"] = [
                 r[0]
                 for r in c.execute(
@@ -236,6 +249,22 @@ class Library(TagIndex):
                 f"/api/library/{ident}/thumbnail" if result["media_type"] == "image" else None
             )
             return result
+
+    def backfill_audio_durations(self):
+        with self.connect() as c:
+            pending = c.execute(
+                "SELECT id,mime FROM assets WHERE media_type='audio' AND duration IS NULL"
+            ).fetchall()
+        updated = 0
+        for row in pending:
+            path = self.file(row["id"])
+            duration = audio_duration(path, row["mime"]) if path else None
+            if duration is not None:
+                with self.connect() as c:
+                    updated += c.execute(
+                        "UPDATE assets SET duration=? WHERE id=? AND duration IS NULL", (duration, row["id"])
+                    ).rowcount
+        return {"scanned": len(pending), "updated": updated}
 
     def file(self, ident):
         with self.connect() as c:

@@ -286,6 +286,8 @@ query = urlencode({"kind": "audio", "tag": "钢琴", "style_id": "STYLE-001"})
 print(call("/api/library?" + query))
 ```
 
+音频素材详情中的 `duration` 是从入库文件读取的实际秒数，无法读取时为 `null`。`audio_category` 为 `music`（音乐）、`sound_effect`（音效）或 `other`（其他）。Flow Music 入库标记为音乐。这两个字段由素材库返回，生成时无需传入。
+
 ### 工作台内部兼容接口
 
 18920 同源接口仍校验 Origin 和 `X-Workbench-Request: 1`。工作台使用同一持久化任务逻辑；`GET /api/music/jobs/latest` 仅供页面恢复，旧同步 `/api/music/generate` 保留兼容但不开放到统一 API。重启恢复依据提交时间、完整提示词、模型和唯一上游回执；标签及画风 ID 从本地原任务恢复，不作为再次生成的理由。

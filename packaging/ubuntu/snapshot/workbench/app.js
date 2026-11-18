@@ -3431,6 +3431,15 @@ function materialTagGroups(item, compact = false) {
     return ['<div class="material-tag-row"><dt>' + esc(labels[key]) + '：</dt><dd>'
       + esc(values.join('、')) + '</dd></div>'];
   });
+  if (item.media_type === 'audio') {
+    const category = {music: '音乐', sound_effect: '音效', other: '其他'}[item.audio_category] || '其他';
+    const duration = Number.isFinite(item.duration) && item.duration > 0
+      ? item.duration.toLocaleString('zh-CN', {maximumFractionDigits: 2}) + ' 秒' : '未读取';
+    rows.unshift(
+      '<div class="material-tag-row"><dt>音频时长：</dt><dd>' + esc(duration) + '</dd></div>',
+      '<div class="material-tag-row"><dt>音频分类：</dt><dd>' + esc(category) + '</dd></div>'
+    );
+  }
   if (styleIds.length) rows.push('<div class="material-tag-row"><dt>画风 ID：</dt><dd style="white-space:pre-wrap">'+styleIds.map(esc).join('、')+'</dd></div>');
   if (item.media_type==='audio' && (item.tag_sources||[]).some(t=>t.source==='music_prompt')) rows.push('<div class="subtle">自动标签来自生成要求，未做音频分析</div>');
   if (!rows.length) return '<p class="material-tag-empty">暂无标签</p>';
@@ -3888,7 +3897,7 @@ async function showMaterial(id) {
     + Object.entries(extraDimensions).map(([key, label]) =>
       '<label>' + esc(label) + '<input id="dimension_' + esc(key) + '" value="' + esc((extra.manual?.[key] || []).join('，')) + '" maxlength="3000"></label>').join('');
   $('libraryDetail').innerHTML = '<div class="material-layout"><div><div class="material-preview">' + preview + '</div>'
-    + '<p class="material-facts">分辨率：' + esc(resolution) + '　·　时长：' + esc(duration) + '　·　' + esc(materialSize(item.size)) + '</p>'
+    + '<p class="material-facts">' + (item.media_type === 'audio' ? '文件大小：' : '分辨率：' + esc(resolution) + '　·　时长：' + esc(duration) + '　·　') + esc(materialSize(item.size)) + '</p>'
     + '<p class="material-facts">来源：' + esc(materialSource(origin)) + '　·　账号：'
     + esc(origin.account_email || origin.account_id || '未记录') + ((item.origins || []).length > 1 ? '　·　共 ' + item.origins.length + ' 条来源' : '') + '</p>'
     + (item.origins || []).filter(o => typeof o.style_id === 'string').map(o =>

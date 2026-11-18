@@ -10,7 +10,8 @@ def music_metadata(clip, title, prompt, source_id, clip_id, email):
     groups=clean_dimensions(clip.get('music_tags',{}))
     if set(groups)-set(MUSIC_LABELS):raise ValueError('音乐标签分类不正确。')
     details={'title':title,'generation_prompt':prompt,'manual_tags':manual,
-             'auto_tags':auto,'music_tags':groups,'tag_source':'prompt_intent','audio_analyzed':False}
+             'auto_tags':auto,'music_tags':groups,'tag_source':'prompt_intent','audio_analyzed':False,
+             'audio_category':'music'}
     if 'style_id' in clip:
         v=clip['style_id']
         if not isinstance(v,str) or not v.strip() or len(v)>256:raise ValueError('画风 ID 不正确。')

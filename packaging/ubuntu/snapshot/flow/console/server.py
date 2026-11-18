@@ -1012,7 +1012,7 @@ def create_app(root, adapter, test=False):
                             tmp_path = Path(tmp.name)
                         from music_import import music_metadata
                         meta = music_metadata(clip, title, prompt, source_id, clip_id, email)
-                        ident = c.library.archive(tmp_path, meta)
+                        ident = await asyncio.to_thread(c.library.archive, tmp_path, meta)
                         results.append({"source_id": source_id, "kind": kind, "title": title, "ok": True,
                                         "asset_id": ident, "path": f"/api/library/{ident}/file"})
                     finally:

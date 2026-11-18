@@ -378,6 +378,7 @@ if record.get("task_id"):
               <p>result.music_tags 和 clips[].music_tags 按 music_style（音乐风格）、music_mood（情绪）、music_instrument（乐器）、music_use（用途）、music_voice（人声）分类；auto_tags 平铺列表保留兼容。素材库可用同名参数叠加筛选，例如 kind=audio&amp;music_instrument=钢琴&amp;music_mood=舒缓。result.clips：音频/WAV地址和标签；result.library：入库回执，含asset_id、path、kind、ok。result.ingested 是文件数。completed若带ingest_error或ingested=0，表示音乐已有结果但入库未完成，不能为了入库重复生成。</p>
               <p>GET /api/library?kind=audio&amp;tag=钢琴 可筛选标签，叠加style_id精确筛选画风ID；参数使用URL编码。GET /api/library/{asset_id} 查详情，GET /api/library/{asset_id}/file 带同一密钥下载。优先使用入库路径，外部音频地址可能过期。</p>
               <p>统一 API 不开放音乐账号管理、就绪操作、同步generate或jobs/latest。手动标签和画风 ID 保存在原任务，重启恢复不会丢失。</p>
+              <p>音频素材详情返回 duration（实际秒数，未读取时为 null）与 audio_category（music 音乐、sound_effect 音效、other 其他）。</p>
               <div class="api-code-head"><span>音乐生成、查询与下载示例（沿用公共准备）</span><button type="button" data-copy-code="api-code-music">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-music"># 沿用上文的 call、BASE、AUTH、HTTP。
 from urllib.parse import urlencode
 import time

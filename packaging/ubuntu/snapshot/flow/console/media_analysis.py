@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import wave
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -21,6 +22,31 @@ def ffmpeg_executable():
         return imageio_ffmpeg.get_ffmpeg_exe()
     except ImportError:
         raise ValueError("视频抽帧组件未安装，未调用分析模型。") from None
+
+
+def audio_duration(path, mime):
+    """Read local audio metadata in seconds without decoding the full file."""
+    if mime == "audio/wav":
+        try:
+            with wave.open(str(path), "rb") as audio:
+                frames = audio.getnframes()
+                if frames and frames * audio.getsampwidth() * audio.getnchannels() <= Path(path).stat().st_size:
+                    return frames / audio.getframerate()
+        except (OSError, EOFError, wave.Error):
+            pass
+    try:
+        result = subprocess.run(
+            [ffmpeg_executable(), "-nostdin", "-hide_banner", "-protocol_whitelist", "file",
+             "-f", "wav" if mime == "audio/wav" else "mov", "-i", str(path)],
+            capture_output=True, timeout=8,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(rb"Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)", result.stderr)
+    if match and b"Audio:" in result.stderr:
+        hours, minutes, seconds = (float(value) for value in match.groups())
+        return hours * 3600 + minutes * 60 + seconds or None
+    return None
 
 
 def image_url(path, max_side):
