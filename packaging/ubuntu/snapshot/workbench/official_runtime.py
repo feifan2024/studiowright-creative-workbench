@@ -285,6 +285,9 @@ class OfficialRuntime:
                 'native':answer.get('conversation_id') if terminal else native,'first_text_ms':first,'total_ms':elapsed,
                 'timeout_kind':timeout_kind,
                 'token_count':(answer.get('usage') or {}).get('total_tokens') if isinstance(answer,dict) else None}
+        result['capacity_retry_safe']=bool(explicit_failure and answer.get('finished_reason')=='error' and rc in (0,1) and not response and not chunks
+            and reason=='provider_unavailable' and 'No capacity available for model ' in provider_error
+            and 'UNAVAILABLE' in provider_error and re.search(r'\b503\b',provider_error))
         result['returncode']=rc
         if recovered and success:
             result.update(completion_source=RECOVERED,provider_warning='recovered_capacity_503')

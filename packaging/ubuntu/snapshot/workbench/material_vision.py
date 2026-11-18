@@ -112,7 +112,7 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
     started = time.monotonic()
     receipt = Path(receipt)
     receipt.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    chunks = []
+    chunks = [];capacity_rejected=False
     try:
         with tempfile.TemporaryDirectory(prefix='sw-material-acp-') as cwd:
             proc = subprocess.Popen([str(account['binary']),'acp'],cwd=cwd,env=env,
@@ -132,7 +132,7 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
                                 raise ValueError('protocol_write_timeout')
                             data=data[os.write(proc.stdin.fileno(),data):]
                     def call(i,method,params,timeout):
-                        nonlocal buffer,size
+                        nonlocal buffer,size,capacity_rejected
                         send({'id':i,'method':method,'params':params})
                         deadline=time.monotonic()+timeout if timeout is not None else None
                         budget=call_budget(runtime, 'image') if i==4 else None
@@ -159,6 +159,9 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
                                             error=str(msg['error'])
                                             if re.search(r'verify your account|VALIDATION_REQUIRED',error,re.I):raise ValueError('verification_required')
                                             if re.search(r'quota|rate.limit|RESOURCE_EXHAUSTED|\b429\b',error,re.I):raise ValueError('quota_or_rate_limit')
+                                            if i==4 and not chunks and re.search(r'\b503\b',error) and 'UNAVAILABLE' in error and 'No capacity available for model ' in error:
+                                                capacity_rejected=True
+                                                raise ValueError('provider_unavailable')
                                             raise ValueError('protocol_request_rejected_'+str(i))
                                         return msg['result']
                                     update=msg.get('params',{}).get('update',{})
@@ -203,5 +206,7 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         reason=str(exc) if type(exc) is ValueError and re.fullmatch(r'[a-z0-9_]{1,60}',str(exc)) else 'material_transport_error'
         result={'status':'unknown' if submitted else 'failed','submitted':submitted,'reason':reason,'total_ms':round((time.monotonic()-started)*1000)}
+        if capacity_rejected and not chunks:
+            result.update(status='failed',capacity_retry_safe=True)
         if keep_partial and chunks:result['response']=''.join(chunks)
         return result

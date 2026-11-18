@@ -483,6 +483,34 @@ class OfficialPool:
             db.execute('COMMIT')
         return True
 
+    def capacity_retries(self,job,result,call):
+        # Only a terminal, explicit capacity rejection with zero reply is safe.
+        if job.get('no_retry') or job.get('readiness_probe'):return result
+        ordinal=job.get('ordinal',1)
+        for delay in (10,30):
+            if (ordinal>=3 or result.get('submitted') is not True or result.get('capacity_retry_safe') is not True
+                    or result.get('status')!='failed' or result.get('reason')!='provider_unavailable'
+                    or result.get('response') or result.get('first_text_ms') is not None):break
+            until=time.monotonic()+delay
+            while time.monotonic()<until:
+                if self.stop.wait(min(.5,max(0,until-time.monotonic()))) or self.pool.maintenance():return result
+            available=self.runtime.inventory()
+            with self.pool.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                row=db.execute("SELECT r.status,r.account_key,j.no_retry FROM requests r JOIN official_jobs j USING(request_id) WHERE r.request_id=?",(job['request_id'],)).fetchone()
+                attempt=db.execute("SELECT ordinal,status FROM official_attempts WHERE request_id=? ORDER BY ordinal DESC LIMIT 1",(job['request_id'],)).fetchone()
+                if (not row or tuple(row)!=('dispatching',job['account_key'],0) or not attempt
+                        or tuple(attempt)!=(ordinal,'running') or self.stop.is_set() or self.pool.maintenance()
+                        or self.reason(db,job['account_key'],available)):
+                    db.execute('ROLLBACK');return result
+                self.finish_attempt(db,job['request_id'],result,time.time())
+                ordinal+=1
+                db.execute("INSERT INTO official_attempts(request_id,ordinal,status,started) VALUES(?,?,'running',?)",(job['request_id'],ordinal,time.time()))
+                db.execute("UPDATE requests SET note=? WHERE request_id=?",(f'供应商容量不足且未收到回复，原账号延迟重试 {ordinal-1}/2。',job['request_id']))
+                db.execute('COMMIT')
+            result=call(ordinal)
+        return result
+
     def run_text(self,job):
         audit=self.pool.state_dir/'official-audit'/job['request_id']
         args=(job['account_key'],job['prompt'],job['native_before'])
@@ -498,6 +526,8 @@ class OfficialPool:
             if result.get('status')=='completed' and str(result.get('response','')).strip()!=READINESS_REPLY:
                 return {**result,'status':'failed','reason':'readiness_unexpected_reply'}
             return result
+        if result.get('capacity_retry_safe') is True:
+            return self.capacity_retries(job,result,lambda n:self.runtime.run(*args,audit/f'attempt-{n}'))
         if result.get('cli_print_timeout') is True or job.get('timeout_block'):
             # A fresh native session avoids appending duplicate turns to the timed-out
             # conversation. Existing multi-turn context is not replayed or discarded.
@@ -601,6 +631,8 @@ class OfficialPool:
         result=analyze(self.runtime,job['account_key'],parts,receipt,keep_partial=True)
         if result.get('status')=='completed' and generic_refusal(result.get('response')):
             result={**result,'status':'failed','reason':BAD_REPLY}
+        if result.get('capacity_retry_safe') is True:
+            return self.capacity_retries(job,result,lambda n:analyze(self.runtime,job['account_key'],parts,receipt.with_suffix(f'.attempt-{n}.json'),keep_partial=True))
         if not job.get('no_retry') and self.reserve_retry(job,result):
             result=analyze(self.runtime,job['account_key'],parts,receipt.with_suffix('.attempt-2.json'),keep_partial=True)
             if result.get('status')=='completed' and generic_refusal(result.get('response')):
