@@ -1,5 +1,6 @@
 """Credential ingestion and rollback, independent of the upstream engine."""
 
+import asyncio
 import json
 import math
 import re
@@ -127,30 +128,33 @@ class Vault:
         self.path(ident).unlink(missing_ok=True)
 
 
-async def inject_verified(context, page, bundle, read_state, vault):
+class ImportRestored(ValueError):
+    """The previous browser login was restored after an unsuccessful import."""
+
+
+async def inject_verified(context, page, bundle, read_state, vault, *, finalize):
     """A successful write is not authentication. Restore old cookies on failure."""
+    from login_readiness import read_when_ready
+
     old = await context.cookies()
     backup = vault.put({"cookies": old})
     restored = True
+    failure = "登录导入未通过在线邮箱核对"
     try:
         await context.clear_cookies()
         await context.add_cookies(bundle["cookies"])
         await page.goto("https://flow.google.com/", wait_until="domcontentloaded", timeout=45000)
         for _ in range(12):
-            state = await page.evaluate(read_state)
+            state = await read_when_ready(page, read_state)
             emails = [str(e).lower() for e in state.get("emails", [])]
             if state.get("signed_in") and emails == [bundle["email"]]:
-                return {
-                    "email": bundle["email"],
-                    "message": "登录信息已写入，在线邮箱核对一致，登录成功。",
-                }
-            import asyncio
-
+                failure = "邮箱一致，但项目同步或窗口登记未完成"
+                return await finalize(state)
+            if state.get("signed_in") and emails and bundle["email"] not in emails:
+                break
             await asyncio.sleep(1)
-        raise ValueError(
-            "Google 未接受此登录信息，或实际邮箱不一致。已恢复原登录资料；请使用远程登录窗口处理。"
-        )
-    except Exception:
+        raise ValueError(failure)
+    except (Exception, asyncio.CancelledError) as error:
         try:
             original = vault.get(backup)["cookies"]
             await context.clear_cookies()
@@ -161,9 +165,9 @@ async def inject_verified(context, page, bundle, read_state, vault):
             raise ValueError(
                 "登录导入未成功，原登录资料恢复失败。已停止此账号的任务，请使用远程登录检查。"
             ) from None
-        raise ValueError(
-            "登录导入未通过在线邮箱核对，已恢复原登录资料。请使用远程登录窗口处理。"
-        ) from None
+        if isinstance(error, asyncio.CancelledError):
+            raise
+        raise ImportRestored(failure + "。已恢复原登录资料，可重新导入或使用远程登录。") from None
     finally:
         if restored:
             vault.remove(backup)

@@ -183,9 +183,11 @@ class Console:
                     retry_evidence = 'transient_before_submit'
             if task["kind"] in {"sync", "session_import"} and not isinstance(exc, AccountWindowBusy):
                 account = self.store.account(task["profile"])
-                self.store.update_account(
-                    task["profile"], account["email"], "attention", safe_error(exc)
-                )
+                from login_sessions import ImportRestored
+                if account["state"] != "verified" or not isinstance(exc, ImportRestored):
+                    self.store.update_account(
+                        task["profile"], account["email"], "attention", safe_error(exc)
+                    )
             result = {"source_jobs": provenance}
             if isinstance(exc, PreSubmissionFailure) and not provenance:
                 result["submission"] = {"status":"not_submitted","stage":"preparing"}
@@ -1161,11 +1163,19 @@ def create_app(root, adapter, test=False):
                 c.store.update_account(profile, bundle["email"], "unknown")
             if c.remote.for_profile(profile):
                 raise ValueError("此账号正在远程登录，请先完成远程登录再同步。")
-            if c.store.rows(
-                "SELECT id FROM tasks WHERE profile=? AND kind='session_import' AND status IN ('queued','running')",
+            pending = c.store.rows(
+                "SELECT id,status,params FROM tasks WHERE profile=? AND kind='session_import' AND status IN ('queued','running')",
                 (profile,),
-            ):
-                raise ValueError("此账号已有登录同步正在处理，请等待结果。")
+            )
+            if pending:
+                previous = pending[0]
+                if len(pending) != 1 or json.loads(previous["params"]).get("expected_email") != bundle["email"]:
+                    raise ValueError("此配置正在导入另一项登录信息，请等待核对结果。")
+                return JSONResponse({
+                    "id": previous["id"], "profile": profile, "email": bundle["email"],
+                    "status": previous["status"], "reused": True,
+                    "message": "已有导入正在核对，继续查看原任务。",
+                }, status_code=202)
             ident = c.vault.put(bundle)
             try:
                 task = c.store.create_task(
@@ -1202,6 +1212,7 @@ def create_app(root, adapter, test=False):
                 "email": (row.get("result") or {}).get("email"),
                 "error": row.get("error"),
                 "message": (row.get("result") or {}).get("message"),
+                "project_count": len((row.get("result") or {}).get("projects", [])),
             }
         )
 

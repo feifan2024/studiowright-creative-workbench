@@ -40,6 +40,16 @@ class AccountWindowBusy(ValueError):
     """An account operation owns the window lock; login was not checked."""
 
 
+def flow_home_projects(state):
+    projects = {}
+    for item in state["projects"]:
+        match = re.search(r"/project/([0-9a-f-]{36})", item["url"], re.I)
+        if match:
+            ident = match[1].lower()
+            projects[ident] = {"id": ident, "title": item["title"] or "未命名项目"}
+    return list(projects.values())
+
+
 class RealAdapter:
     def __init__(self, root):
         self.root = Path(root)
@@ -242,12 +252,25 @@ class RealAdapter:
                     and account["email"].lower() != bundle["email"]
                 ):
                     raise ValueError("登录包邮箱与目标账号不一致，未写入。")
-                result = await inject_verified(
-                    studio.session.context, page, bundle, READ_STATE, vault
+                async def finalize(state):
+                    from login_readiness import read_when_ready
+                    for _ in range(6):
+                        if state.get("projects"):
+                            break
+                        await asyncio.sleep(.5)
+                        state = await read_when_ready(page, READ_STATE)
+                        if not state.get("signed_in") or state.get("emails") != [bundle["email"]]:
+                            raise ValueError("Flow 首页登录状态变化。")
+                    projects = flow_home_projects(state)
+                    await studio.session.register_verified_identity(bundle["email"])
+                    message = f"登录及窗口已核对，已同步 {len(projects)} 个首页项目。"
+                    if not projects:
+                        message += "可在 Flow 创建项目后检查就绪。"
+                    return {"email": bundle["email"], "projects": projects, "message": message}
+
+                return await inject_verified(
+                    studio.session.context, page, bundle, READ_STATE, vault, finalize=finalize
                 )
-                await studio.session.register_verified_identity(bundle["email"])
-                result["projects"] = []
-                return result
             state = None
             from login_readiness import read_when_ready
             for _ in range(10):
@@ -303,15 +326,9 @@ class RealAdapter:
                     raise ValueError(
                         f"本地登录资料已载入；Flow 首页未确认目标邮箱（当前：{observed}，登录标识：{'有' if state.get('signed_in') else '无'}）。未保存项目列表，未提交生成。"
                     )
-                projects = {}
-                for item in state["projects"]:
-                    match = re.search(r"/project/([0-9a-f-]{36})", item["url"], re.I)
-                    if match:
-                        ident = match[1].lower()
-                        projects[ident] = {"id": ident, "title": item["title"] or "未命名项目"}
                 return {
                     "email": email,
-                    "projects": list(projects.values()),
+                    "projects": flow_home_projects(state),
                     "message": "已核对登录并读取首页当前加载的项目；不代表全部历史项目。",
                 }
             if kind == "media":
