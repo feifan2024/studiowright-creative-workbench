@@ -35,6 +35,9 @@ class GeminiAuthorizationTest(unittest.TestCase):
             block = pool.readiness_block(db, 'a')
             self.assertIsNone(pool.reason(db, 'a', inventory, block, readiness_probe=True))
             self.assertEqual(db.execute("SELECT status FROM requests").fetchone()[0], 'unknown')
+            for quota_reason in ('activation_verification_required', 'official_authorization_verification_required'):
+                db.execute('UPDATE official_account_blocks SET reason=?', (quota_reason,))
+                self.assertIsNone(pool.reason(db, 'a', inventory))
             db.execute("UPDATE official_account_blocks SET reason='verification_required'")
             self.assertEqual(pool.reason(db, 'a', inventory, pool.readiness_block(db, 'a'),
                                          readiness_probe=True), 'official_call_blocked')

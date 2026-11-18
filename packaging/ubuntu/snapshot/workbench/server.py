@@ -475,7 +475,8 @@ def account_rows(state):
         if not isinstance(row, dict):
             continue
         profile = identity_text(row.get("profile"))
-        if not profile or profile in profiles:
+        # Auxiliary export browser is not a dispatchable account.
+        if not profile or profile == "music-export" or profile in profiles:
             continue
         profiles.add(profile)
         info = by_profile.get(profile, {}) if profile not in duplicates else {}

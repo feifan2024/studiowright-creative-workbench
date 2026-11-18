@@ -1,0 +1,367 @@
+--- a/internal/service/accounts.go
++++ b/internal/service/accounts.go
+@@ -411,18 +411,24 @@
+ }
+ 
+ func (s *AccountService) refreshAccountByAvailableCredentials(ctx context.Context, account domain.Account) (domain.Account, error) {
++	var sessionErr error
+ 	if strings.TrimSpace(account.RefreshToken) != "" {
+ 		refreshed, err := s.client.RefreshSupabase(ctx, account)
+ 		if err == nil {
+ 			return refreshed, nil
+ 		}
+ 		account = refreshed
++		sessionErr = err
+ 		if strings.TrimSpace(account.ProviderToken) == "" && strings.TrimSpace(account.ProviderRefreshToken) == "" {
+ 			return account, err
+ 		}
+ 	}
+ 	if strings.TrimSpace(account.ProviderToken) != "" || strings.TrimSpace(account.ProviderRefreshToken) != "" {
+-		return s.refreshWithProviderCredentials(ctx, account)
++		refreshed, err := s.refreshWithProviderCredentials(ctx, account)
++		if err != nil && sessionErr != nil {
++			return refreshed, fmt.Errorf("session refresh failed: %v; provider fallback failed: %w", sessionErr, err)
++		}
++		return refreshed, err
+ 	}
+ 	if strings.TrimSpace(account.Cookies) != "" {
+ 		return s.client.RefreshFromCookies(ctx, account)
+--- a/internal/service/flowmusic.go
++++ b/internal/service/flowmusic.go
+@@ -318,105 +318,17 @@
+ 
+ 	}
+ 
+-	// FlowMusic API validates the Supabase JWT (access_token), not the provider_token.
+-
+-	if supabaseJWT := getString(payload, "access_token"); supabaseJWT != "" {
+-
+-		account.AT = supabaseJWT
+-
+-	}
+-
+-	if account.ProviderToken == "" {
+-
+-		return account, fmt.Errorf("supabase refresh succeeded but provider_token is missing; cannot update FlowMusic bearer")
+-
+-	}
+-
+-	// Supabase refresh didn't return provider_token (old token is likely expired).
+-
+-	// Try Google OAuth refresh directly if client_secret is configured.
+-
+-	if supabasePT == "" && strings.TrimSpace(account.ProviderRefreshToken) != "" {
+-
+-		if secret := strings.TrimSpace(c.cfg.GoogleOAuthClientSecret); secret != "" {
+-
+-			refreshed, oauthErr := c.RefreshGoogleProviderToken(ctx, account)
+-
+-			if oauthErr == nil {
+-
+-				account = refreshed
+-
+-				supabasePT = account.ProviderToken
+-
+-			}
+-
+-		}
+-
+-	}
+-
+-	// Try to get a valid flow_bearer via SaveGoogle.
+-
+-	// If provider_token is expired, SaveGoogle will return 401.
+-
+-	// Save the Supabase JWT before it gets overwritten — FlowMusic validates this JWT.
+-
+-	supabaseJWT := getString(payload, "access_token")
+-
+-	flowBearer, saveErr := c.saveAndResolveFlowBearer(ctx, &account, payload)
+-
+-	if saveErr != nil {
+-
+-		flowBearer = strings.TrimSpace(account.ProviderToken)
+-
+-		if supabasePT == "" {
+-
+-			if strings.TrimSpace(c.cfg.GoogleOAuthClientSecret) == "" {
+-
+-				account.LastRefreshResult = "supabase_refresh_no_provider_token: 请在环境变量 FLOWMUSIC_GOOGLE_OAUTH_CLIENT_SECRET 中配置 Google OAuth client_secret，或重新导入账号"
+-
+-			} else {
+-
+-				account.LastRefreshResult = "supabase_refresh_no_provider_token: Google OAuth 刷新失败，provider_token 已过期"
+-
+-			}
+-
+-		} else {
+-
+-			account.LastRefreshResult = "supabase_refresh_use_provider_token_directly"
+-
+-		}
+-
+-	} else if strings.TrimSpace(flowBearer) == "" {
+-
+-		flowBearer = strings.TrimSpace(account.ProviderToken)
+-
+-		account.LastRefreshResult = "supabase_refresh_use_provider_token_directly"
+-
+-	} else {
+-
+-		account.LastRefreshResult = "supabase_refresh_and_flow_bearer_success"
+-
+-	}
+-
+-	account.FlowBearer = flowBearer
+-
+-	// AT stores the Supabase JWT (which FlowMusic's API validates)
+-
+-	// instead of the provider token. This ensures API calls use the
+-
+-	// correct Bearer token even when the provider_token has expired.
+-
+-	if supabaseJWT != "" {
+-
+-		account.AT = supabaseJWT
+-
+-	} else {
+-
+-		account.AT = flowBearer
+-
+-	}
+-
+-	account.AccessToken = flowBearer
++	// Supabase returns the application session. Google provider tokens are
++	// separate credentials and need not be renewed for an existing session.
++	sessionToken := strings.TrimSpace(getString(payload, "access_token"))
++	if sessionToken == "" {
++		return account, fmt.Errorf("supabase refresh response missing access_token")
++	}
++	account.Cookies = buildSupabaseAuthCookie(payload, &account)
++	account.FlowBearer = sessionToken
++	account.AT = sessionToken
++	account.AccessToken = sessionToken
++	account.LastRefreshResult = "supabase_session_refreshed"
+ 
+ 	return account, nil
+ 
+--- a/internal/service/flowmusic_test.go
++++ b/internal/service/flowmusic_test.go
+@@ -95,10 +95,10 @@
+ 	if err != nil {
+ 		t.Fatalf("RefreshSupabase() error = %v", err)
+ 	}
+-	if !flowSaveCalled {
+-		t.Fatalf("expected SaveGoogle to be called")
+-	}
+-	if updated.RefreshToken != "new-refresh" || updated.FlowBearer != "flow-bearer" || updated.AT != "supabase-access" || updated.AccessToken != "flow-bearer" {
++	if flowSaveCalled {
++		t.Fatalf("must not call provider save")
++	}
++	if updated.RefreshToken != "new-refresh" || updated.FlowBearer != "supabase-access" || updated.AT != "supabase-access" || updated.AccessToken != "supabase-access" {
+ 		t.Fatalf("unexpected token fields: %+v", updated)
+ 	}
+ 	if updated.Email != "user@example.test" || updated.Name != "Test User" {
+@@ -161,18 +161,18 @@
+ 	if err != nil {
+ 		t.Fatalf("RefreshSupabase() error = %v", err)
+ 	}
+-	if saveGoogleBody["access_token"] != "stored-google-access" || saveGoogleBody["refresh_token"] != "stored-google-refresh" {
++	if saveGoogleBody != nil {
+ 		t.Fatalf("SaveGoogle body did not use stored provider credentials: %+v", saveGoogleBody)
+ 	}
+ 	if updated.RefreshToken != "new-refresh" ||
+ 		updated.ProviderToken != "stored-google-access" ||
+ 		updated.ProviderRefreshToken != "stored-google-refresh" ||
+-		updated.FlowBearer != "flow-bearer" {
++		updated.FlowBearer != "supabase-access" {
+ 		t.Fatalf("stored provider credentials were not preserved: %+v", updated)
+ 	}
+ }
+ 
+-func TestRefreshSupabaseFailsWithoutFlowBearer(t *testing.T) {
++func TestRefreshSupabaseWorksWithoutProviderToken(t *testing.T) {
+ 	supabaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		writeTestJSON(t, w, map[string]any{
+ 			"access_token":  "supabase-access",
+@@ -190,11 +190,11 @@
+ 	})
+ 
+ 	updated, err := client.RefreshSupabase(context.Background(), domain.Account{RefreshToken: "old-refresh"})
+-	if err == nil {
+-		t.Fatalf("RefreshSupabase() error = nil, want missing provider_token error")
+-	}
+-	if updated.FlowBearer != "" || updated.AT != "supabase-access" || updated.AccessToken != "" {
+-		t.Fatalf("Supabase access token must not be treated as FlowMusic bearer: %+v", updated)
++	if err != nil {
++		t.Fatalf("RefreshSupabase() error = nil, want successful renewal")
++	}
++	if updated.FlowBearer != "supabase-access" || updated.AT != "supabase-access" || updated.AccessToken != "supabase-access" {
++		t.Fatalf("Supabase access token must be treated as FlowMusic bearer: %+v", updated)
+ 	}
+ }
+ 
+@@ -863,14 +863,14 @@
+ 	if err != nil {
+ 		t.Fatalf("Acquire() error = %v", err)
+ 	}
+-	if account.ID != id || account.FlowBearer != "fresh-flow-bearer" || account.RefreshToken != "fresh-refresh-token" {
++	if account.ID != id || account.FlowBearer != "supabase-access" || account.RefreshToken != "fresh-refresh-token" {
+ 		t.Fatalf("Acquire() did not refresh missing bearer: %+v", account)
+ 	}
+ 	stored, err := db.GetAccount(context.Background(), id)
+ 	if err != nil {
+ 		t.Fatalf("GetAccount() error = %v", err)
+ 	}
+-	if stored.FlowBearer != "fresh-flow-bearer" || stored.AT != "fresh-flow-bearer" {
++	if stored.FlowBearer != "supabase-access" || stored.AT != "supabase-access" {
+ 		t.Fatalf("refreshed bearer was not persisted: %+v", stored)
+ 	}
+ }
+@@ -1147,7 +1147,7 @@
+ 	}
+ }
+ 
+-func TestAcquireUsesProviderRefreshReturnedBySupabaseWhenProviderTokenMissing(t *testing.T) {
++func TestAcquireUsesSessionWithoutProviderRefresh(t *testing.T) {
+ 	supabaseCalled := false
+ 	supabaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		supabaseCalled = true
+@@ -1246,14 +1246,14 @@
+ 	if err != nil {
+ 		t.Fatalf("Acquire() error = %v", err)
+ 	}
+-	if !supabaseCalled || !oauthCalled || !saveGoogleCalled {
++	if !supabaseCalled || oauthCalled || saveGoogleCalled {
+ 		t.Fatalf("Acquire() did not use full refresh chain: supabase=%v oauth=%v saveGoogle=%v", supabaseCalled, oauthCalled, saveGoogleCalled)
+ 	}
+ 	if account.ID != id ||
+ 		account.RefreshToken != "fresh-refresh-token" ||
+-		account.ProviderToken != "fresh-google-access" ||
++		account.ProviderToken != "" ||
+ 		account.ProviderRefreshToken != "google-refresh" ||
+-		account.FlowBearer != "fresh-flow-bearer" {
++		account.FlowBearer != "supabase-access" {
+ 		t.Fatalf("Acquire() did not preserve and refresh chained credentials: %+v", account)
+ 	}
+ 	stored, err := db.GetAccount(context.Background(), id)
+@@ -1261,18 +1261,17 @@
+ 		t.Fatalf("GetAccount() error = %v", err)
+ 	}
+ 	if stored.RefreshToken != "fresh-refresh-token" ||
+-		stored.ProviderToken != "fresh-google-access" ||
++		stored.ProviderToken != "" ||
+ 		stored.ProviderRefreshToken != "google-refresh" ||
+-		stored.FlowBearer != "fresh-flow-bearer" ||
+-		stored.LastRefreshResult != "provider_refresh_token_google_refresh_and_flow_bearer_success" {
++		stored.FlowBearer != "supabase-access" ||
++		stored.LastRefreshResult != "supabase_session_refreshed" {
+ 		t.Fatalf("full refresh chain was not persisted: %+v", stored)
+ 	}
+ }
+ 
+-func TestRefreshAccountPersistsPartialSupabaseRefreshOnProviderTokenMissing(t *testing.T) {
++func TestRefreshAccountPersistsRotationOnMissingAccessToken(t *testing.T) {
+ 	supabaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		writeTestJSON(t, w, map[string]any{
+-			"access_token":  "supabase-access",
+ 			"refresh_token": "rotated-refresh-token",
+ 			"expires_in":    3600,
+ 			"user": map[string]any{
+@@ -1324,8 +1323,8 @@
+ 
+ 	accounts := NewAccountService(cfg, db, NewFlowMusicClient(cfg))
+ 	_, err = accounts.RefreshAccount(context.Background(), id)
+-	if err == nil || !strings.Contains(err.Error(), "provider_token is missing") {
+-		t.Fatalf("RefreshAccount() error = %v, want missing provider_token", err)
++	if err == nil || !strings.Contains(err.Error(), "missing access_token") {
++		t.Fatalf("RefreshAccount() error = %v, want missing access_token", err)
+ 	}
+ 	stored, err := db.GetAccount(context.Background(), id)
+ 	if err != nil {
+@@ -1334,7 +1333,7 @@
+ 	if stored.RefreshToken != "rotated-refresh-token" || stored.Email != "rotated@example.test" || stored.Name != "Rotated User" {
+ 		t.Fatalf("partial Supabase refresh fields were not persisted: %+v", stored)
+ 	}
+-	if !strings.Contains(stored.LastRefreshResult, "provider_token is missing") {
++	if !strings.Contains(stored.LastRefreshResult, "missing access_token") {
+ 		t.Fatalf("last refresh result = %q, want provider_token error", stored.LastRefreshResult)
+ 	}
+ }
+@@ -1450,13 +1449,13 @@
+ 	if err != nil {
+ 		t.Fatalf("RefreshCredits() error = %v", err)
+ 	}
+-	if !saveGoogleCalled {
++	if saveGoogleCalled {
+ 		t.Fatalf("RefreshCredits() should refresh missing bearer before billing")
+ 	}
+ 	if creditsAuth != "Bearer supabase-access" || subscriptionAuth != "Bearer supabase-access" {
+ 		t.Fatalf("billing requests used wrong Authorization: credits=%q subscription=%q", creditsAuth, subscriptionAuth)
+ 	}
+-	if account.FlowBearer != "fresh-flow-bearer" || account.RefreshToken != "fresh-refresh-token" {
++	if account.FlowBearer != "supabase-access" || account.RefreshToken != "fresh-refresh-token" {
+ 		t.Fatalf("refreshed token fields were not persisted: %+v", account)
+ 	}
+ 	if account.Credits != 42 || account.TokensRemaining != 7.5 || account.SubscriptionTier != "PAYGATE_TIER_ONE" {
+@@ -1676,7 +1675,7 @@
+ 	if err != nil {
+ 		t.Fatalf("Acquire() error = %v", err)
+ 	}
+-	if account.ID != id || account.FlowBearer != "fresh-flow-bearer" {
++	if account.ID != id || account.FlowBearer != "supabase-access" {
+ 		t.Fatalf("Acquire() did not use persisted refresh lead: %+v", account)
+ 	}
+ }
+@@ -1760,14 +1759,14 @@
+ 	if err != nil {
+ 		t.Fatalf("Acquire() error = %v", err)
+ 	}
+-	if account.ID != id || account.FlowBearer != "fresh-bearer-mode-flow-bearer" || account.RefreshToken != "fresh-bearer-mode-refresh-token" {
++	if account.ID != id || account.FlowBearer != "supabase-access" || account.RefreshToken != "fresh-bearer-mode-refresh-token" {
+ 		t.Fatalf("bearer protocol account was not refreshed before expiry: %+v", account)
+ 	}
+ 	stored, err := db.GetAccount(ctx, id)
+ 	if err != nil {
+ 		t.Fatalf("GetAccount() error = %v", err)
+ 	}
+-	if stored.FlowBearer != "fresh-bearer-mode-flow-bearer" || stored.LastRefreshAt == nil {
++	if stored.FlowBearer != "supabase-access" || stored.LastRefreshAt == nil {
+ 		t.Fatalf("refreshed bearer protocol account was not persisted: %+v", stored)
+ 	}
+ }
+@@ -1967,7 +1966,7 @@
+ 	if err != nil {
+ 		t.Fatalf("Acquire() error = %v", err)
+ 	}
+-	if account.ID != id || account.FlowBearer != "fresh-flow-bearer" || account.RefreshToken != "fresh-refresh-token" {
++	if account.ID != id || account.FlowBearer != "supabase-access" || account.RefreshToken != "fresh-refresh-token" {
+ 		t.Fatalf("Acquire() did not refresh stale unknown-expiry bearer: %+v", account)
+ 	}
+ }
+--- a/internal/httpapi/server_test.go
++++ b/internal/httpapi/server_test.go
+@@ -1675,11 +1675,11 @@
+ 		AccessToken string `json:"access_token"`
+ 	}
+ 	decodeResponse(t, resp, &result)
+-	if !result.Success || result.AccessToken != "flow-bearer-through-proxy" {
++	if !result.Success || result.AccessToken != "supabase-access" {
+ 		t.Fatalf("unexpected ST to AT response: %+v", result)
+ 	}
+-	if !seen["supabase.test/auth/v1/token"] || !seen["flowmusic.test/__api/auth/google/save"] {
+-		t.Fatalf("expected Supabase and FlowMusic calls through proxy, saw %+v", seen)
++	if !seen["supabase.test/auth/v1/token"] || seen["flowmusic.test/__api/auth/google/save"] {
++		t.Fatalf("expected only session refresh through proxy, saw %+v", seen)
+ 	}
+ }
+ 
+@@ -1764,7 +1764,7 @@
+ 	if err != nil {
+ 		t.Fatalf("GetAccount() error = %v", err)
+ 	}
+-	if stored.FlowBearer != "fresh-flow-bearer" || stored.RefreshToken != "fresh-refresh-token" {
++	if stored.FlowBearer != "supabase-access" || stored.RefreshToken != "fresh-refresh-token" {
+ 		t.Fatalf("token test did not persist refreshed bearer: %+v", stored)
+ 	}
+ }
