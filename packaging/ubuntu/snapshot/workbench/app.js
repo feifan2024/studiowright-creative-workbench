@@ -1256,14 +1256,14 @@ function renderAccountInsights(snapshot, target) {
     const buttonLabel='一键就绪';
     return `<button type="button" class="dashboard-ring-item governance-entry" data-governance="${service.toLowerCase()}" aria-controls="governanceDialog" aria-label="${service} ${buttonLabel}，${known ? `就绪 ${amount(ready)} / ${total}` : '状态待核对'}"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${total || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-entry-label">${buttonLabel} →</span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></button>`;
   };
-  // 音乐账号池圆环：就绪（令牌未过期）账号数 / 池内账号数，点击进入音乐生成页。
+  // 音乐账号池圆环：就绪（令牌未过期）账号数 / 池内账号数，只修复未就绪账号。
   const musicAccounts = musicServiceStatus?.accounts || [];
   const musicTotal = musicAccounts.length;
   const musicReady = musicAccounts.filter(a => a.ready).length;
   const musicKnown = musicServiceStatus?.available === true && musicTotal > 0;
   const musicLabel = !musicServiceStatus?.available ? (musicServiceStatus?.reason || '音乐服务暂不可用')
     : musicTotal === 0 ? '账号池为空' : musicReady < musicTotal ? `${musicTotal - musicReady} 个未就绪` : '';
-  const musicRingMarkup = `<button type="button" class="dashboard-ring-item governance-entry" data-view="music" aria-label="音乐生成，${musicKnown ? `就绪 ${amount(musicReady)} / ${musicTotal}` : '状态待读取'}"><span>MUSIC</span><span class="insight-ring insight-ring--music ${musicKnown ? '' : 'is-unknown'}" data-dashboard-ring="MUSIC"><span class="governance-ring-center"><strong>${musicKnown ? amount(musicReady) : '—'}<small> / ${musicTotal || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-entry-label">去生成 →</span><span class="governance-alert" data-govern-alert="music" ${musicLabel ? '' : 'hidden'}>${esc(musicLabel)}</span></button>`;
+  const musicRingMarkup = `<button type="button" class="dashboard-ring-item governance-entry" data-music-readiness aria-label="音乐一键就绪，${musicKnown ? `就绪 ${amount(musicReady)} / ${musicTotal}` : '状态待读取'}"><span>MUSIC</span><span class="insight-ring insight-ring--music ${musicKnown ? '' : 'is-unknown'}" data-dashboard-ring="MUSIC"><span class="governance-ring-center"><strong>${musicKnown ? amount(musicReady) : '—'}<small> / ${musicTotal || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-entry-label">一键就绪 →</span><span class="governance-alert" data-govern-alert="music" ${musicLabel ? '' : 'hidden'}>${esc(musicLabel)}</span></button>`;
   target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验` : (geminiPending || geminiBlocked ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ') : null))}${musicRingMarkup}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${accounts.length} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
   <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-runtime-activate="flow">检查授权与额度</button><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话轮询分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
   $('dashboardRuntime').replaceChildren(scope.querySelector('[data-dashboard-running]'));
@@ -1285,6 +1285,8 @@ function renderAccountInsights(snapshot, target) {
   scope.querySelector('[data-insight-conversations]').addEventListener('click',()=>setView('conversations'));
   scope.querySelectorAll('[data-governance]').forEach(button=>button.addEventListener('click',()=>openGovernance(button.dataset.governance)));
   scope.querySelectorAll('[data-runtime-activate]').forEach(button=>button.addEventListener('click',()=>openGovernance(button.dataset.runtimeActivate)));
+  scope.querySelector('[data-music-readiness]')?.addEventListener('click', startMusicReadiness);
+  renderMusicReadiness();
   renderServiceActivationFeedback(scope);
   for (const service of expandedResults) {
     const details=scope.querySelector(`[data-activation-feedback="${service}"] details`);
@@ -1943,10 +1945,67 @@ function renderAccountQuotas() {
 
 // 音乐任务持久保存；刷新与重连只读取原任务。
 let musicServiceStatus = null;
+let musicReadinessState = null;
+let musicReadinessPolling = false;
+let musicReadinessStarting = false;
+function renderMusicReadiness() {
+  const button = document.querySelector('[data-music-readiness]');
+  if (button) {
+    button.disabled = musicReadinessState?.state === 'running' || musicReadinessPolling || musicReadinessStarting;
+    button.querySelector('.governance-entry-label').textContent = button.disabled ? '正在检查…' : '一键就绪 →';
+  }
+  let feedback = $('musicReadinessFeedback');
+  if (!feedback && $('operationsDashboard')) {
+    feedback = document.createElement('div');
+    feedback.id = 'musicReadinessFeedback';
+    feedback.className = 'dashboard-send-status';
+    feedback.setAttribute('role', 'status');
+    $('operationsDashboard').after(feedback);
+  }
+  if (!feedback) return;
+  feedback.hidden = !musicReadinessState || musicReadinessState.state === 'idle';
+  feedback.innerHTML = musicReadinessState ? `<strong>音乐就绪检查</strong><p>${esc(musicReadinessState.message)}</p>${(musicReadinessState.items || []).map(row => `<p>${esc(row.email)}：${esc(row.result)}</p>`).join('')}` : '';
+}
+async function pollMusicReadiness() {
+  if (musicReadinessPolling) return;
+  musicReadinessPolling = true;
+  try {
+    while (musicReadinessState?.state === 'running') {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      musicReadinessState = await getJson('/api/music/readiness', {timeoutMs: 12000});
+      renderMusicReadiness();
+    }
+    await refreshMusicStatus();
+  } catch (error) {
+    musicReadinessState = {state:'failed', message:'连接中断，无法读取检查结果。重新点击可查询正在执行的检查，不会重复启动。', items:[]};
+    renderMusicReadiness();
+  } finally { musicReadinessPolling = false; renderMusicReadiness(); }
+}
+async function startMusicReadiness() {
+  if (musicReadinessState?.state === 'running' || musicReadinessPolling || musicReadinessStarting) return;
+  musicReadinessStarting = true;
+  musicReadinessState = {state:'running', message:'正在连接音乐服务…', items:[]};
+  renderMusicReadiness();
+  try {
+    musicReadinessState = await postJson('/api/music/readiness', {});
+    renderMusicReadiness();
+    if (musicReadinessState.state === 'running') await pollMusicReadiness();
+    else await refreshMusicStatus();
+  } catch (error) {
+    musicReadinessState = {state:'failed', message:'音乐检查未完成：' + error.message, items:[]};
+    renderMusicReadiness();
+  } finally { musicReadinessStarting = false; renderMusicReadiness(); }
+}
+
 async function refreshMusicStatus() {
   const data = await getJson('/api/music/status', {timeoutMs: 12000}).catch(() => null);
   musicServiceStatus = data;
   renderMusicStatus();
+  const check = await getJson('/api/music/readiness', {timeoutMs: 12000}).catch(() => null);
+  if (check && !musicReadinessStarting && (!musicReadinessState || musicReadinessState.state === 'idle' || check.state === 'running')) musicReadinessState = check;
+  if (state.snapshot && state.view === 'overview') renderAccountInsights(state.snapshot, $('overviewInsights'));
+  renderMusicReadiness();
+  if (musicReadinessState?.state === 'running') void pollMusicReadiness();
 }
 function renderMusicStatus() {
   const el = $("musicCredits");
