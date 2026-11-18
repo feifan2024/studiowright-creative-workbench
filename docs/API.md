@@ -228,3 +228,13 @@ if record.get("task_id"):
 已入库素材：`GET /api/library?page=1&limit=24` 查列表，`GET /api/library/{素材ID}` 查详情，`GET /api/library/{素材ID}/file` 下载原文件。
 
 错误通常返回 `{"error":"原因"}`。`401` 检查密钥，`400` 检查请求参数，`404` 核对路径或编号。`GET /health` 检查 API 是否可访问，无需密钥。
+
+### 工作台音乐任务恢复
+
+以下是工作台同源接口（18920 端口），沿用工作台的 Origin 和 `X-Workbench-Request: 1` 校验，不是统一 API 密钥端口的接口。
+
+- `POST /api/music/jobs`：传入 `request_id`（标准 UUID）、`prompt`、`model`，返回 `202` 和 `job`。相同编号、相同内容只创建一次；同编号不同内容拒绝。
+- `GET /api/music/jobs/{request_id}`：只读取原任务，不发起生成。
+- `GET /api/music/jobs/latest`：读取最近任务，供页面首次恢复使用。
+
+状态依次为 `generating`（生成中）、`ingesting`（结果已收到、正在入库）、`completed`。完成后的 `result` 保存音频地址和入库结果。`unknown` 表示结果待核对，不会自动重发。页面刷新、网络恢复仅查询原编号；后台服务重启时未完成任务保留为待核对记录，不会自动重复生成。旧同步接口 `/api/music/generate` 保留兼容，新页面使用持久化任务接口。

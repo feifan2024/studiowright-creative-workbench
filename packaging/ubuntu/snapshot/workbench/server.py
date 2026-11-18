@@ -1258,6 +1258,14 @@ def music_library_ingest(clips):
 
 def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
     from task_feed import TaskFeed
+    from music_jobs import MusicJobs
+    music_holder = []
+    music_lock = threading.Lock()
+    def get_music_jobs():
+        with music_lock:
+            if not music_holder:
+                music_holder.append(MusicJobs(real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench', music_generate, music_library_ingest, real_pool.maintenance if real_pool else lambda:False))
+            return music_holder[0]
     frontend_connections = threading.BoundedSemaphore(16)
     coordinator = coordinator or Coordinator()
     def task_snapshot():
@@ -1388,6 +1396,11 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 if real_pool and data.get('available'):
                     data['account_order'] = real_pool.official.saved_account_order()
                 return self.json_response(200 if data.get('available') else 503, data)
+            if self.path == '/api/music/jobs/latest':
+                return self.json_response(200, {'job':get_music_jobs().latest()})
+            if self.path.startswith('/api/music/jobs/'):
+                job=get_music_jobs().get(self.path.rsplit('/',1)[-1])
+                return self.json_response(200 if job else 404, {'job':job})
             if self.path == '/api/music/status':
                 return self.json_response(200, music_service_status())
             if project_actions and self.path == '/api/project-actions':
@@ -1636,6 +1649,18 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(503,{'error':'本轮 Flow 就绪治理未完成，请重新检查当前状态。'})
                 finally:
                     FLOW_READINESS_LOCK.release()
+            if self.path == '/api/music/jobs':
+                if not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台提交。'})
+                try:
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0 < length <= 16000:raise ValueError('请求大小不正确。')
+                    body=json.loads(self.rfile.read(length))
+                    if not isinstance(body,dict):raise ValueError('请求格式不正确。')
+                    job=get_music_jobs().submit(body.get('request_id'),body.get('prompt'),body.get('model') or 'lyria-fast')
+                    return self.json_response(202, {'job':job})
+                except (ValueError,TypeError) as exc:
+                    return self.json_response(400, {'error':str(exc)})
             if self.path == '/api/music/generate':
                 if not self.valid(mutation=True):
                     return self.json_response(403, {'error':'请从工作台发起音乐生成。'})
