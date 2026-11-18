@@ -1,0 +1,83 @@
+"""One-click repair preserves healthy, disabled, busy and unresolved accounts."""
+import sqlite3
+import sys
+import unittest
+from pathlib import Path
+from types import SimpleNamespace as S
+from unittest.mock import Mock, patch
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'packaging/ubuntu/snapshot/workbench'))
+from server import readiness_repair_accounts
+from official_pool import OfficialPool
+from gemini_authorization import GeminiAuthorization
+
+class SelectiveReadiness(unittest.TestCase):
+    def setUp(self):
+        self.db=sqlite3.connect(':memory:')
+        self.addCleanup(self.db.close)
+        self.db.executescript("""
+        CREATE TABLE requests(request_id TEXT,account_key TEXT,status TEXT,finished REAL);
+        CREATE TABLE official_jobs(request_id TEXT,reason TEXT,readiness_probe INTEGER);
+        CREATE TABLE official_account_blocks(account_key TEXT,reason TEXT,created REAL);
+        CREATE TABLE account_preferences(account_key TEXT,gemini_enabled INTEGER);
+        CREATE TABLE official_reauth(request_id TEXT,account_key TEXT,state TEXT);
+        CREATE TABLE conversation_turns(request_id TEXT,conversation_id TEXT);
+        CREATE TABLE conversations(id TEXT,native_json TEXT);
+        INSERT INTO account_preferences VALUES('paused',0);
+        INSERT INTO official_account_blocks VALUES('recover','provider_error',1);
+        INSERT INTO official_account_blocks VALUES('busy','provider_error',1);
+        INSERT INTO official_account_blocks VALUES('quota','activation_verification_required',1);
+        INSERT INTO requests VALUES('running','busy','dispatching',NULL);
+        INSERT INTO official_jobs VALUES('running',NULL,0);
+        INSERT INTO requests VALUES('old','healthy','completed',1);
+        INSERT INTO official_jobs VALUES('old',NULL,0);
+        """)
+        self.pool=OfficialPool.__new__(OfficialPool)
+        self.pool.pool=S(connection=lambda:self.db,maintenance=lambda:False)
+        self.pool.runtime=S(inventory=lambda:dict.fromkeys(['healthy','quota','paused','busy','recover'],True))
+        self.pool.pool.official=self.pool
+        self.pool.generate=Mock(return_value=({'request_id':'probe'},True))
+
+    def test_only_recoverable_unready_account_is_probed(self):
+        with patch.object(OfficialPool,'ready',new_callable=lambda:property(lambda self:True)):
+            result=self.pool.queue_readiness_probes([], {})
+        self.assertEqual([r['account_key'] for r in result],['recover'])
+        self.assertEqual(self.pool.generate.call_count,1)
+        self.assertEqual(self.db.execute("SELECT finished FROM requests WHERE request_id='old'").fetchone()[0],1)
+        self.assertEqual(self.db.execute('SELECT gemini_enabled FROM account_preferences').fetchone()[0],0)
+
+    def test_maintenance_does_not_submit_probe(self):
+        self.pool.pool.maintenance=lambda:True
+        with patch.object(OfficialPool,'ready',new_callable=lambda:property(lambda self:True)):
+            self.assertEqual(self.pool.queue_readiness_probes([],{}),[])
+        self.pool.generate.assert_not_called()
+
+    def test_authorization_rechecks_healthy_disabled_and_busy(self):
+        auth=GeminiAuthorization(S(pool=self.pool.pool,runtime=self.pool.runtime))
+        for key in ['healthy','quota','paused','busy']:
+            self.assertFalse(auth.allowed(key,login_only=True),key)
+        self.assertTrue(auth.allowed('recover',login_only=True))
+        self.db.execute("DELETE FROM official_account_blocks WHERE account_key='recover'")
+        self.assertFalse(auth.allowed('recover',login_only=True))
+
+    def test_submission_rechecks_ready_or_busy_before_creating_job(self):
+        from live_pool import Conflict
+        self.db.execute('CREATE TABLE flow_requests(request_id TEXT)')
+        self.db.execute('ALTER TABLE requests ADD COLUMN prompt_digest TEXT')
+        self.db.commit()
+        self.pool.pool.conversation_id=Mock()
+        self.pool.pool.allowed=Mock()
+        for key in ['healthy','busy']:
+            with patch.object(OfficialPool,'ready',new_callable=lambda:property(lambda self:True)):
+                with self.assertRaises(Conflict):
+                    OfficialPool.generate(self.pool,key,'check','new-probe',[],readiness_probe=True)
+            self.assertIsNone(self.db.execute("SELECT 1 FROM requests WHERE request_id='new-probe'").fetchone())
+
+    def test_flow_targets_exclude_ready_disabled_busy_and_review(self):
+        accounts=[dict(profile=k,repairable=k!='paused',review_task='old' if k=='review' else None)
+                  for k in ['healthy','paused','busy','pagebusy','review','broken']]
+        payload=dict(accounts=accounts,busy=['busy'])
+        checks=dict(healthy='ok',paused='binding',busy='binding',pagebusy='busy',review='draft',broken='binding')
+        self.assertEqual([a['profile'] for a in readiness_repair_accounts(payload,checks)],['broken'])
+        self.assertEqual(len(payload['accounts']),6)
+
+if __name__=='__main__':unittest.main()

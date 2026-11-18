@@ -647,6 +647,14 @@ def check_library_storage_target(current, requested, required_bytes):
             'minimum_bytes': minimum, 'active': False}
 
 
+def readiness_repair_accounts(payload, checks):
+    """Only idle, enabled, unready accounts may be changed by the circle."""
+    busy = set(payload.get('busy', []))
+    return [a for a in payload['accounts']
+            if a['repairable'] and a['profile'] not in busy and not a['review_task']
+            and checks.get(a['profile']) not in ('ok', 'busy')]
+
+
 class Sources:
     """Only fixed localhost services and a small GET allowlist are reachable."""
 
@@ -956,9 +964,19 @@ class Sources:
                 if len(payload['accounts'])!=1:
                     return {'released':False}
                 payload['manual_review'] = True
-            result = subprocess.run([str(python),'-B',str(recovery)],input=json.dumps(payload).encode(),
-                                    capture_output=True,check=True,timeout=175)
-            repairs = json.loads(result.stdout)
+            recovery_payload = dict(payload)
+            if not manual_review:
+                before = subprocess.run([str(python),'-B',str(helper)], input=json.dumps(payload).encode(),
+                                        capture_output=True, check=True, timeout=10)
+                before_checks = json.loads(before.stdout)
+                if not isinstance(before_checks, dict):
+                    raise ValueError('invalid_readiness_result')
+                recovery_payload['accounts'] = readiness_repair_accounts(payload, before_checks)
+                recovery_payload['safe_only'] = True
+            if recovery_payload['accounts']:
+                result = subprocess.run([str(python),'-B',str(recovery)],input=json.dumps(recovery_payload).encode(),
+                                        capture_output=True,check=True,timeout=175)
+                repairs = json.loads(result.stdout)
             if manual_review:
                 return {'released':any('release_review' in r.get('actions',[]) for r in repairs.values())}
             state, _ = self.read('flow','/api/state')
@@ -976,14 +994,6 @@ class Sources:
         result = subprocess.run([str(python),'-B',str(helper)], input=json.dumps(payload).encode(),
                                 capture_output=True, check=True, timeout=10)
         checks = json.loads(result.stdout)
-        if repair and not automatic and not payload.get('operator_dispatch_paused') and any(
-                checks.get(a['profile']) == 'ok' and a['flow_login'] == 'verified'
-                and not a['flow_balance_fresh'] and not a['flow_risk_paused'] and not a['flow_cooling']
-                for a in account_rows(state) if a['flow_risk_known'] and a['flow_pacing_known']):
-            try:
-                self.refresh_flow_balances_once()
-            except (OSError, ValueError):
-                pass
         allowed = {'ok','busy','binding','unique','project','login','draft','overlay','editor','unconfirmed'}
         if not isinstance(checks,dict) or any(v not in allowed for v in checks.values()):
             raise ValueError('invalid_readiness_result')

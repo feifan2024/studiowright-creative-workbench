@@ -30,6 +30,8 @@ class GeminiAuthorization:
         from official_pool import busy_official, unresolved_official
         with self.pool.connection() as db:
             pref = db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?', (key,)).fetchone()
+            if self.pool.official.reason(db, key, self.runtime.inventory()) is None:
+                return False
             return (not self.pool.maintenance() and not (pref and not pref[0])
                     and not busy_official(db, key) and (login_only or not unresolved_official(db, key)))
 

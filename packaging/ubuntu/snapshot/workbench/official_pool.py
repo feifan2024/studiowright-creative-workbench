@@ -292,8 +292,7 @@ class OfficialPool:
             for key in inventory:
                 block=self.readiness_block(db,key)
                 if (not blocked_only or block) and self.reason(db,key,inventory,block,readiness_probe=True) is None:
-                    recent_success=db.execute("SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE r.account_key=? AND r.status='completed' AND r.finished>=? LIMIT 1",(key,time.time()-1800)).fetchone()
-                    if not block and recent_success:continue
+                    if self.reason(db,key,inventory) is None or busy_official(db,key):continue
                     candidates.append(key)
         queued=[]
         now=time.time()
@@ -345,6 +344,8 @@ class OfficialPool:
                     db.execute('COMMIT');return self.pool.get(request_id),False
                 if self.pool.maintenance():raise Conflict('工作台正在更新，消息没有发送。')
                 if readiness_probe:
+                    if self.reason(db,account,available) is None or busy_official(db,account):
+                        raise Conflict('账号已经就绪或正在运行任务，跳过验活。')
                     recent=self.recent_readiness_probe(db,account)
                     if recent:
                         db.execute('COMMIT');return self.pool.get(recent[0]),False

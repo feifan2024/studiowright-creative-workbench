@@ -1538,25 +1538,14 @@ async function startGovernanceAudit(service, repair = true) {
       rememberFlowReadiness(pageChecks,extra);
       if (!pageChecks) audit.error='实际任务窗口检查暂未返回。';
     } else {
-      // The circle includes quota refresh, even when conversation dispatch is healthy.
-      let quotaRead=repair ? await postJson('/api/official-quota/refresh',{}).catch(()=>null) : null;
-      if (quotaRead?.refreshing) {
-        audit.quotaChecking=true;
-        renderGovernance();
-        const quotaDeadline=Date.now()+60000;
-        while (quotaRead.refreshing && Date.now()<quotaDeadline) {
-          await new Promise(resolve=>setTimeout(resolve,2000));
-          quotaRead=await getJson('/api/official-quota',{timeoutMs:6000}).catch(()=>null) || quotaRead;
-        }
-        audit.quotaChecking=false;
-      }
-      let quota=await postJson('/api/gemini-readiness',{});
+      // Readiness repair never refreshes quota or changes healthy authorization.
+      let quota=repair ? await postJson('/api/gemini-readiness',{}) :
+        await getJson('/api/official-quota',{timeoutMs:8000});
       const quotaRows=Object.values(quota?.accounts || {});
       const quotaComplete=quotaRows.filter(row=>row.status==='ok' && ['five_hour','weekly'].every(
         window=>Number.isFinite(row[window]?.remaining_percent)) && Number.isFinite(row.checked_at) &&
         Math.abs(Date.now()/1000-row.checked_at)<=600).length;
       audit.quotaSummary=quotaRows.length ? ` · 两项额度已读取 ${quotaComplete}/${quotaRows.length}` : '';
-      if (quotaRead?.refreshing) audit.error='部分额度仍在读取，结果会自动更新。';
       renderAccountQuotas();
       const probes=Array.isArray(quota.readiness_probes) ? quota.readiness_probes : [];
       const expected=new Map(probes.map(p=>[p.account_key,p.request_id]));
@@ -1601,25 +1590,7 @@ async function startGovernanceAudit(service, repair = true) {
           audit.rows=auditGeminiAccounts(updated,channel,quota,expected);
           if (channel.available) {state.channelStatus=channel;channelReadFailed=false;}
         }
-        if (audit.authorization.state!=='stopped') {
-          audit.quotaVerification=await postJson('/api/official-quota/verify',{});
-          while (['starting','waiting','rechecking'].includes(audit.quotaVerification.state)) {
-            renderGovernance();
-            await new Promise(resolve=>setTimeout(resolve,2000));
-            audit.quotaVerification=await getJson('/api/official-quota/verify',{timeoutMs:8000});
-          }
-          if (audit.quotaVerification.total) {
-            quota=await getJson('/api/official-quota',{timeoutMs:8000});
-            officialQuotaData=quota;officialQuotaReadFailed=false;
-            audit.rows=auditGeminiAccounts(currentSnapshot,currentChannel,quota,expected);
-            const count=Object.values(quota.accounts).filter(row=>row.status==='ok' &&
-              ['five_hour','weekly'].every(w=>Number.isFinite(row[w]?.remaining_percent))).length;
-            audit.quotaSummary=` · 两项额度已读取 ${count}/${Object.keys(quota.accounts).length}`;
-            if (audit.quotaVerification.state==='stopped') audit.error=
-              audit.quotaVerification.reason==='verification_wait_timeout' ? '官方验证等待超时，完成后可重新检查。' :
-                '无法打开该账号的官方验证页，请核对 Ubuntu 浏览器窗口。';
-          }
-        }
+
       }
     }
     audit.checkedAt=Date.now()/1000;
