@@ -10,14 +10,45 @@ import uuid
 
 
 class MusicJobs:
-    def __init__(self, state, generate, ingest, paused=lambda:False):
+    def __init__(self, state, generate, ingest, paused=lambda:False, recover=None):
         self.path=Path(state)/'music-jobs.sqlite3'
         self.path.parent.mkdir(parents=True,exist_ok=True)
         self.generate,self.ingest,self.paused=generate,ingest,paused
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,digest TEXT,prompt TEXT,model TEXT,status TEXT,result TEXT,error TEXT,created REAL,updated REAL)')
-            db.execute("UPDATE jobs SET status='unknown',error='服务重启，原任务结果待核对；不会重新生成。',updated=? WHERE status IN ('generating','ingesting')",(time.time(),))
+            db.execute("UPDATE jobs SET status='unknown',error='服务重启，原任务结果待核对；不会重新生成。',updated=? WHERE status IN ('generating','ingesting','recovering')",(time.time(),))
         self.path.chmod(0o600)
+        self.recover=recover
+        self.recovery_lock=threading.Lock()
+        if recover:
+            threading.Thread(target=self.recovery_loop,daemon=True,name='music-recovery').start()
+
+    def recovery_loop(self):
+        while True:
+            try:self.reconcile()
+            except Exception:pass
+            time.sleep(10)
+
+    def reconcile(self):
+        if not self.recover or self.paused() or not self.recovery_lock.acquire(blocking=False):return
+        try:
+            with self.db() as db:
+                rows=[dict(r) for r in db.execute("SELECT * FROM jobs WHERE status IN ('unknown','recovering')")]
+            for row in rows:
+                try:
+                    result=json.loads(row['result']) if row['result'] else None
+                    found={'status':'completed','result':result} if result and result.get('clips') else self.recover(row)
+                    if not found:continue
+                    if found['status']=='recovering':
+                        self.save(row['id'],'recovering',error='已找到原任务，继续等待生成结果。')
+                        continue
+                    result=found['result']
+                    self.save(row['id'],'recovering',result)
+                    receipt=self.ingest(result['clips'])
+                    result['ingested']=sum(bool(i.get('ok')) for i in receipt.get('ingested',[]))
+                    self.save(row['id'],'completed',result)
+                except Exception:continue
+        finally:self.recovery_lock.release()
 
     def db(self):
         db=sqlite3.connect(self.path,timeout=15,isolation_level=None)
@@ -47,7 +78,7 @@ class MusicJobs:
                 if row['digest']!=digest:raise ValueError('同一请求编号不能用于另一条音乐。')
                 db.execute('COMMIT');return self.get(ident)
             if self.paused():raise ValueError('工作台维护中，尚未提交。')
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('generating','ingesting')").fetchone():raise ValueError('已有音乐任务正在执行，请等待完成。')
+            if db.execute("SELECT 1 FROM jobs WHERE status IN ('generating','ingesting','recovering')").fetchone():raise ValueError('已有音乐任务正在执行，请等待完成。')
             now=time.time()
             db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,NULL,NULL,?,?)',(ident,digest,prompt,model,'generating',now,now))
             db.execute('COMMIT')

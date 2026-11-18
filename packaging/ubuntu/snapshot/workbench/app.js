@@ -1961,9 +1961,9 @@ let musicPolling = false;
 let musicRendered = null;
 function renderMusicJob(job) {
   if (!job) return;
-  const busy = ['generating','ingesting'].includes(job.status);
+  const busy = ['generating','ingesting','recovering'].includes(job.status);
   $("musicGenerate").disabled = busy;
-  $("musicStatus").textContent = ({generating:'音乐生成中，可刷新页面；不会重复提交。',ingesting:'音乐已生成，正在登记素材…',completed:'完成。',unknown:job.error || '结果待核对，不会重新生成。'})[job.status] || job.status;
+  $("musicStatus").textContent = ({recovering:'已找回原任务，正在查询结果或恢复入库…',generating:'音乐生成中，可刷新页面；不会重复提交。',ingesting:'音乐已生成，正在登记素材…',completed:'完成。',unknown:job.error || '结果待核对，不会重新生成。'})[job.status] || job.status;
   const result = job.result;
   if (result && musicRendered !== JSON.stringify(result)) {
     musicRendered = JSON.stringify(result);

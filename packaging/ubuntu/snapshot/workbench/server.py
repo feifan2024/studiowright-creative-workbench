@@ -1259,12 +1259,13 @@ def music_library_ingest(clips):
 def make_handler(sources, deployment="local", coordinator=None, real_pool=None, activation=None, api_keys=None, backfill=None, project_actions=None):
     from task_feed import TaskFeed
     from music_jobs import MusicJobs
+    from music_recovery import recover as recover_music
     music_holder = []
     music_lock = threading.Lock()
     def get_music_jobs():
         with music_lock:
             if not music_holder:
-                music_holder.append(MusicJobs(real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench', music_generate, music_library_ingest, real_pool.maintenance if real_pool else lambda:False))
+                music_holder.append(MusicJobs(real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench', music_generate, music_library_ingest, real_pool.maintenance if real_pool else lambda:False, recover=recover_music))
             return music_holder[0]
     frontend_connections = threading.BoundedSemaphore(16)
     coordinator = coordinator or Coordinator()

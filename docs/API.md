@@ -237,4 +237,4 @@ if record.get("task_id"):
 - `GET /api/music/jobs/{request_id}`：只读取原任务，不发起生成。
 - `GET /api/music/jobs/latest`：读取最近任务，供页面首次恢复使用。
 
-状态依次为 `generating`（生成中）、`ingesting`（结果已收到、正在入库）、`completed`。完成后的 `result` 保存音频地址和入库结果。`unknown` 表示结果待核对，不会自动重发。页面刷新、网络恢复仅查询原编号；后台服务重启时未完成任务保留为待核对记录，不会自动重复生成。旧同步接口 `/api/music/generate` 保留兼容，新页面使用持久化任务接口。
+状态依次为 `generating`（生成中）、`ingesting`（结果已收到、正在入库）、`completed`。完成后的 `result` 保存音频地址和入库结果。`unknown` 表示结果待核对，不会自动重发。页面刷新、网络恢复仅查询原编号；后台服务重启后自动只读核对原音乐服务回执；原任务仍执行时显示 `recovering` 并继续查询，成功后恢复结果并去重入库。核对同时要求提交时间、完整提示词和模型一致且候选唯一；没有明确证据时保持待核对，绝不重新生成。旧同步接口 `/api/music/generate` 保留兼容，新页面使用持久化任务接口。
