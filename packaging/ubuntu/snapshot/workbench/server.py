@@ -2052,11 +2052,13 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         return self.json_response(503, {"error": "现有账号池暂不可读取。"})
                     if self.path in {'/api/real-pool/image-analysis', '/api/real-pool/image-analysis-validate'}:
                         import gemini_image_input as vision
-                        if not {'account', 'prompt', 'attachments'} <= data.keys() or data.keys() - {'account', 'prompt', 'attachments', 'retry_policy'}:
+                        if not {'account', 'prompt', 'attachments'} <= data.keys() or data.keys() - {'account', 'prompt', 'attachments', 'retry_policy', 'effort'}:
                             raise ValueError('识图需要账号、问题和图片回执。')
                         if data.get('retry_policy') not in (None, 'never'):
                             raise ValueError('Invalid retry policy')
-                        retry_kwargs={'retry_policy':data['retry_policy']} if 'retry_policy' in data else {}
+                        retry_kwargs={k:data[k] for k in ('retry_policy','effort') if k in data}
+                        from gemini_effort import resolve
+                        resolve(data.get('model'),data.get('effort'))
                         request_id = real_pool.conversation_id(self.headers.get('Idempotency-Key', ''))
                         account, prompt = data['account'], data['prompt']
                         if not isinstance(account, str):
@@ -2117,11 +2119,13 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         if set(data) != {'account', 'enabled'}:
                             raise ValueError('请求内容格式不正确。')
                         return self.json_response(200, real_pool.set_gemini_enabled(data['account'], data['enabled'], account_data['items']))
-                    if set(data) - {"account", "prompt", "attachments", "conversation_id", "model", "retry_policy"} or not {'account', 'prompt'} <= set(data):
+                    if set(data) - {"account", "prompt", "attachments", "conversation_id", "model", "retry_policy", "effort"} or not {'account', 'prompt'} <= set(data):
                         raise ValueError("请求内容格式不正确。")
                     if data.get('retry_policy') not in (None, 'never'):
                         raise ValueError('Invalid retry policy')
-                    retry_kwargs={'retry_policy':data['retry_policy']} if 'retry_policy' in data else {}
+                    retry_kwargs={k:data[k] for k in ('retry_policy','effort') if k in data}
+                    from gemini_effort import resolve
+                    resolve(data.get('model'),data.get('effort'))
                     if 'attachments' in data and not isinstance(data['attachments'], list):
                         raise ValueError("附件信息不正确。")
                     if data.get('conversation_id'):

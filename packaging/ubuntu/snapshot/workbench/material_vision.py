@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from official_runtime import MODEL, official_network_env
+from gemini_effort import resolve
 from gemini_execution import call_budget
 
 MAX_MEDIA = 100 * 1024 * 1024
@@ -98,8 +99,9 @@ def frame_parts(media, mime):
     return [{'type':'text','text':PROMPT}, *frames]
 
 
-def analyze(runtime, key, parts, receipt, *, keep_partial=False):
+def analyze(runtime, key, parts, receipt, *, keep_partial=False, model=None):
     """Exactly one ACP prompt. Unknown submissions are never retried here."""
+    selected=resolve(model)
     account = runtime.account(key)
     if not account:
         return {'status':'failed','submitted':False,'reason':'authorization_not_ready'}
@@ -178,11 +180,11 @@ def analyze(runtime, key, parts, receipt, *, keep_partial=False):
                         raise ValueError('image_input_unavailable')
                     session=call(2,'session/new',{'cwd':cwd,'mcpServers':[]},15)
                     sid=session['sessionId']
-                    if session.get('models',{}).get('currentModelId')!=MODEL:
-                        call(3,'session/set_model',{'sessionId':sid,'modelId':MODEL},12)
+                    if session.get('models',{}).get('currentModelId')!=selected:
+                        call(3,'session/set_model',{'sessionId':sid,'modelId':selected},12)
                     fd=os.open(receipt,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
                     with os.fdopen(fd,'w') as f:
-                        json.dump({'account_key':key,'model':MODEL,'created':time.time()},f)
+                        json.dump({'account_key':key,'model':selected,'created':time.time()},f)
                         f.flush();os.fsync(f.fileno())
                     submitted=True
                     result=call(4,'session/prompt',{'sessionId':sid,'prompt':parts},None)

@@ -3,6 +3,7 @@ import ast,errno,http.client,json,os,re,selectors,signal,subprocess,time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from gemini_execution import call_budget
+from gemini_effort import resolve
 from gemini_completion import completed_after_capacity_error, RECOVERED
 
 CHANNEL='official_antigravity_cli'
@@ -177,7 +178,8 @@ class OfficialRuntime:
             except (OSError,ValueError,TypeError,KeyError):result[key]=False
         return result
 
-    def run(self,key,prompt,native,audit,*,probe=False):
+    def run(self,key,prompt,native,audit,*,probe=False,model=None):
+        selected=resolve(model)
         account=self.account(key)
         if not account:return {'submitted':False,'status':'failed','reason':'authorization_not_ready'}
         root=account['root'];home=root/'home'
@@ -185,13 +187,13 @@ class OfficialRuntime:
         env={'HOME':str(home),'XDG_CONFIG_HOME':str(home/'.config'),'XDG_CACHE_HOME':str(home/'.cache'),
              'XDG_DATA_HOME':str(home/'.local/share'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','TERM':'xterm-256color'}
         env.update(official_network_env())
-        argv=[str(account['binary']),'--print',prompt,'--output-format','stream-json','--model',MODEL,
+        argv=[str(account['binary']),'--print',prompt,'--output-format','stream-json','--model',selected,
               '--disable-slash-commands','--print-timeout','0']
         if native:argv+=['--conversation',native]
         audit=Path(audit);audit.mkdir(mode=0o700,parents=True,exist_ok=False)
         # A receipt precedes the one process launch; the caller never replays it.
         with (audit/'submission.json').open('x',encoding='utf-8') as f:
-            os.fchmod(f.fileno(),0o600);json.dump({'account_key':key,'created':time.time(),'native':native,'model':MODEL,'total_seconds':budget.total_seconds,'idle_seconds':budget.idle_seconds},f);f.flush();os.fsync(f.fileno())
+            os.fchmod(f.fileno(),0o600);json.dump({'account_key':key,'created':time.time(),'native':native,'model':selected,'total_seconds':budget.total_seconds,'idle_seconds':budget.idle_seconds},f);f.flush();os.fsync(f.fileno())
         started=time.monotonic();first=None;answer=None;error=None;rc=None;proc=None
         selector=selectors.DefaultSelector();buffers={'stdout':b'','stderr':b''};total=0
         auth_markers=set();stdout_lines=0;chunks=[];timeout_kind=None;steps=[]

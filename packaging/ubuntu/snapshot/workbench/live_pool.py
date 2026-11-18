@@ -1658,5 +1658,5 @@ class RealPool:
             raise Conflict('没有同时满足登录、浏览器和用量条件的 Gemini 账号，请先核对账号。')
         return min(candidates)[2]
 
-    def generate(self, account, prompt, request_id, items, attachments=None, conversation_id=None, model=None, *, retry_policy=None):
-        return self.official.generate(account,prompt,request_id,items,attachments,conversation_id,model,retry_policy=retry_policy)
+    def generate(self, account, prompt, request_id, items, attachments=None, conversation_id=None, model=None, *, retry_policy=None, effort=None):
+        return self.official.generate(account,prompt,request_id,items,attachments,conversation_id,model,retry_policy=retry_policy,effort=effort)

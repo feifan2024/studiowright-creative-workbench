@@ -83,15 +83,15 @@ class ProbePriority(unittest.TestCase):
         with sqlite3.connect(dbpath) as db:
             db.executescript('''
               CREATE TABLE requests(request_id TEXT PRIMARY KEY, account_key TEXT,created REAL,finished REAL,status TEXT,note TEXT);
-              CREATE TABLE official_jobs(request_id TEXT PRIMARY KEY,reason TEXT,conversation_id TEXT,native_before TEXT,readiness_probe INTEGER,no_retry INTEGER,started REAL,queue_wait_ms REAL);
+              CREATE TABLE official_jobs(request_id TEXT PRIMARY KEY,reason TEXT,conversation_id TEXT,native_before TEXT,readiness_probe INTEGER,no_retry INTEGER,started REAL,queue_wait_ms REAL,model TEXT DEFAULT 'gemini-3.8-flash-medium');
               CREATE TABLE conversation_turns(request_id TEXT, prompt TEXT, attachments TEXT, conversation_id TEXT);
               CREATE TABLE conversations(id TEXT PRIMARY KEY,hidden INTEGER,native_json TEXT);
               CREATE TABLE official_reauth(request_id TEXT,state TEXT,block_reason TEXT,block_created REAL,account_key TEXT);
               CREATE TABLE official_attempts(request_id TEXT,ordinal INTEGER,status TEXT,started REAL);
               INSERT INTO requests VALUES('probe','a',1,NULL,'queued',NULL);
               INSERT INTO requests VALUES('business','b',2,NULL,'queued',NULL);
-              INSERT INTO official_jobs VALUES('probe',NULL,'p',NULL,1,1,NULL,NULL);
-              INSERT INTO official_jobs VALUES('business',NULL,'b',NULL,0,1,NULL,NULL);
+              INSERT INTO official_jobs(request_id,reason,conversation_id,native_before,readiness_probe,no_retry,started,queue_wait_ms) VALUES('probe',NULL,'p',NULL,1,1,NULL,NULL);
+              INSERT INTO official_jobs(request_id,reason,conversation_id,native_before,readiness_probe,no_retry,started,queue_wait_ms) VALUES('business',NULL,'b',NULL,0,1,NULL,NULL);
               INSERT INTO conversation_turns VALUES('probe','ready','[]','p');
               INSERT INTO conversation_turns VALUES('business','question','[]','b');
               INSERT INTO conversations VALUES('p',0,NULL);
@@ -148,7 +148,7 @@ class ProbePriority(unittest.TestCase):
                     for i in range(25):
                         rid='job-'+str(i)
                         db.execute("INSERT INTO requests VALUES(?,'a',?,NULL,'queued',NULL)",(rid,i))
-                        db.execute("INSERT INTO official_jobs VALUES(?,NULL,?,NULL,0,1,NULL,NULL)",(rid,rid))
+                        db.execute("INSERT INTO official_jobs(request_id,reason,conversation_id,native_before,readiness_probe,no_retry,started,queue_wait_ms) VALUES(?,NULL,?,NULL,0,1,NULL,NULL)",(rid,rid))
                         db.execute("INSERT INTO conversation_turns VALUES(?,'question','[]',?)",(rid,rid))
                         db.execute("INSERT INTO conversations VALUES(?,0,NULL)",(rid,))
                 with ThreadPoolExecutor(max_workers=25) as workers:

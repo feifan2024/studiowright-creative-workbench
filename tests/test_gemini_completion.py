@@ -115,7 +115,7 @@ class SavedRequestReconciliation(unittest.TestCase):
             with sqlite3.connect(dbpath) as db:
                 db.executescript('''
                     CREATE TABLE requests(request_id TEXT PRIMARY KEY,account_key TEXT,status TEXT,finished REAL,response TEXT,note TEXT,created REAL);
-                    CREATE TABLE official_jobs(request_id TEXT,conversation_id TEXT,native_before TEXT,readiness_probe INTEGER,reason TEXT);
+                    CREATE TABLE official_jobs(request_id TEXT,conversation_id TEXT,native_before TEXT,readiness_probe INTEGER,reason TEXT,model TEXT DEFAULT 'gemini-3.8-flash-medium');
                     CREATE TABLE conversation_turns(request_id TEXT,conversation_id TEXT,attachments TEXT);
                     CREATE TABLE conversations(id TEXT PRIMARY KEY,native_json TEXT,updated REAL,blocked TEXT);
                     CREATE TABLE official_attempts(request_id TEXT,ordinal INTEGER,status TEXT,reason TEXT,submitted INTEGER,started REAL,finished REAL,total_ms REAL,response TEXT);
@@ -123,7 +123,7 @@ class SavedRequestReconciliation(unittest.TestCase):
                     CREATE TABLE official_account_blocks(account_key TEXT,created REAL);
                 ''')
                 db.execute("INSERT INTO requests VALUES(?,'a','unknown',101,NULL,'old',99)",(rid,))
-                db.execute("INSERT INTO official_jobs VALUES(?,? ,NULL,0,'provider_unavailable')",(rid,rid))
+                db.execute("INSERT INTO official_jobs(request_id,conversation_id,native_before,readiness_probe,reason) VALUES(?,? ,NULL,0,'provider_unavailable')",(rid,rid))
                 db.execute("INSERT INTO conversation_turns VALUES(?,?,'[]')",(rid,rid))
                 db.execute("INSERT INTO conversations VALUES(?,NULL,101,'blocked')",(rid,))
                 db.execute("INSERT INTO official_attempts VALUES(?,1,'unknown','provider_unavailable',1,100,101,20,NULL)",(rid,))
