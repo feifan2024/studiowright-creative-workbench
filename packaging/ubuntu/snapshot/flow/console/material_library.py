@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from PIL import Image
-from material_tags import TagIndex, DIMENSIONS
+from material_tags import TagIndex, SEARCH_LABELS
 from media_analysis import audio_duration
 
 
@@ -52,8 +52,9 @@ def digest(path):
 
 
 class Library(TagIndex):
-    def __init__(self, root):
+    def __init__(self, root, analysis_db=None):
         self.root = Path(root).resolve()
+        self.analysis_db = Path(analysis_db) if analysis_db else None
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         (self.root / "objects").mkdir(exist_ok=True)
         for category in AUDIO_CATEGORIES:
@@ -84,7 +85,7 @@ class Library(TagIndex):
 
     @contextmanager
     def connect(self):
-        c = sqlite3.connect(self.db, timeout=15)
+        c = sqlite3.connect(self.db, timeout=15, uri=True)
         c.row_factory = sqlite3.Row
         try:
             with c:
@@ -391,10 +392,10 @@ class Library(TagIndex):
         if len(q) > 500 or not 1 <= limit <= 100 or offset is not None and offset < 0:
             raise ValueError("检索长度或分页不正确。")
         for dim, value in (dimensions or {}).items():
-            if dim not in DIMENSIONS or not isinstance(value, str) or len(value) > 100:
+            if dim not in SEARCH_LABELS or not isinstance(value, str) or len(value) > 100:
                 raise ValueError("标签维度或长度不正确。")
             if value:
-                filters.append("EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND d.dimension=? AND d.value=? COLLATE NOCASE)")
+                filters.append("EXISTS(SELECT 1 FROM {labels} d WHERE d.asset_id=a.id AND d.dimension=? AND d.value=? COLLATE NOCASE)")
                 args += [dim, value]
         # Source constraints belong to the same origin, never mix accounts/projects across duplicates.
         origin_filters, origin_args = [], []
@@ -438,16 +439,19 @@ class Library(TagIndex):
             args.extend([tag,tag])
         if q:
             filters.append(
-                "(EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND (instr(lower(coalesce(o.prompt,'')),lower(?))>0 OR instr(lower(coalesce(o.model,'')),lower(?))>0 OR instr(lower(coalesce(o.project_id,'')),lower(?))>0 OR instr(lower(coalesce(o.account_email,'')),lower(?))>0 OR instr(lower(coalesce(o.media_id,'')),lower(?))>0 OR instr(lower(json_extract(o.details,'$.original_path')),lower(?))>0)) OR EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND instr(lower(t.value),lower(?))>0) OR EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND instr(lower(d.value),lower(?))>0))"
+                "(EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND (instr(lower(coalesce(o.prompt,'')),lower(?))>0 OR instr(lower(coalesce(o.model,'')),lower(?))>0 OR instr(lower(coalesce(o.project_id,'')),lower(?))>0 OR instr(lower(coalesce(o.account_email,'')),lower(?))>0 OR instr(lower(coalesce(o.media_id,'')),lower(?))>0 OR instr(lower(json_extract(o.details,'$.original_path')),lower(?))>0 OR instr(lower(json_extract(o.details,'$.original_name')),lower(?))>0)) OR EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND instr(lower(t.value),lower(?))>0) OR EXISTS(SELECT 1 FROM {labels} d WHERE d.asset_id=a.id AND instr(lower(d.value),lower(?))>0))"
             )
-            args.extend([q] * 8)
+            args.extend([q] * 9)
         where = " WHERE " + " AND ".join(filters) if filters else ""
         with self.connect() as c:
-            total = c.execute("SELECT count(*) FROM assets a" + where, args).fetchone()[0]
+            prefix, labels = self.search_labels(c) if "{labels}" in where else ("", "dimension_tags")
+            where = where.format(labels=labels)
+            c.execute("BEGIN")
+            total = c.execute(prefix + "SELECT count(*) FROM assets a" + where, args).fetchone()[0]
             ids = [
                 r[0]
                 for r in c.execute(
-                    "SELECT a.id FROM assets a"
+                    prefix + "SELECT a.id FROM assets a"
                     + where
                     + " ORDER BY a.added DESC,a.id LIMIT ? OFFSET ?",
                     (*args, limit, (page - 1) * limit if offset is None else offset),

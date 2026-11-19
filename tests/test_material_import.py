@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,34 @@ def message(path, data):
 
 
 class MaterialImportTest(unittest.TestCase):
+    def test_search_combines_catalog_and_analysis_before_filtering_and_pagination(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pool = root / "pool.sqlite3"
+            library = Library(root / "library", pool)
+            source = root / "sample.png"
+            Image.new("RGB", (16, 20), "red").save(source)
+            windows = library.archive(source, archive_metadata(json.loads(message("采集/原片.png", source.read_bytes()))))
+            Image.new("RGB", (16, 20), "blue").save(source)
+            ubuntu = library.archive(source, dict(source="flow", source_id="task", prompt="河岸夜景", media_type="image"))
+            library.set_dimensions(ubuntu, {"subject": ["手动人物"]})
+            with sqlite3.connect(pool) as db:
+                db.execute("CREATE TABLE material_extra(asset_id TEXT,manual_json TEXT,suggested_json TEXT)")
+                db.executemany("INSERT INTO material_extra VALUES(?,?,?)", [
+                    (windows, '{"viewpoint":["高角度"]}', '{"scene":["河岸夜景"],"viewpoint":["高角度"]}'),
+                    (ubuntu, '{}', '{"subject":["旧人物"]}'),
+                    ("f" * 64, '{}', '{"scene":["赠品音乐包"],"viewpoint":["高角度"]}'),
+                ])
+            first, second = (library.search("河岸夜景", limit=1, page=page) for page in (1, 2))
+            self.assertEqual(first["total"], 2)
+            self.assertEqual({first["items"][0]["id"], second["items"][0]["id"]}, {windows, ubuntu})
+            match = library.search("原片.png", kind="image", dimensions={"viewpoint": "高角度", "scene": "河岸夜景"})
+            self.assertEqual([item["id"] for item in match["items"]], [windows])
+            self.assertEqual(library.search("河岸夜景", kind="audio")["total"], 0)
+            self.assertEqual(library.search("旧人物")["total"], 0)
+            self.assertEqual(library.search("赠品音乐包")["total"], 0)
+            self.assertEqual(match["facets"]["dimensions"]["viewpoint"], [{"value": "高角度", "count": 1}])
+
     def test_import_replay_and_second_source_share_one_file_and_search(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

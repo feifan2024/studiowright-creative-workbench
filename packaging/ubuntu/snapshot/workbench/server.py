@@ -702,7 +702,8 @@ class Sources:
         allowed_query = {'q', 'kind', 'tag', 'account', 'page', 'limit', 'offset', 'subject', 'scene',
                          'action', 'style', 'camera', 'color', 'keywords', 'model', 'project_id', 'account_id',
                          'created_from', 'created_to', 'index_status', 'storage_status', 'download', 'style_id', 'music_style', 'music_mood', 'music_instrument', 'music_use', 'music_voice',
-                         'audio_category', 'duration_min', 'duration_max'}
+                         'audio_category', 'duration_min', 'duration_max', 'shot_size', 'viewpoint',
+                         'composition', 'movement'}
         query = parse_qsl(parts.query, keep_blank_values=True, max_num_fields=30)
         if (parts.scheme or parts.netloc or parts.fragment or len(parts.query) > 3000
                 or any(k not in allowed_query or len(v) > 500 for k, v in query)

@@ -10,6 +10,8 @@ from live_pool import Conflict, UPLOAD_LIMIT
 
 
 SUPPORTED = {'image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm'}
+IMPORTED_FORMATS = SUPPORTED | {'video/quicktime'}
+IMPORTED_MAX_BYTES = 2 * 1024**3
 
 
 def has_labels(value):
@@ -42,7 +44,7 @@ class MaterialBackfill:
 
     @staticmethod
     def candidates(db, items):
-        result = {'untagged': [], 'unanalyzed': []}
+        result = {'untagged': [], 'unanalyzed': [], 'windows_import': []}
         seen = set()
         for item in items:
             if not isinstance(item, dict):
@@ -52,11 +54,17 @@ class MaterialBackfill:
                 continue
             seen.add(ident)
             mime, kind, size = item.get('mime'), item.get('media_type'), item.get('size')
-            if (mime not in SUPPORTED or type(size) is not int or not 0 < size <= UPLOAD_LIMIT
+            imported = any(isinstance(origin, dict) and origin.get('source') == 'windows_local'
+                           for origin in item.get('origins') or ())
+            supported = mime in SUPPORTED and type(size) is int and 0 < size <= UPLOAD_LIMIT
+            imported_supported = imported and (supported or kind == 'video' and mime in IMPORTED_FORMATS
+                                               and type(size) is int and 0 < size <= IMPORTED_MAX_BYTES)
+            if (not (supported or imported_supported)
                     or (kind, mime.split('/')[0]) not in (('image', 'image'), ('video', 'video'))):
                 continue
+            existing_job = db.execute("""SELECT j.status,r.paused_reason FROM material_backfill_jobs j
+                JOIN material_backfill_runs r ON r.id=j.run_id WHERE j.asset_id=?""", (ident,)).fetchone()
             if (db.execute('SELECT 1 FROM material_analyses WHERE asset_id=? LIMIT 1', (ident,)).fetchone()
-                    or db.execute('SELECT 1 FROM material_backfill_jobs WHERE asset_id=? LIMIT 1', (ident,)).fetchone()
                     or db.execute("SELECT 1 FROM auto_material_jobs WHERE asset_id=? AND status IN ('waiting','running','unknown')", (ident,)).fetchone()):
                 continue
             extra = db.execute('SELECT manual_json,suggested_json FROM material_extra WHERE asset_id=?', (ident,)).fetchone()
@@ -74,9 +82,13 @@ class MaterialBackfill:
             if type(added) not in (int, float) or not math.isfinite(added):
                 added = 0
             row = (ident, float(added))
-            result['unanalyzed'].append(row)
-            if not has_labels(tags) and not has_labels(structured) and not has_labels(manual):
-                result['untagged'].append(row)
+            can_move = existing_job and existing_job['status'] == 'waiting' and existing_job['paused_reason']
+            if imported_supported and (not existing_job or can_move) and not has_labels(item.get('observed_tags')):
+                result['windows_import'].append(row)
+            if supported and not existing_job:
+                result['unanalyzed'].append(row)
+                if not has_labels(tags) and not has_labels(structured) and not has_labels(manual):
+                    result['untagged'].append(row)
         return result
 
     def preview(self, items):
@@ -103,7 +115,7 @@ class MaterialBackfill:
 
     def start(self, scope, request_id, items):
         self.pool.conversation_id(request_id)
-        if scope not in ('untagged', 'unanalyzed'):
+        if scope not in ('untagged', 'unanalyzed', 'windows_import'):
             raise ValueError('补打范围不正确。')
         with self.pool.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -113,12 +125,17 @@ class MaterialBackfill:
                     raise Conflict('补打请求与已有记录不一致。')
                 db.execute('COMMIT')
                 return self.state()
-            if self.pool.maintenance() or db.execute("SELECT 1 FROM material_backfill_jobs WHERE status IN ('waiting','running') LIMIT 1").fetchone():
+            if self.pool.maintenance() or db.execute("""SELECT 1 FROM material_backfill_jobs j
+                JOIN material_backfill_runs r ON r.id=j.run_id WHERE j.status='running'
+                OR (j.status='waiting' AND (?!='windows_import' OR r.paused_reason IS NULL)) LIMIT 1""", (scope,)).fetchone():
                 raise Conflict('已有补打任务尚未完成，请先查看进度。')
             chosen = self.candidates(db, items)[scope]
             now = time.time()
             db.execute('INSERT INTO material_backfill_runs(id,scope,created) VALUES(?,?,?)', (request_id, scope, now))
-            db.executemany("INSERT INTO material_backfill_jobs(asset_id,run_id,status,added,updated,note) VALUES(?,?,'waiting',?,?,?)",
+            db.executemany("""INSERT INTO material_backfill_jobs(asset_id,run_id,status,added,updated,note)
+                           VALUES(?,?,'waiting',?,?,?) ON CONFLICT(asset_id) DO UPDATE
+                           SET run_id=excluded.run_id,updated=excluded.updated,note=excluded.note
+                           WHERE material_backfill_jobs.status='waiting'""",
                            [(ident, request_id, added, now, '等待补打') for ident, added in chosen])
             db.execute('COMMIT')
         self.wake.set()

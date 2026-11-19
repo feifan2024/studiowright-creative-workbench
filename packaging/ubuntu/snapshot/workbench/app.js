@@ -2975,6 +2975,7 @@ let backfillRequest = null;
 let backfillBusy = false;
 const materialDimensions = {subject:"主体", scene:"场景", action:"动作", style:"风格", camera:"镜头", color:"色调", keywords:"关键词",music_style:"音乐风格",music_mood:"情绪",music_instrument:"乐器",music_use:"用途",music_voice:"人声"};
 const extraDimensions = {shot_size:"景别", viewpoint:"拍摄角度", composition:"构图", movement:"运镜"};
+const librarySearchDimensions = {...materialDimensions, ...extraDimensions};
 
 async function postJson(path, body, key) {
   const headers = {"Content-Type":"application/json", "X-Workbench-Request":"1"};
@@ -3559,7 +3560,7 @@ function materialCard(item) {
 function updateLibraryFilters(data) {
   updateOptions($('libraryTag'), '全部标签', data.tags || []);
   updateOptions($('libraryAccount'), '全部账号', data.accounts || []);
-  for (const [key, label] of Object.entries(materialDimensions)) {
+  for (const [key, label] of Object.entries(librarySearchDimensions)) {
     updateOptions($('libraryFilter_' + key), '全部' + label, data.facets?.dimensions?.[key] || []);
   }
   if (data.stats) {
@@ -3568,7 +3569,7 @@ function updateLibraryFilters(data) {
       + ' 段视频 · ' + esc(data.stats.audio || 0) + ' 段音频<small>' + esc(materialSize(data.stats.bytes || 0)) + ' · Ubuntu 素材库</small>';
   }
 }
-$('libraryDimensionFilters').innerHTML = Object.entries(materialDimensions).map(([key, label]) =>
+$('libraryDimensionFilters').innerHTML = Object.entries(librarySearchDimensions).map(([key, label]) =>
   '<label>' + esc(label) + '<select id="libraryFilter_' + esc(key) + '"><option value="">全部' + esc(label) + '</option></select></label>').join('');
 
 let libraryViewRefreshing = false;
@@ -3587,8 +3588,7 @@ const libraryAudioFilters = {
 };
 
 function updateLibraryAudioFilters() {
-  const disabled = $('librarySearchScope').value === 'analysis'
-    || !['', 'audio'].includes($('libraryKind').value);
+  const disabled = !['', 'audio'].includes($('libraryKind').value);
   for (const control of Object.values(libraryAudioFilters)) {
     control.disabled = disabled;
     control.closest('label').hidden = disabled;
@@ -3597,7 +3597,6 @@ function updateLibraryAudioFilters() {
 
 async function loadLibrary({background = false} = {}) {
   const sequence = ++libraryRequest;
-  const isExtra = $('librarySearchScope').value === 'analysis';
   const query = new URLSearchParams({page: String(libraryPage), limit: '12'});
   const text = $('librarySearch').value.trim();
   if (text) query.set('q', text);
@@ -3614,26 +3613,17 @@ async function loadLibrary({background = false} = {}) {
     if (!control.disabled && control.value !== '') query.set(name, control.value);
   }
   if ($('libraryAccount').value) query.set('account', $('libraryAccount').value);
-  for (const key of Object.keys(materialDimensions)) {
+  for (const key of Object.keys(librarySearchDimensions)) {
     if ($('libraryFilter_' + key).value) query.set(key, $('libraryFilter_' + key).value);
   }
   if (!background) $('librarySummary').textContent = '正在读取素材…';
   try {
-    let data;
-    if (isExtra) {
-      const extraQuery = new URLSearchParams({page: String(libraryPage), q: text});
-      data = await getJson('/api/material-extra-search?' + extraQuery.toString(), {timeoutMs: 10000});
-      const items = await Promise.allSettled(data.ids.map((id) => getJson('/api/library/' + encodeURIComponent(id), {timeoutMs: 10000})));
-      data.items = items.filter((item) => item.status === 'fulfilled').map((item) => item.value);
-      if (data.items.length !== data.ids.length) throw new Error('部分素材暂不可读取');
-    } else {
-      data = await getJson('/api/library?' + query.toString(), {timeoutMs: 10000});
-    }
+    const data = await getJson('/api/library?' + query.toString(), {timeoutMs: 10000});
     if (sequence !== libraryRequest || (background && (state.view !== 'library' || document.querySelector('dialog[open]')))) return;
-    if (!isExtra) updateLibraryFilters(data);
+    updateLibraryFilters(data);
     libraryPages = data.pages || 1;
     libraryPage = data.page || 1;
-    $('librarySummary').textContent = '找到 ' + data.total + ' 份素材' + (isExtra ? ' · 按 Gemini 与补充标签搜索' : '');
+    $('librarySummary').textContent = '找到 ' + data.total + ' 份素材';
     $('libraryPage').textContent = '第 ' + libraryPage + ' / ' + libraryPages + ' 页';
     $('libraryPrev').disabled = libraryPage <= 1;
     $('libraryNext').disabled = libraryPage >= libraryPages;
@@ -3693,10 +3683,11 @@ function renderBackfill() {
   const run = backfillState?.run, counts = backfillState?.counts || {};
   const pending = (counts.waiting || 0) + (counts.running || 0);
   const paused = !!run?.paused_reason;
-  const summary = '补打：已完成 ' + (counts.completed || 0) + ' · 等待 ' + (counts.waiting || 0)
+  const summary = (run?.scope === 'windows_import' ? 'Windows 素材标签' : '补打') + '：已完成 '
+    + (counts.completed || 0) + ' · 等待 ' + (counts.waiting || 0)
     + ' · 处理中 ' + (counts.running || 0) + ' · 需核对 ' + ((counts.failed || 0) + (counts.unknown || 0));
   $('backfillStatus').textContent = run ? summary + (paused ? ' · 已暂停' : '') : '';
-  $('backfillResume').hidden = !(paused && pending && ['untagged', 'unanalyzed'].includes(run.scope));
+  $('backfillResume').hidden = !(paused && pending && ['untagged', 'unanalyzed', 'windows_import'].includes(run.scope));
   $('backfillResume').disabled = backfillBusy;
   $('backfillOpen').disabled = backfillBusy || !backfillState || !!pending;
   $('backfillOpen').textContent = !backfillState ? '读取中…' : backfillBusy ? '正在处理…' : pending ? (paused ? '补打已暂停' : '补打进行中') : '补打标签';
@@ -4150,27 +4141,14 @@ $('libraryTag').addEventListener('change',()=>{libraryPage=1;loadLibrary();});
 $('libraryStyleId').addEventListener('change',()=>{libraryPage=1;loadLibrary();});
 $('libraryAccount').addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
 $('libraryDimensionFilters').addEventListener('change', () => { libraryPage = 1; loadLibrary(); });
-$('librarySearchScope').addEventListener('change', () => {
-  const extra = $('librarySearchScope').value === 'analysis';
-  $('libraryKind').disabled = extra;
-  $('libraryAccount').disabled = extra;
-  $('libraryTag').disabled=extra; $('libraryStyleId').disabled=extra;
-  updateLibraryAudioFilters();
-  $('libraryDimensionFilters').querySelectorAll('select').forEach((control) => { control.disabled = extra; });
-  libraryPage = 1; loadLibrary();
-});
 $('libraryReset').addEventListener('click', () => {
   $('librarySearch').value = '';
   $('libraryKind').value = '';
   $('libraryAccount').value = '';
   $('libraryTag').value=''; $('libraryStyleId').value='';
-  $('libraryTag').disabled=false; $('libraryStyleId').disabled=false;
-  $('librarySearchScope').value = 'original';
-  $('libraryKind').disabled = false;
-  $('libraryAccount').disabled = false;
   for (const control of Object.values(libraryAudioFilters)) control.value = '';
   updateLibraryAudioFilters();
-  $('libraryDimensionFilters').querySelectorAll('select').forEach((control) => { control.value = ''; control.disabled = false; });
+  $('libraryDimensionFilters').querySelectorAll('select').forEach((control) => { control.value = ''; });
   libraryPage = 1; loadLibrary();
 });
 $('libraryPrev').addEventListener('click', () => { if (libraryPage > 1) { libraryPage--; loadLibrary(); } });

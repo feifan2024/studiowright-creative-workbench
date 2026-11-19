@@ -29,7 +29,7 @@ from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
 from web_auth import WebAuth
 from login_sessions import Vault, normalize_bundle
 from material_library import Library
-from material_tags import DIMENSIONS
+from material_tags import SEARCH_LABELS
 from remote_login import RemoteLogins
 
 HERE = Path(__file__).resolve().parent
@@ -57,7 +57,8 @@ class Console:
         self.balance_wake = asyncio.Event()
         self.balance_refreshing = False
         self.balance_busy = set()
-        self.library = Library(self.root / "material-library")
+        dispatch_state = (self.root / 'console-data') if test else (Path.home() / '.local/state/creative-unified-workbench')
+        self.library = Library(self.root / "material-library", dispatch_state / "real-pool.sqlite3")
         self.vault = Vault(self.root / "console-data")
         self.remote = RemoteLogins(self.root, fixture=test)
         self.remote_gate = asyncio.Lock()
@@ -68,7 +69,6 @@ class Console:
         self.generation_busy = {}
         self.generation_projects = set()
         self.running = set()
-        dispatch_state = (self.root / 'console-data') if test else (Path.home() / '.local/state/creative-unified-workbench')
         self.dispatch_limit = DispatchLimit(dispatch_state / 'dispatch')
         self.references = ReferenceStore(dispatch_state)
         self.worker = None
@@ -930,7 +930,7 @@ def create_app(root, adapter, test=False):
                 p.get("tag", ""),
                 p.get("account", ""),
                 int(p.get("page", "1")),
-                dimensions={d: p[d] for d in DIMENSIONS if d in p},
+                dimensions={d: p[d] for d in SEARCH_LABELS if d in p},
                 model=p.get("model", ""), project_id=p.get("project_id", ""),
                 account_id=p.get("account_id", ""), created_from=p.get("created_from", ""),
                 created_to=p.get("created_to", ""), index_status=p.get("index_status", ""),
@@ -1086,7 +1086,7 @@ def create_app(root, adapter, test=False):
         p = request.query_params
         try:
             result = await asyncio.to_thread(c.library.search, q=p.get("q", ""), kind=p.get("media_type", ""),
-                dimensions={d: p[d] for d in DIMENSIONS if d in p}, model=p.get("model", ""),
+                dimensions={d: p[d] for d in SEARCH_LABELS if d in p}, model=p.get("model", ""),
                 account_id=p.get("account_id", ""), project_id=p.get("project_id", ""),
                 created_from=p.get("created_from", ""), created_to=p.get("created_to", ""),
                 storage_status=p.get("storage_status", ""), style_id=p.get("style_id", ""), index_status=p.get("index_status", ""),

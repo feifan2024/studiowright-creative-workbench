@@ -13,6 +13,8 @@ VISUAL_DIMENSIONS = ("subject", "scene", "action", "style", "camera", "color", "
 MUSIC_LABELS = {"music_style":"音乐风格", "music_mood":"情绪", "music_instrument":"乐器", "music_use":"用途", "music_voice":"人声"}
 DIMENSIONS = VISUAL_DIMENSIONS + tuple(MUSIC_LABELS)
 DIMENSION_LABELS = dict(zip(VISUAL_DIMENSIONS, ("主体", "场景", "动作", "风格", "镜头", "色调", "关键词"))) | MUSIC_LABELS
+SHOT_LABELS = {"shot_size": "景别", "viewpoint": "视角", "composition": "构图", "movement": "运镜"}
+SEARCH_LABELS = DIMENSION_LABELS | SHOT_LABELS
 
 
 def clean_dimensions(value, complete=False):
@@ -29,6 +31,28 @@ def clean_dimensions(value, complete=False):
 
 
 class TagIndex:
+    def search_labels(self, c):
+        """Read the active catalog and optional workbench labels in the same query."""
+        pool = getattr(self, "analysis_db", None)
+        if not pool or not pool.is_file():
+            return "", "dimension_tags"
+        c.execute("ATTACH DATABASE ? AS analysis", (pool.resolve().as_uri() + "?mode=ro",))
+        if not c.execute("SELECT 1 FROM analysis.sqlite_master WHERE type='table' AND name='material_extra'").fetchone():
+            return "", "dimension_tags"
+        dimensions = ",".join("'" + key + "'" for key in (*VISUAL_DIMENSIONS, *SHOT_LABELS))
+        extra = """
+            SELECT e.asset_id, field.key, label.value
+            FROM analysis.material_extra e,
+                 json_each(CASE WHEN json_valid(e.{column}) THEN e.{column} ELSE '{{}}' END) field,
+                 json_each(CASE WHEN field.type='array' THEN field.value ELSE '[]' END) label
+            WHERE field.key IN ({dimensions}) AND label.type='text' AND length(label.value) BETWEEN 1 AND 100
+              AND NOT EXISTS(SELECT 1 FROM manual_dimensions m WHERE m.asset_id=e.asset_id AND m.dimension=field.key)
+        """
+        query = " UNION ALL ".join(extra.format(column=column, dimensions=dimensions)
+                                   for column in ("manual_json", "suggested_json"))
+        return ("WITH search_labels(asset_id,dimension,value) AS ("
+                "SELECT asset_id,dimension,value FROM dimension_tags UNION ALL " + query + ") ", "search_labels")
+
     def init_index(self):
         with self.connect() as c:
             c.executescript("""
@@ -82,10 +106,12 @@ class TagIndex:
 
     def facets(self):
         with self.connect() as c:
-            dimensions = {d: [] for d in DIMENSIONS}
-            for r in c.execute("SELECT dimension,value,count(DISTINCT asset_id) AS count FROM dimension_tags GROUP BY dimension,value ORDER BY count DESC,value LIMIT 1000"):
+            prefix, labels = self.search_labels(c)
+            dimensions = {d: [] for d in SEARCH_LABELS}
+            for r in c.execute(prefix + f"SELECT dimension,value,count(DISTINCT a.id) AS count FROM {labels} d "
+                               "JOIN assets a ON a.id=d.asset_id GROUP BY dimension,value ORDER BY count DESC,value LIMIT 1000"):
                 dimensions[r[0]].append({"value": r[1], "count": r[2]})
-            return {"dimensions": dimensions, "labels": DIMENSION_LABELS,
+            return {"dimensions": dimensions, "labels": SEARCH_LABELS,
                     "counts": {"total": c.execute("SELECT count(*) FROM assets").fetchone()[0],
                                "storage_status": {"ready": c.execute("SELECT count(*) FROM assets").fetchone()[0]},
                                "index_status": dict(c.execute("SELECT state,count(*) FROM index_jobs GROUP BY state")),

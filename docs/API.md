@@ -242,7 +242,8 @@ if record.get("task_id"):
 - `POST /api/music/jobs`：提交一次，返回 `202 {"job": {...}}`。
 - `GET /api/music/jobs/{request_id}`：查询原任务，返回 `{"job": {...}}`；不存在返回404，不会生成。
 - `GET /api/library?kind=audio&tag=钢琴`：筛选音乐标签。可叠加 `style_id` 精确匹配，参数请 URL 编码。
-- Windows 导入素材与 Ubuntu 原有素材使用同一检索接口。`q` 可匹配导入文件名或来源目录。导入素材保留 `original_name`，可通过同一库的下载地址获取原文件。
+- Windows 导入素材与 Ubuntu 原有素材共用 `GET /api/library`。`q` 同时匹配原文件名、来源目录、提示词、原标签和已保存的 Gemini 或补充标签。同一个素材只返回一次。导入素材保留 `original_name`，可通过同一下载地址获取原文件。
+- 内容维度可直接和关键词、媒体类型一起筛选。除主体、场景等原维度外，还可使用 `shot_size`（景别）、`viewpoint`（拍摄角度）、`composition`（构图）和 `movement`（运镜）。未分析的素材也可以按已有信息搜索。
 - 音频物理文件按分类存到 `objects/audio/music`、`objects/audio/sound_effect` 或 `objects/audio/other`。素材 ID、检索和下载地址沿用同一套接口。
 - `GET /api/library/{asset_id}`：素材详情；`GET /api/library/{asset_id}/file`：携带相同密钥下载原文件。
 

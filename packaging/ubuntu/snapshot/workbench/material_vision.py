@@ -14,6 +14,7 @@ from pathlib import Path
 from official_runtime import MODEL, official_network_env
 from gemini_effort import resolve
 from gemini_execution import call_budget
+from material_backfill import IMPORTED_MAX_BYTES
 
 MAX_MEDIA = 100 * 1024 * 1024
 MIMES = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp',
@@ -41,7 +42,7 @@ def clean_shot_notes(value, video=True):
             and isinstance(v, str) and 0 < len(v.strip()) <= 160 and not {'\r', '\n'}.intersection(v)}
 
 
-def read_media(sources, ident, scratch):
+def read_media(sources, ident, scratch, *, imported=False):
     """Stage one known library object and convert it into bounded image parts."""
     import hashlib
     if not re.fullmatch(r'[0-9a-f]{64}', ident):
@@ -49,9 +50,11 @@ def read_media(sources, ident, scratch):
     with sources.library('GET', f'/api/library/{ident}/file') as response:
         mime = response.headers.get_content_type()
         size = int(response.headers.get('Content-Length', '0'))
-        if response.status != 200 or mime not in MIMES or not 0 < size <= MAX_MEDIA:
+        extension = '.mov' if imported and mime == 'video/quicktime' else MIMES.get(mime)
+        limit = IMPORTED_MAX_BYTES if imported and mime.startswith('video/') else MAX_MEDIA
+        if response.status != 200 or not extension or not 0 < size <= limit:
             raise ValueError('unsupported_media')
-        media = scratch / ('source' + MIMES[mime])
+        media = scratch / ('source' + extension)
         remaining = size
         digest = hashlib.sha256()
         with media.open('xb') as f:

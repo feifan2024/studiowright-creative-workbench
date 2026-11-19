@@ -67,7 +67,7 @@ def claim(pool, auto):
             if shot:
                 table='material_shot_jobs'
             candidate=shot or db.execute("SELECT asset_id FROM auto_material_jobs WHERE status='waiting' ORDER BY added,asset_id LIMIT 1" if auto else
-                                 "SELECT j.asset_id FROM material_backfill_jobs j JOIN material_backfill_runs r ON r.id=j.run_id WHERE j.status='waiting' AND r.paused_reason IS NULL ORDER BY j.added,j.asset_id LIMIT 1").fetchone()
+                                 "SELECT j.asset_id,r.scope FROM material_backfill_jobs j JOIN material_backfill_runs r ON r.id=j.run_id WHERE j.status='waiting' AND r.paused_reason IS NULL ORDER BY j.added,j.asset_id LIMIT 1").fetchone()
             if not candidate:return None
             ident=candidate['asset_id']; now=time.time()
             if shot and db.execute('SELECT 1 FROM material_shot_notes WHERE asset_id=?',(ident,)).fetchone():
@@ -95,7 +95,8 @@ def claim(pool, auto):
             else:
                 db.execute("INSERT INTO material_analyses(request_id,asset_id,status,created) VALUES(?,?,'preparing',?)",(request_id,ident,now))
                 db.execute(f"UPDATE {table} SET status='running',request_id=?,updated=?,note='正在分析素材' WHERE asset_id=?",(request_id,now,ident))
-            return {'ident':ident,'request_id':request_id,'account':key,'table':table}
+            return {'ident':ident,'request_id':request_id,'account':key,'table':table,
+                    'imported':table == 'material_backfill_jobs' and candidate['scope'] == 'windows_import'}
         finally:
             if db.in_transaction:
                 # Commit only a normal return, and roll back a partially written claim.
@@ -168,11 +169,16 @@ def run_once(sources,pool,backfill=None):
             item=json.load(response)
         video=item.get('media_type')=='video'
         extra=pool.material_extra(ident)
-        if not shot and any(has_labels(x) for x in (item.get('tags'),item.get('structured_tags'),extra.get('manual'),extra.get('suggested'))):
+        imported = job['imported']
+        if imported and not any(origin.get('source') == 'windows_local' for origin in item['origins']):
+            raise ValueError('unexpected_source')
+        labels = (item.get('observed_tags'), extra.get('suggested')) if imported else (
+            item.get('tags'), item.get('structured_tags'), extra.get('manual'), extra.get('suggested'))
+        if not shot and any(has_labels(x) for x in labels):
             result={'status':'skipped'}
         else:
             with tempfile.TemporaryDirectory(prefix='sw-material-') as directory:
-                parts=read_media(sources,ident,Path(directory))
+                parts=read_media(sources,ident,Path(directory),imported=imported)
                 if shot:
                     parts[0]={'type':'text','text':SHOT_PROMPT}
                 result=analyze(pool.official.runtime,job['account'],parts,receipt)
