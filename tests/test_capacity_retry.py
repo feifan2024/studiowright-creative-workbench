@@ -5,13 +5,14 @@ from types import SimpleNamespace as S
 from unittest.mock import patch, Mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'packaging/ubuntu/snapshot/workbench'))
 from official_pool import OfficialPool
+from test_flow_regressions import fixture_directory
 
 class CapacityRetries(unittest.TestCase):
     def test_bound_account_attempts_and_guards(self):
         for scenario in ('success','exhaust','partial','unknown','never','maintenance'):
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as d:
+            with self.subTest(scenario=scenario), fixture_directory() as d:
                 path=Path(d)/'db'
-                with sqlite3.connect(path) as db:
+                with closing(sqlite3.connect(path)) as db:
                     db.executescript("CREATE TABLE requests(request_id TEXT,status TEXT,account_key TEXT,note TEXT);CREATE TABLE official_jobs(request_id TEXT,no_retry INTEGER);CREATE TABLE official_attempts(request_id TEXT,ordinal INTEGER,status TEXT,reason TEXT,submitted INTEGER,started REAL,finished REAL,total_ms REAL,response TEXT);INSERT INTO requests VALUES('r','dispatching','a',NULL);INSERT INTO official_jobs VALUES('r',0);INSERT INTO official_attempts VALUES('r',1,'running',NULL,1,0,NULL,NULL,NULL);")
                 def connect():return closing(sqlite3.connect(path,isolation_level=None))
                 p=OfficialPool.__new__(OfficialPool);p.pool=S(connection=connect,maintenance=lambda:scenario=='maintenance');p.runtime=S(inventory=lambda:{'a':True});p.reason=lambda *a:None;p.stop=threading.Event()
@@ -24,7 +25,7 @@ class CapacityRetries(unittest.TestCase):
                     p.capacity_retries(job,bad,fn)
                 expected=1 if scenario=='success' else 2 if scenario=='exhaust' else 0
                 self.assertEqual(fn.call_count,expected)
-                with sqlite3.connect(path) as db:
+                with closing(sqlite3.connect(path)) as db:
                     self.assertEqual(db.execute('SELECT count(*) FROM official_attempts').fetchone()[0],1+expected)
                     self.assertEqual(db.execute('SELECT account_key FROM requests').fetchone()[0],'a')
 

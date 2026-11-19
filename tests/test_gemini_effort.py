@@ -1,4 +1,5 @@
 import json,os,sys,tempfile,time,unittest,uuid
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace as S
 from unittest.mock import Mock,patch
@@ -9,6 +10,7 @@ from official_pool import OfficialPool
 from live_pool import RealPool
 from dispatch_limit import DispatchBusy
 import test_gemini_stability as fixtures
+from test_flow_regressions import fixture_directory
 
 class Effort(unittest.TestCase):
     def test_supported_and_fallback(self):
@@ -112,6 +114,51 @@ class Effort(unittest.TestCase):
         p.run_text(dict(request_id='x',account_key='a',prompt='test',native_before=None,model='gemini-3.8-flash-high'))
         self.assertEqual(p.runtime.run.call_count,2)
         for c in p.runtime.run.call_args_list:self.assertEqual(c.kwargs['model'],'gemini-3.8-flash-high')
+
+    @patch('official_pool.reader_for')
+    def test_opt_in_flash_fallback_at_admission_and_before_first_send(self,reader_for):
+        first, second, standard = ('a'*64, 'b'*64, 'c'*64)
+        neon = NEON_FAMILY + '-xhigh'
+        quotas = {}
+        blocked = dict(status='ok', checked_at=time.time(), five_hour={'remaining_percent':0})
+        reader_for.return_value.cached_accounts.side_effect = lambda keys: {k:quotas.get(k,{}) for k in keys}
+        with fixture_directory() as directory, closing(RealPool(directory,directory)) as pool:
+            official = pool.official
+            official.runtime = S(inventory=lambda:dict.fromkeys((first,second,standard),True),
+                                 text_models=lambda:{first:{neon},second:{neon}})
+            official.circle_order = lambda keys:keys
+            items = [{'key':'flow-account-'+k} for k in (first,second,standard)]
+            def submit(rid, fallback='gemini-3.8-flash-low'):
+                return official.generate('auto','test',rid,items,model=neon,fallback_model=fallback)
+            queued_id = str(uuid.uuid4())
+            request, _ = submit(queued_id)
+            self.assertEqual(request['account_key'],first)
+            self.assertFalse(request['fallback']['used'])
+            quotas[first] = blocked
+            claimed = official.claim()
+            self.assertEqual((claimed['account_key'],claimed['model']),(second,neon))
+            quotas[second] = blocked
+            immediate_id = str(uuid.uuid4())
+            request, created = submit(immediate_id)
+            self.assertTrue(created)
+            self.assertEqual((request['account_key'],request['model'],request['requested_model']),
+                             (standard,'gemini-3.8-flash-low',neon))
+            self.assertEqual(request['fallback']['reason'],'advanced_pool_unavailable')
+            self.assertFalse(submit(immediate_id)[1])
+            self.assertEqual(official.claim()['request_id'], immediate_id)
+            quotas.clear()
+            fallback_id = str(uuid.uuid4())
+            submit(fallback_id)
+            quotas.update({first:blocked,second:blocked})
+            self.assertEqual(official.claim()['account_key'],standard)
+            result = pool.get(fallback_id)
+            self.assertEqual(result['fallback'],{'model':'gemini-3.8-flash-low','used':True,'reason':'quota_exhausted'})
+            self.assertEqual(len(result['attempts']),1)
+            quotas[standard] = blocked
+            with self.assertRaises(DispatchBusy):
+                submit(str(uuid.uuid4()))
+            with self.assertRaises(DispatchBusy):
+                submit(str(uuid.uuid4()), None)
 
     @unittest.skipUnless(os.name=='posix','CLI pipes require Linux')
     @patch('official_runtime.official_network_env',return_value={})

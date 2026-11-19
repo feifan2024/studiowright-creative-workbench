@@ -612,10 +612,12 @@ class RealPool:
             if not row:
                 return None
             official=db.execute("""SELECT j.conversation_id,j.queue_wait_ms,j.model,j.reason,t.attachments,a.state AS reauth_state,
+                                  f.requested_model,f.fallback_model,f.reason AS fallback_reason,
                                   b.reason AS block_reason,b.created AS block_created,
                                   CASE WHEN json_valid(c.native_json) THEN json_extract(c.native_json,'$.channel') END AS channel
                                   FROM official_jobs j LEFT JOIN conversations c ON c.id=j.conversation_id
                                   JOIN conversation_turns t USING(request_id)
+                                  LEFT JOIN official_model_fallbacks f USING(request_id)
                                   LEFT JOIN official_reauth a USING(request_id)
                                   LEFT JOIN official_account_blocks b ON b.account_key=(SELECT account_key FROM requests WHERE request_id=j.request_id)
                                   WHERE j.request_id=?""",(request_id,)).fetchone()
@@ -632,6 +634,11 @@ class RealPool:
             result['channel']=image_channel if official['channel']==image_channel else 'official_antigravity_cli'
             if official['model'] in ADVANCED_MODELS:
                 result['reason']=official['reason']
+            if official['requested_model']:
+                result.update(requested_model=official['requested_model'], reason=official['reason'],
+                              fallback={'model':official['fallback_model'],
+                                        'used':official['fallback_reason'] is not None,
+                                        'reason':official['fallback_reason']})
             if result['channel']==image_channel:result['reason']=official['reason']
             else:
                 result['attempts']=attempts
@@ -1662,5 +1669,6 @@ class RealPool:
             raise Conflict('没有同时满足登录、浏览器和用量条件的 Gemini 账号，请先核对账号。')
         return min(candidates)[2]
 
-    def generate(self, account, prompt, request_id, items, attachments=None, conversation_id=None, model=None, *, retry_policy=None, effort=None):
-        return self.official.generate(account,prompt,request_id,items,attachments,conversation_id,model,retry_policy=retry_policy,effort=effort)
+    def generate(self, account, prompt, request_id, items, attachments=None, conversation_id=None, model=None, *, retry_policy=None, effort=None, fallback_model=None):
+        return self.official.generate(account,prompt,request_id,items,attachments,conversation_id,model,
+                                      retry_policy=retry_policy,effort=effort,fallback_model=fallback_model)

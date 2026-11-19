@@ -6,7 +6,7 @@ from official_runtime import (OfficialRuntime,MODEL,CHANNEL,TEMPORARY_LAUNCH_FAI
 from official_reauth import Reauthorization,SCHEMA as REAUTH_SCHEMA,private_bytes
 import gemini_image_input as vision
 from gemini_completion import saved_capacity_completion, RECOVERED
-from gemini_effort import ADVANCED_MODELS,resolve
+from gemini_effort import ADVANCED_MODELS,FLASH_FAMILY,MODELS,resolve
 from official_quota import quota_restriction,reader_for
 from dispatch_limit import DispatchBusy
 
@@ -46,6 +46,9 @@ class OfficialPool:
                 model TEXT NOT NULL,native_before TEXT,started REAL,queue_wait_ms REAL,reason TEXT);
               CREATE TABLE IF NOT EXISTS official_pool_cursor(id INTEGER PRIMARY KEY CHECK(id=1),last_account TEXT);
               CREATE TABLE IF NOT EXISTS official_advanced_pool_cursor(id INTEGER PRIMARY KEY CHECK(id=1),last_account TEXT);
+              CREATE TABLE IF NOT EXISTS official_model_fallbacks(
+                request_id TEXT PRIMARY KEY REFERENCES official_jobs(request_id), requested_model TEXT NOT NULL,
+                fallback_model TEXT NOT NULL, permitted_accounts TEXT NOT NULL, reason TEXT);
               CREATE TABLE IF NOT EXISTS official_account_blocks(account_key TEXT PRIMARY KEY,reason TEXT NOT NULL,created REAL NOT NULL);
               CREATE TABLE IF NOT EXISTS official_attempts(
                 request_id TEXT NOT NULL REFERENCES requests(request_id),
@@ -329,7 +332,22 @@ class OfficialPool:
             queued.append({'request_id':record['request_id'],'account_key':key,'new':new})
         return queued
 
-    def generate(self,account,prompt,request_id,items,attachments=None,conversation_id=None,model=None,*,image_analysis=False,readiness_probe=False,retry_policy=None,effort=None):
+    def rotate_account(self, db, eligible, advanced):
+        cursor='official_advanced_pool_cursor' if advanced else 'official_pool_cursor'
+        circle=self.circle_order(eligible)
+        row=db.execute(f'SELECT last_account FROM {cursor} WHERE id=1').fetchone()
+        last=row[0] if row else ''
+        account=circle[(circle.index(last)+1)%len(circle)] if last in circle else circle[0]
+        db.execute(f'INSERT INTO {cursor}(id,last_account) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(account,))
+        return account
+
+    def flash_candidates(self, eligible, now):
+        if not eligible:
+            return []
+        quota=reader_for(self.runtime).cached_accounts(eligible)
+        return [k for k in eligible if not quota_restriction(quota.get(k,{}),now)]
+
+    def generate(self,account,prompt,request_id,items,attachments=None,conversation_id=None,model=None,*,image_analysis=False,readiness_probe=False,retry_policy=None,effort=None,fallback_model=None):
         if retry_policy not in (None, "never"):raise ValueError("Invalid retry policy")
         from live_pool import Conflict
         if not self.ready:raise Conflict('官方调用尚未配置完成，未发送。')
@@ -343,6 +361,10 @@ class OfficialPool:
         if not isinstance(account,str):raise ValueError('请选择账号或自动轮询。')
         if account!='auto':self.pool.allowed(account,items)
         advanced=model in ADVANCED_MODELS
+        if fallback_model is not None:
+            if account!='auto' or not advanced or image_analysis or readiness_probe or fallback_model not in (FLASH_FAMILY,*MODELS.values()):
+                raise ValueError('fallback_model 仅用于自动选账号的高级文字对话，必须指定受支持的 Flash 型号。')
+            fallback_model=resolve(fallback_model)
         if advanced and (image_analysis or readiness_probe):
             raise ValueError('高级模型仅用于文字对话。')
         models=self.runtime.text_models() if advanced else {}
@@ -351,6 +373,7 @@ class OfficialPool:
         quota=reader_for(self.runtime).cached_accounts(models) if models else {}
         if conversation_id:self.pool.conversation_id(conversation_id)
         payload={'account':account,'prompt':prompt,'conversation_id':conversation_id,'model':model or MODEL}
+        if fallback_model:payload['fallback_model']=fallback_model
         if retry_policy == 'never':payload['retry_policy']='never'
         if image_analysis:payload.update(channel=vision.CHANNEL,attachments=attachments)
         digest=hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
@@ -378,6 +401,8 @@ class OfficialPool:
                 conv=db.execute('SELECT * FROM conversations WHERE id=?',(conversation_id,)).fetchone() if conversation_id else None
                 if conversation_id and (not conv or conv['hidden']):raise Conflict('请选择一个未隐藏的对话。')
                 native=None
+                if fallback_model and conv and conv['account_key']:
+                    raise ValueError('fallback_model 仅用于新对话的首轮。')
                 if conv:
                     if conv['blocked']:raise Conflict('该对话已归档或有待核对的结果；请保留记录并新建对话。')
                     data=json.loads(conv['native_json'] or '{}')
@@ -397,24 +422,27 @@ class OfficialPool:
                 eligible=sorted(k for k in available if k in permitted and self.reason(
                     db,k,available,self.readiness_block(db,k) if readiness_probe and k==account else None,
                     readiness_probe=readiness_probe and k==account) is None)
+                requested_model=model
+                fallback_reason=None
                 if advanced:
                     if account!='auto' and model not in models.get(account,()):
                         raise ValueError('原对话账号未开通该模型和思考等级。')
                     if account!='auto' and quota_restriction(quota.get(account,{}),now):
                         raise DispatchBusy('原账号需要验证或额度恢复，本次未发送。')
-                    eligible=[k for k in eligible if model in models.get(k,())
-                              and not quota_restriction(quota.get(k,{}),now)]
+                    advanced_eligible=[k for k in eligible if model in models.get(k,())
+                                       and not quota_restriction(quota.get(k,{}),now)]
+                    if not advanced_eligible and account=='auto' and fallback_model:
+                        eligible=self.flash_candidates(eligible,now)
+                        if not eligible:
+                            raise DispatchBusy('高级模型与 Flash 均无可用账号，本次未发送。')
+                        model,advanced,fallback_reason=fallback_model,False,'advanced_pool_unavailable'
+                    else:
+                        eligible=advanced_eligible
                     if account=='auto' and not eligible:
                         raise DispatchBusy('没有可用的高级模型账号，本次未发送。')
                 if account=='auto':
                     if not eligible:raise Conflict('没有允许派发且授权就绪的账号；暂停和未确认限制均保留。')
-                    circle=self.circle_order(eligible)
-                    cursor='official_advanced_pool_cursor' if advanced else 'official_pool_cursor'
-                    row=db.execute(f'SELECT last_account FROM {cursor} WHERE id=1').fetchone();last=row[0] if row else ''
-                    # Index-based step: with a saved panel order this follows the user's
-                    # circle; without one it degenerates to the legacy sorted-key rotation.
-                    account=circle[(circle.index(last)+1)%len(circle)] if last in circle else circle[0]
-                    db.execute(f'INSERT INTO {cursor}(id,last_account) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(account,))
+                    account=self.rotate_account(db,eligible,advanced)
                 elif account not in eligible:raise Conflict('该账号授权未就绪、已暂停或存在未确认结果，消息未发送。')
                 if not conv:
                     conversation_id=str(uuid.uuid4())
@@ -427,10 +455,40 @@ class OfficialPool:
                 db.execute('INSERT INTO conversation_attempt_models(request_id,model) VALUES(?,?)',(request_id,model))
                 db.execute('INSERT INTO official_jobs(request_id,conversation_id,model,native_before,readiness_probe,no_retry) VALUES(?,?,?,?,?,?)',
                            (request_id,conversation_id,model,native,int(readiness_probe),int(retry_policy=='never')))
+                if fallback_model:
+                    db.execute('INSERT INTO official_model_fallbacks VALUES(?,?,?,?,?)',
+                               (request_id,requested_model,fallback_model,json.dumps(sorted(permitted)),fallback_reason))
                 db.execute('COMMIT')
             except BaseException:db.execute('ROLLBACK');raise
         self.wake.set()
         return self.pool.get(request_id),True
+
+    def reroute_unsent(self, db, row, reason, available, models, quota):
+        request_id=row['request_id']
+        policy=db.execute('SELECT * FROM official_model_fallbacks WHERE request_id=?',(request_id,)).fetchone()
+        if (not policy or policy['reason'] or row['model']!=policy['requested_model'] or row['hidden']
+                or row['native_before'] is not None or row['attachments']!='[]'
+                or db.execute('SELECT 1 FROM official_attempts WHERE request_id=?',(request_id,)).fetchone()):
+            return None
+        eligible=sorted(key for key in json.loads(policy['permitted_accounts'])
+                        if key!=row['account_key'] and not self.reason(db,key,available))
+        now=time.time()
+        advanced=[key for key in eligible if row['model'] in models.get(key,())
+                  and not quota_restriction(quota.get(key,{}),now)]
+        candidates=advanced or self.flash_candidates(eligible,now)
+        if not candidates:
+            return None
+        account=self.rotate_account(db,candidates,bool(advanced))
+        model=row['model'] if advanced else policy['fallback_model']
+        if not advanced:
+            db.execute('UPDATE official_model_fallbacks SET reason=? WHERE request_id=?',(reason,request_id))
+        native=json.dumps({'channel':CHANNEL,'model':model,'official_conversation_id':None})
+        db.execute('UPDATE conversations SET account_key=?,native_json=?,updated=? WHERE id=?',
+                   (account,native,now,row['conversation_id']))
+        db.execute('UPDATE requests SET account_key=? WHERE request_id=?',(account,request_id))
+        db.execute('UPDATE official_jobs SET model=? WHERE request_id=?',(model,request_id))
+        db.execute('UPDATE conversation_attempt_models SET model=? WHERE request_id=?',(model,request_id))
+        return dict(row,account_key=account,model=model)
 
     def claim(self, *, probe_only=None):
         available=self.runtime.inventory()
@@ -441,10 +499,12 @@ class OfficialPool:
                 if db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]>=DEFAULT_MAX_CONCURRENCY:
                     db.execute('COMMIT');return None
                 rows=db.execute("""SELECT r.request_id,r.account_key,r.created,r.finished,j.reason AS job_reason,j.conversation_id,j.native_before,j.readiness_probe,j.no_retry,j.model,t.prompt,t.attachments,
+                                  f.reason AS fallback_reason,
                                   a.state AS reauth_state,a.block_reason,a.block_created,a.account_key AS reauth_account,c.hidden
                                   FROM requests r JOIN official_jobs j USING(request_id)
                                   JOIN conversation_turns t USING(request_id) JOIN conversations c ON c.id=j.conversation_id
-                                  LEFT JOIN official_reauth a USING(request_id) WHERE r.status='queued' ORDER BY j.readiness_probe,r.created,r.rowid""").fetchall()
+                                  LEFT JOIN official_reauth a USING(request_id) LEFT JOIN official_model_fallbacks f USING(request_id)
+                                  WHERE r.status='queued' ORDER BY j.readiness_probe,r.created,r.rowid""").fetchall()
                 models=self.runtime.text_models() if any(r['model'] in ADVANCED_MODELS for r in rows) else {}
                 quota=reader_for(self.runtime).cached_accounts(models) if models else {}
                 for row in rows:
@@ -465,6 +525,8 @@ class OfficialPool:
                             reason='model_account_unavailable'
                         else:
                             reason=quota_restriction(quota.get(row['account_key'],{}),time.time())
+                    if row['fallback_reason'] and not reason and not self.flash_candidates([row['account_key']],time.time()):
+                        reason='fallback_account_unavailable'
                     if timed_out:
                         previous=db.execute("""SELECT ordinal,status,reason,submitted FROM official_attempts
                             WHERE request_id=? ORDER BY ordinal DESC LIMIT 1""",(row['request_id'],)).fetchone()
@@ -484,6 +546,10 @@ class OfficialPool:
                                 or row['account_key']!=row['reauth_account'] or row['attachments']!='[]' or row['hidden']
                                 or len(attempts)!=1 or attempts[0]['reason']!=AUTH_UNSENT or attempts[0]['submitted']!=0):
                             reason='reauth_state_changed'
+                    if reason and not (resumed or timed_out or row['readiness_probe']):
+                        updated=self.reroute_unsent(db,row,reason,available,models,quota)
+                        if updated:
+                            row,reason=updated,None
                     if reason:
                         db.execute("UPDATE requests SET status='failed',finished=?,note='排队期间账号状态变化；本轮未发送，不重试或换号。' WHERE request_id=?",(time.time(),row['request_id']))
                         if resumed:db.execute("UPDATE official_reauth SET state='stopped' WHERE request_id=?",(row['request_id'],))

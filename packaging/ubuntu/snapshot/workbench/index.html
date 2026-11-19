@@ -300,13 +300,25 @@ def call(path, payload=None, request_id=None, *, file=None):
               <div class="api-heading"><span>02</span><div><h2 id="api-reasoning" tabindex="-1">Gemini · 对话与推理</h2></div></div>
               <div class="api-endpoint"><b>POST</b><code>/api/conversations</code><span>传 title，返回对话 id。</span></div>
               <div class="api-endpoint"><b>POST</b><code>/api/real-pool/chat</code><span>传 conversation_id、account: "auto"、prompt，返回 request_id 和 status。</span></div>
-              <p>接着问时沿用 <code>conversation_id</code>，为新消息生成新的请求编号。查回复用下方「结果与下载」中的 Gemini 查询接口。</p><p>单条新文字对话收到明确超时回执时，工作台用原账号最多重试三次，成功即停。已有上下文的多轮对话及其他结果不明的请求保留待核对。用原请求编号查询，文字对话的 <code>attempts</code> 记录每次尝试的状态、原因和耗时。</p>
+              <p>文字对话可选择 <code>gemini-4-neon</code>、<code>gemini-4-hydrogen</code> 和 <code>gemini-3.8-flash</code>。Neon、Hydrogen 的 <code>effort</code> 支持 <code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>，默认 <code>high</code>。Flash 支持前三档，默认 <code>medium</code>。也可直接传完整型号，如 <code>gemini-4-neon-xhigh</code>。</p>
+              <p>新对话首轮使用 <code>account: "auto"</code> 时，可加 <code>fallback_model</code>。只有高级池在发送前无可用账号时，才改用指定的 Flash 型号。查看返回的 <code>requested_model</code>、实际 <code>model</code> 和 <code>fallback.used</code>。两个池都不可用时，入队前返回 HTTP 409，入队后按原编号查询失败原因。</p>
+              <p>续聊沿用实际绑定的模型系列和账号，允许修改同系列的思考等级。部分回复或结果未知时按原请求编号查询。高级池可派发账号数和共享额度见「总览 → Gemini 各账号额度」。</p>
               <div class="api-code-head"><span>复制文字请求 · 实际发送</span><button type="button" data-copy-code="api-official-python">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-official-python">chat = call("/api/conversations", {"title": "我的对话"})
 rid = str(uuid4())
 print("请求编号:", rid, flush=True)
 print(call("/api/real-pool/chat", {
     "conversation_id": chat["id"], "account": "auto", "prompt": "请用一句话介绍你自己。"
 }, rid))</code></pre>
+              <div class="api-code-head"><span>复制高级模型请求 · 允许降级到 Flash</span><button type="button" data-copy-code="api-advanced-python">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-advanced-python">chat = call("/api/conversations", {"title": "高级模型与 Flash 降级"})
+rid = str(uuid4())
+print("请求编号:", rid, flush=True)
+print(call("/api/real-pool/chat", {
+    "conversation_id": chat["id"], "account": "auto",
+    "prompt": "请列出这个方案的三个关键风险。",
+    "model": "gemini-4-neon", "effort": "xhigh",
+    "fallback_model": "gemini-3.8-flash-medium"
+}, rid))
+# 后续用 call(f"/api/real-pool/requests/{rid}") 查询最终型号和回复。</code></pre>
             </section>
             <section class="api-panel" aria-labelledby="api-gemini-vision">
               <div class="api-heading"><span>03</span><div><h2 id="api-gemini-vision" tabindex="-1">Gemini · 上传图片并识别</h2></div></div>

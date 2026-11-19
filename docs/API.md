@@ -68,11 +68,36 @@ Gemini CLI 账号池默认总并发 20，与 Flow 的 1～5 并发设置独立�
 
 **`POST /api/real-pool/chat`** · 传 conversation_id、account: "auto"、prompt，返回 request_id 和 status。
 
-使用 Gemini 4 Neon 或 Gemini 4 Hydrogen 时，请新建文字对话。可传 `"model": "gemini-4-neon"` 或 `"model": "gemini-4-hydrogen"`，并用 `effort` 选择 `low`、`medium`、`high`、`xhigh`，默认 `high`。也可直接传完整型号，如 `gemini-4-neon-high`。
+### 高级模型与降级
 
-- `"account": "auto"` 会在支持所选模型和档位、授权就绪且没有已知额度限制的高级模型账号中轮询。可手选已开通账号。当前没有可派发账号时返回 HTTP 409。续聊继续使用原账号和模型，可调整思考等级。入队后如额度耗尽，结果接口会返回 `status: "failed"` 和 `reason: "quota_exhausted"`，未发送到 Google。
-- `GET /api/channel-status` 的 `dispatch.advanced_pool` 显示高级模型池的已登记、可派发、执行中和排队数量。每个账号的 `advanced_text_models` 列出已开通的型号及档位。
-- `GET /api/official-quota` 的 `advanced_pool` 显示高级模型池各账号的官方 5 小时和每周额度及恢复时间。Google 按账号返回 Gemini 共享额度，Hydrogen 和 Neon 使用同一份数字。可读账号每 5 分钟刷新，等待验证的账号可在验证后手动刷新。
+| `model` | 可选 `effort` | 默认 |
+| --- | --- | --- |
+| `gemini-4-neon` | `low`、`medium`、`high`、`xhigh` | `high` |
+| `gemini-4-hydrogen` | `low`、`medium`、`high`、`xhigh` | `high` |
+| `gemini-3.8-flash` | `low`、`medium`、`high` | `medium` |
+
+高级模型用于文字对话。也可传完整型号，如 `gemini-4-neon-xhigh`。若同时传 `effort`，两者必须一致，否则返回 HTTP 400。选择 `account: "auto"` 时，高级池只在已开通所选型号和档位、授权就绪且无已知额度限制的账号中轮询。已登记账号数和当下可派发账号数会分别显示。
+
+- 新对话首轮使用 `account: "auto"` 时，可传 `fallback_model`，明确允许降级。支持 `gemini-3.8-flash`（等同于 `gemini-3.8-flash-medium`）及 Flash 的三个完整档位。省略该字段时只使用请求的高级型号。Flash 的档位由 `fallback_model` 决定。
+- 入队或实际派发前若没有可用的高级账号，工作台用可用的 Flash 账号继续处理同一请求。入队前两个模型池都不可用会返回 HTTP 409。入队后仍无可用账号时，按原编号查询 `failed` 和 `reason`。
+- 对话首轮绑定实际使用的模型系列和账号。续聊沿用这两项，可以调整同系列的思考等级。已开始调用后的错误按既有重试规则处理；部分回复、结果未知需要查询原编号。需要换模型时新建对话。
+- 带降级选项的请求会返回 `requested_model`、实际 `model` 和 `fallback`。读取 `fallback.used` 判断是否降级，`fallback.model` 是设定的备选型号，`fallback.reason` 说明触发原因。提交后继续查同一 `request_id`，因为派发前仍可能降级。
+
+```python
+chat = call("/api/conversations", {"title": "高级模型与 Flash 降级"})
+rid = str(uuid4())
+print("请求编号:", rid, flush=True)
+submission = call("/api/real-pool/chat", {
+    "conversation_id": chat["id"], "account": "auto",
+    "prompt": "请列出这个方案的三个关键风险。",
+    "model": "gemini-4-neon", "effort": "xhigh",
+    "fallback_model": "gemini-3.8-flash-medium"
+}, rid)
+print(submission["model"], submission["fallback"])
+# 后续用 call(f"/api/real-pool/requests/{rid}") 查询最终型号和回复。
+```
+
+**账号与额度监控**可在工作台「总览 → Gemini 各账号额度」查看。工作台本机面板端口 `18920` 的 `GET /api/channel-status` 返回 `dispatch.advanced_pool`，`GET /api/official-quota` 返回各高级账号的 5 小时及每周剩余与恢复时间。这两个监控接口由面板提供，程序调用端口 `18922` 提供对话提交及结果查询。额度按账号共享，可读的高级账号每 5 分钟刷新。
 
 接着问时沿用 `conversation_id`，为新消息生成新的请求编号。查回复用下方「结果与下载」中的 Gemini 查询接口。
 

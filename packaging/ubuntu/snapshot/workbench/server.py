@@ -2202,18 +2202,18 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         if set(data) != {'account', 'enabled'}:
                             raise ValueError('请求内容格式不正确。')
                         return self.json_response(200, real_pool.set_gemini_enabled(data['account'], data['enabled'], account_data['items']))
-                    if set(data) - {"account", "prompt", "attachments", "conversation_id", "model", "retry_policy", "effort"} or not {'account', 'prompt'} <= set(data):
+                    if set(data) - {"account", "prompt", "attachments", "conversation_id", "model", "retry_policy", "effort", "fallback_model"} or not {'account', 'prompt'} <= set(data):
                         raise ValueError("请求内容格式不正确。")
                     if data.get('retry_policy') not in (None, 'never'):
                         raise ValueError('Invalid retry policy')
-                    retry_kwargs={k:data[k] for k in ('retry_policy','effort') if k in data}
+                    retry_kwargs={k:data[k] for k in ('retry_policy','effort','fallback_model') if k in data}
                     from gemini_effort import resolve
                     resolve(data.get('model'),data.get('effort'))
                     if 'attachments' in data and not isinstance(data['attachments'], list):
                         raise ValueError("附件信息不正确。")
                     if data.get('conversation_id'):
                         record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'], data.get('attachments', []), data['conversation_id'], data.get('model'), **retry_kwargs)
-                    elif data.get('model') is not None:
+                    elif data.get('model') is not None or data.get('fallback_model') is not None:
                         raise ValueError('模型选择需要在对话中使用。')
                     elif data.get('attachments'):
                         record, created = real_pool.generate(data['account'], data['prompt'], self.headers.get('Idempotency-Key', ''), account_data['items'], data['attachments'], **retry_kwargs)
