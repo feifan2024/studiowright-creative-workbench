@@ -6,7 +6,7 @@ from official_runtime import (OfficialRuntime,MODEL,CHANNEL,TEMPORARY_LAUNCH_FAI
 from official_reauth import Reauthorization,SCHEMA as REAUTH_SCHEMA,private_bytes
 import gemini_image_input as vision
 from gemini_completion import saved_capacity_completion, RECOVERED
-from gemini_effort import NEON,resolve
+from gemini_effort import ADVANCED_MODELS,resolve
 
 # Ownership is explicit: queued official jobs or a saved native official conversation.
 # Titles, model names and old monitor state never determine channel ownership.
@@ -224,13 +224,13 @@ class OfficialPool:
 
     def public_status(self):
         available=self.runtime.inventory()
-        neon_accounts=self.runtime.neon_text_accounts()
+        text_models=self.runtime.text_models()
         with self.pool.connection() as db:
             blocks=dict(db.execute('SELECT account_key,reason FROM official_account_blocks'))
             result={key:{'authorization':'saved_verified_identity' if ready else 'not_ready',
                          'dispatch_eligible':self.reason(db,key,available) is None,
                          'restriction':self.reason(db,key,available),'block_reason':blocks.get(key),
-                         'busy':busy_official(db,key),'neon_text_enabled':ready and key in neon_accounts}
+                         'busy':busy_official(db,key),'advanced_text_models':sorted(text_models.get(key,())) if ready else []}
                     for key,ready in available.items()}
             queued=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued'").fetchone()[0]
             active=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]
@@ -327,8 +327,8 @@ class OfficialPool:
         model=resolve(model,effort)
         if not isinstance(account,str):raise ValueError('请选择账号或自动轮询。')
         if account!='auto':self.pool.allowed(account,items)
-        if model == NEON and (image_analysis or readiness_probe or account not in self.runtime.neon_text_accounts()):
-            raise ValueError('Gemini 4 Neon High 仅用于文字对话，请手动选择已开通该模型的账号。')
+        if model in ADVANCED_MODELS and (image_analysis or readiness_probe or model not in self.runtime.text_models().get(account,())):
+            raise ValueError('请手动选择支持该模型和思考等级的账号进行文字对话。')
         if conversation_id:self.pool.conversation_id(conversation_id)
         payload={'account':account,'prompt':prompt,'conversation_id':conversation_id,'model':model or MODEL}
         if retry_policy == 'never':payload['retry_policy']='never'
@@ -364,8 +364,11 @@ class OfficialPool:
                     if conv['account_key']:
                         if data.get('channel')==vision.CHANNEL:raise Conflict('识图记录不能续接到文字对话，请新建对话。')
                         if data.get('channel')!=CHANNEL:raise Conflict('旧通道对话保留为历史记录，请新建官方对话。')
-                        if (model == NEON or data.get('model') == NEON) and data.get('model') != model:
-                            raise ValueError('切换 Gemini 4 Neon 需要新建对话。')
+                        previous_model=data.get('model')
+                        if not isinstance(previous_model,str):previous_model=''
+                        if (model in ADVANCED_MODELS or previous_model in ADVANCED_MODELS) and (
+                            previous_model.rsplit('-',1)[0]!=model.rsplit('-',1)[0]):
+                            raise ValueError('切换 Gemini 模型需要新建对话。')
                         if account not in ('auto',conv['account_key']):raise Conflict('多轮对话必须使用最初的账号，不能换号。')
                         account=conv['account_key'];native=data.get('official_conversation_id')
                         selection='manual'

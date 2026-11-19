@@ -68,7 +68,7 @@ Gemini CLI 账号池默认总并发 20，与 Flow 的 1～5 并发设置独立�
 
 **`POST /api/real-pool/chat`** · 传 conversation_id、account: "auto"、prompt，返回 request_id 和 status。
 
-使用 Gemini 4 Neon High 时，请新建文字对话，指定已开通 Neon 的账号编号和 `"model": "gemini-4-neon-high"`。续聊沿用这两个参数。浏览器里手选账号后，可在模型下拉框查看可用选项。
+使用 Gemini 4 Neon 或 Gemini 4 Hydrogen 时，请新建文字对话并指定支持该模型的账号。可传 `"model": "gemini-4-neon"` 或 `"model": "gemini-4-hydrogen"`，并用 `effort` 选择 `low`、`medium`、`high`、`xhigh`，默认 `high`。也可直接传完整型号，如 `gemini-4-neon-high`。续聊沿用账号与模型，可调整思考等级。浏览器里手选账号后，可查看该账号可用的模型和等级。
 
 接着问时沿用 `conversation_id`，为新消息生成新的请求编号。查回复用下方「结果与下载」中的 Gemini 查询接口。
 

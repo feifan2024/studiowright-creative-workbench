@@ -168,7 +168,11 @@
               <div class="panel-heading conversation-detail-heading"><div><h2 id="chatTitle">请选择或新建对话</h2><p class="panel-caption">问答、实际账号和耗时保存在本工作台。</p></div><div class="conversation-detail-actions"><button id="chatRename" class="button button-light" type="button" disabled>重命名</button><button id="chatHide" class="button button-light" type="button" disabled>隐藏</button></div></div>
               <div id="chatHistory" class="workflow-demo conversation-history" tabindex="0" aria-label="对话内容" aria-live="polite"></div>
               <div class="workflow-demo conversation-composer">
-                <div class="conversation-settings"><div class="conversation-field"><label for="chatAccount">账号</label><select id="chatAccount"><option value="">请先核对 Gemini 登录</option></select></div><div class="conversation-field"><label for="chatModel">模型</label><select id="chatModel" disabled><option value="">自动选择 Flash</option></select></div></div>
+                <div class="conversation-settings">
+                  <div class="conversation-field"><label for="chatAccount">账号</label><select id="chatAccount"><option value="">请先核对 Gemini 登录</option></select></div>
+                  <div class="conversation-field"><label for="chatModel">模型</label><select id="chatModel" disabled><option value="">Gemini 3.8 Flash</option></select></div>
+                  <div class="conversation-field"><label for="chatEffort">思考等级</label><select id="chatEffort" disabled><option value="">中</option></select></div>
+                </div>
                 <p class="subtle" id="chatModelNote">官方调用使用固定模型，同一对话继续原账号与上下文。</p>
                 <label class="conversation-prompt-label" for="chatPrompt">消息</label><textarea id="chatPrompt" rows="3" cols="70" maxlength="20000" placeholder="输入消息"></textarea>
                 <div class="conversation-compose-actions"><div class="conversation-attachment"><label for="chatFiles">添加附件（可选）</label><input id="chatFiles" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm,.pdf"></div><button id="chatSend" class="button button-primary" type="button" disabled>发送</button></div>

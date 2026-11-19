@@ -3166,6 +3166,12 @@ async function loadConversations({background = false, listData = null} = {}) {
   }
 }
 
+const chatEffortLabels={low:'低',medium:'中',high:'高',xhigh:'超高'};
+const flashModel='gemini-3.8-flash';
+const flashChatChoices=['low','medium','high'].map(effort=>({
+  id:`${flashModel}-${effort}`, family:flashModel, label:'Gemini 3.8 Flash', effort
+}));
+
 function syncConversationControls(announce = false) {
   const item=currentConversation, ready=!channelReadFailed && state.channelStatus?.production_send_available === true;
   const select=$('chatAccount'), accounts=state.snapshot?.real_accounts?.items || [];
@@ -3183,21 +3189,31 @@ function syncConversationControls(announce = false) {
   $('chatPrompt').disabled=!!item?.simulated || imageAnalysis;
   $('chatFiles').disabled=true;
   $('chatFiles').title='当前接入文字对话；已有附件和草稿保留。';
-  const modelSelect=$('chatModel'), previousModel=modelSelect.value;
-  const flash={id:'gemini-3.8-flash-medium',label:'Gemini 3.8 Flash · 官方调用'};
+  const modelSelect=$('chatModel'), effortSelect=$('chatEffort');
+  const previousModel=modelSelect.value, previousEffort=effortSelect.value;
   const account=accounts.find(row=>row.key==='flow-account-'+select.value);
-  let choices=[flash];
-  if(item && !archived && !item.account_key && account) {
-    choices=account.gemini_model_options?.length ? account.gemini_model_options : choices;
-  }
+  const accountChoices=account?.gemini_model_options?.filter(option=>option.family && option.effort);
+  let choices=accountChoices?.length ? accountChoices : flashChatChoices;
   if(item?.model && (archived || item.account_key)) {
-    const saved=account?.gemini_model_options?.find(option=>option.id===item.model);
-    choices=[saved || {id:item.model,label:item.model}];
+    const saved=choices.find(option=>option.id===item.model);
+    const [,family,effort]=item.model.match(/^(.*)-(low|medium|high|xhigh)$/) || [];
+    const savedModel=saved || {id:item.model,family:family || item.model,label:family || item.model,effort};
+    choices=archived || !saved ? [savedModel] : choices.filter(option=>option.family===savedModel.family);
   }
-  modelSelect.replaceChildren(...choices.map(option=>new Option(option.label,option.id)));
-  if(choices.some(option=>option.id===previousModel)) modelSelect.value=previousModel;
-  modelSelect.disabled=!ready || !item || archived || pending || chatSending || !!item.hidden || choices.length<2;
-  $('chatModelNote').textContent=imageAnalysis ? 'API 识图记录 · 每次识图独立提问。' : archived ? '历史归档只读；原问答与草稿保留，请新建官方对话。' : '官方调用 · 同一对话固定账号与模型，不依赖网页常驻。';
+  const families=new Map(choices.map(option=>[option.family,option.label]));
+  modelSelect.replaceChildren(...Array.from(families, ([family,label])=>new Option(label,family)));
+  if(families.has(previousModel)) modelSelect.value=previousModel;
+  const levels=choices.filter(option=>option.family===modelSelect.value);
+  effortSelect.replaceChildren(...levels.map(option=>new Option(chatEffortLabels[option.effort] || '原设置',option.id)));
+  const defaultEffort=modelSelect.value===flashModel ? 'medium' : 'high';
+  effortSelect.value=levels.find(option=>option.id===previousEffort)?.id
+    || levels.find(option=>option.id===item?.model)?.id
+    || levels.find(option=>option.effort===defaultEffort)?.id
+    || levels[0]?.id || '';
+  const locked=!ready || !item || archived || pending || chatSending || !!item.hidden;
+  modelSelect.disabled=locked || !!item?.account_key || families.size<2;
+  effortSelect.disabled=locked || levels.length<2;
+  $('chatModelNote').textContent=imageAnalysis ? 'API 识图记录 · 每次识图独立提问。' : archived ? '历史归档只读；原问答与草稿保留，请新建官方对话。' : '首次发送后固定账号和模型。续聊时可调整思考等级。';
   $('chatSend').disabled=!ready || !item || archived || pending || chatSending || !!item.hidden || !geminiSelectionReady(select.value);
   if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理；可在原消息下查看处理和重试进度。' : !ready ? '官方调用暂不可用，草稿保留。' : '新对话轮询分配；多轮固定账号。单条新文字对话确认超时后，最多用原账号重试三次。';
 }
@@ -3275,6 +3291,7 @@ async function showConversation(id, {background = false} = {}) {
       JSON.stringify(item) === JSON.stringify(currentConversation))) return currentConversation;
   if (currentConversation?.id !== item.id) {
     $('chatModel').value = '';
+    $('chatEffort').value = '';
     if (!item.account_key && [...$('chatAccount').options].some((option) => option.value === 'auto')) $('chatAccount').value = 'auto';
   }
   activeConversation = item.id;
@@ -3353,6 +3370,7 @@ $('chatNew').addEventListener('click', async () => {
   } finally { button.disabled = false; button.textContent = '新建对话'; }
 });
 $('chatAccount').addEventListener('change', () => syncConversationControls(true));
+$('chatModel').addEventListener('change', () => syncConversationControls());
 $('chatShowHidden').addEventListener('click', async () => {
   showingHiddenConversations = !showingHiddenConversations;
   $('chatShowHidden').textContent = showingHiddenConversations ? '查看当前对话' : '查看已隐藏';
@@ -3395,7 +3413,7 @@ $('chatSend').addEventListener('click', async () => {
   if (!activeConversation || chatSending || currentConversation?.simulated) return;
   const account = $('chatAccount').value || 'auto';
   if (!geminiSelectionReady(account)) { $('chatMessage').textContent = '所选账号当前不能发送，请先到账号页核对状态。'; return; }
-  const model = $('chatModel').value || null;
+  const model = $('chatEffort').value || null;
   const prompt = $('chatPrompt').value;
   if (!prompt.trim()) { $('chatMessage').textContent = '请输入消息。'; return; }
   const files = Array.from($('chatFiles').files || []);

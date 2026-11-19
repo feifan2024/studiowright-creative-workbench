@@ -3,7 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace as S
 from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'packaging/ubuntu/snapshot/workbench'))
-from gemini_effort import resolve,DEFAULT,NEON
+from gemini_effort import resolve,DEFAULT,NEON_FAMILY,HYDROGEN_FAMILY,THOUGHT_LEVELS,text_model_options
+from official_runtime import OfficialRuntime
 from official_pool import OfficialPool
 import test_gemini_stability as fixtures
 
@@ -14,16 +15,29 @@ class Effort(unittest.TestCase):
         for invalid in (None,'','max','HIGH',False,123,{},[]):
             self.assertEqual(resolve(effort=invalid),DEFAULT)
 
-    def test_neon_requires_explicit_supported_account_and_is_text_only(self):
+    def test_model_and_effort_resolve_and_only_configured_advanced_options_are_advertised(self):
+        for family in (NEON_FAMILY,HYDROGEN_FAMILY):
+            self.assertEqual(resolve(family),family+'-high')
+            for effort in THOUGHT_LEVELS:
+                self.assertEqual(resolve(family,effort),family+'-'+effort)
+            with self.assertRaises(ValueError):
+                resolve(family+'-high','low')
+        self.assertEqual(OfficialRuntime._text_models({'neon_text_enabled':True}),{NEON_FAMILY+'-high'})
+        configured=OfficialRuntime._text_models({'neon_text_enabled':True,'advanced_text_models':[HYDROGEN_FAMILY+'-xhigh','invalid']})
+        self.assertEqual([row['id'] for row in text_model_options(configured)],[
+            'gemini-3.8-flash-low',DEFAULT,'gemini-3.8-flash-high',HYDROGEN_FAMILY+'-xhigh',
+        ])
+
+    def test_advanced_models_require_explicit_supported_account_and_are_text_only(self):
         pool=OfficialPool.__new__(OfficialPool)
         pool.pool=S(conversation_id=Mock(),allowed=Mock())
-        pool.runtime=S(inventory=lambda:{'ready':True},neon_text_accounts=lambda:{'enabled'})
-        self.assertEqual(resolve(NEON,'high'),NEON)
-        with self.assertRaises(ValueError):
-            resolve(NEON,'low')
+        neon=NEON_FAMILY+'-high'
+        pool.runtime=S(inventory=lambda:{'ready':True},text_models=lambda:{'enabled':{neon}})
         for account,probe in (('auto',False),('other',False),('enabled',True)):
             with self.assertRaisesRegex(ValueError,'手动选择'):
-                pool.generate(account,'test','request',[],model=NEON,readiness_probe=probe)
+                pool.generate(account,'test','request',[],model=neon,readiness_probe=probe)
+        with self.assertRaisesRegex(ValueError,'手动选择'):
+            pool.generate('enabled','test','request',[],model=HYDROGEN_FAMILY)
 
     def test_capacity_retry_keeps_level(self):
         p=OfficialPool.__new__(OfficialPool);p.pool=S(state_dir=Path('/unused'))
@@ -49,17 +63,20 @@ print(json.dumps({'event':'result','result':{'status':'SUCCESS','conversation_id
 
     @unittest.skipUnless(os.name=='posix','CLI pipes require Linux')
     @patch('official_runtime.official_network_env',return_value={})
-    def test_neon_uses_ssh_auth_context_and_never_launches_for_other_accounts(self,_):
+    def test_advanced_model_uses_ssh_auth_context_and_requires_configured_level(self,_):
         body="""import os, sys, json
-assert os.environ['SSH_TTY'] and sys.argv[sys.argv.index('--model')+1]=='gemini-4-neon-high'
-print(json.dumps({'event':'result','result':{'status':'SUCCESS','conversation_id':'11111111-1111-4111-8111-111111111111','response':'neon ok'}}),flush=True)
+assert os.environ['SSH_TTY']
+model=sys.argv[sys.argv.index('--model')+1]
+print(json.dumps({'event':'result','result':{'status':'SUCCESS','conversation_id':'11111111-1111-4111-8111-111111111111','response':model}}),flush=True)
 """
         with tempfile.TemporaryDirectory() as directory:
             runtime,root=fixtures.LocalTransport().setup_runtime(directory,body)
             account=runtime.account('fixture')
-            blocked=runtime.run('fixture','test',None,root/'blocked',model=NEON)
+            model=HYDROGEN_FAMILY+'-xhigh'
+            runtime.account=lambda _:{**account,'advanced_text_models':{NEON_FAMILY+'-high'}}
+            blocked=runtime.run('fixture','test',None,root/'blocked',model=model)
             self.assertEqual(blocked['reason'],'model_account_unavailable')
             self.assertFalse((root/'blocked').exists())
-            runtime.account=lambda _:{**account,'neon_text_enabled':True}
-            result=runtime.run('fixture','test',None,root/'allowed',model=NEON)
-            self.assertEqual(result['response'],'neon ok')
+            runtime.account=lambda _:{**account,'advanced_text_models':{model}}
+            result=runtime.run('fixture','test',None,root/'allowed',model=model)
+            self.assertEqual(result['response'],model)

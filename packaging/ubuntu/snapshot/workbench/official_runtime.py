@@ -3,7 +3,7 @@ import ast,errno,http.client,json,os,re,selectors,signal,subprocess,time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from gemini_execution import call_budget
-from gemini_effort import NEON,resolve
+from gemini_effort import ADVANCED_MODELS,NEON_FAMILY,resolve
 from gemini_completion import completed_after_capacity_error, RECOVERED
 
 CHANNEL='official_antigravity_cli'
@@ -167,14 +167,21 @@ class OfficialRuntime:
         if not (root/'workspace').is_dir():return None
         self._backup_token(key,token)
         return {'root':root,'binary':Path(data['binary']),'email':identity,
-                'neon_text_enabled':item.get('neon_text_enabled') is True}
+                'advanced_text_models':self._text_models(item)}
 
-    def neon_text_accounts(self):
+    @staticmethod
+    def _text_models(item):
+        models=item.get('advanced_text_models')
+        if isinstance(models,list):
+            return {model for model in models if isinstance(model,str) and model in ADVANCED_MODELS}
+        return {f'{NEON_FAMILY}-high'} if item.get('neon_text_enabled') is True else set()
+
+    def text_models(self):
         try:
             accounts=(self.settings() or {}).get('accounts',{})
-            return {key for key,item in accounts.items() if item.get('neon_text_enabled') is True}
+            return {key:self._text_models(item) for key,item in accounts.items() if isinstance(item,dict)}
         except (OSError,ValueError,TypeError,AttributeError):
-            return set()
+            return {}
 
     def inventory(self):
         try:data=self.settings()
@@ -195,8 +202,8 @@ class OfficialRuntime:
         env={'HOME':str(home),'XDG_CONFIG_HOME':str(home/'.config'),'XDG_CACHE_HOME':str(home/'.cache'),
              'XDG_DATA_HOME':str(home/'.local/share'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','TERM':'xterm-256color'}
         env.update(official_network_env())
-        if selected == NEON:
-            if not account.get('neon_text_enabled'):
+        if selected in ADVANCED_MODELS:
+            if selected not in account.get('advanced_text_models',()):
                 return {'submitted':False,'status':'failed','reason':'model_account_unavailable'}
             # Match the SSH OAuth path used to enroll this headless CLI account.
             env['SSH_TTY']='workbench'
