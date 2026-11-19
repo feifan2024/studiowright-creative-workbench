@@ -1,5 +1,6 @@
 """Official /usage reader. No prompts, generation, original-home writes, or raw logs."""
 import copy
+from datetime import datetime
 import json
 import math
 import os
@@ -17,6 +18,8 @@ ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))')
 KEY = re.compile(r'[0-9a-f]{64}\Z')
 TTL = 300
 AUTO_REFRESH_SECONDS = 6 * 3600
+ADVANCED_REFRESH_SECONDS = 300
+QUOTA_WINDOWS = ('five_hour','weekly')
 
 
 def verification_entry(text):
@@ -78,6 +81,69 @@ def parse_usage(text, checked_at):
     return result
 
 
+def parse_headless_usage(text):
+    """Read Google's shared Gemini quota from the CLI's tab-delimited response."""
+    windows={}
+    labels={'Five Hour Limit Remaining':'five_hour','Weekly Limit Remaining':'weekly'}
+    for line in text.splitlines():
+        match=re.fullmatch(r'Gemini Models\t(Weekly Limit Remaining|Five Hour Limit Remaining)\t(\d+(?:\.\d+)?)%\t([^\t]*)',line)
+        if not match:
+            continue
+        window=labels[match[1]]; percent=float(match[2])
+        if window in windows or not 0<=percent<=100:
+            return None
+        reset=None
+        if match[3]:
+            try:
+                date=datetime.fromisoformat(match[3].replace('Z','+00:00'))
+                if date.tzinfo is not None:
+                    reset=date.timestamp()
+            except (ValueError,OverflowError,OSError):
+                pass
+        windows[window]={'remaining_percent':percent,'reset_at':reset}
+    return windows if len(windows)==len(QUOTA_WINDOWS) else None
+
+
+def quota_restriction(row, now):
+    if row.get('status') in ('verification_required','authorization_required'):
+        return row['status']
+    if row.get('status') != 'ok':
+        return None
+    checked=row.get('checked_at',0)
+    fresh=type(checked) in (int,float) and 0<=now-checked<=600
+    for window in QUOTA_WINDOWS:
+        quota=row.get(window,{})
+        reset=quota.get('reset_at')
+        if quota.get('remaining_percent')==0 and (reset>now if type(reset) in (int,float) else fresh):
+            return 'quota_exhausted'
+    return None
+
+
+def read_headless_usage(account, workspace, env):
+    try:
+        result=subprocess.run([str(account['binary']),'--print','/usage','--output-format','json','--print-timeout','15s'],
+                              cwd=workspace,env=env,capture_output=True,text=True,timeout=20,stdin=subprocess.DEVNULL)
+        reply=json.loads(result.stdout)
+    except (OSError,ValueError,subprocess.SubprocessError):
+        return None
+    now=time.time()
+    if not isinstance(reply,dict):
+        return None
+    text=reply.get('response')
+    if result.returncode==0 and reply.get('status')=='SUCCESS' and isinstance(text,str):
+        windows=parse_headless_usage(text)
+        if windows:
+            return {'status':'ok','checked_at':now,'phase':'usage','identity_matched':True,**windows}
+    evidence=str(reply.get('error') or '')+'\n'+result.stderr
+    failure=classify_failure(evidence,sent=True,identity=True)
+    if failure['status'] in ('verification_required','authorization_required'):
+        link=verification_entry(evidence)
+        if link:
+            failure['_verification_url']=link
+        return failure
+    return None
+
+
 def read_account(runtime, key, *, save_renewal=False):
     # Imports are Linux-only; the pure parser and aggregation run on Windows too.
     import fcntl
@@ -89,6 +155,7 @@ def read_account(runtime, key, *, save_renewal=False):
     if not account:
         return {'status': 'authorization_unavailable', 'checked_at': time.time()}
     original = account['root']/'home/.gemini/antigravity-cli'
+    advanced=not save_renewal and key in runtime.text_models()
     # Credentials exist only in this private tmpfs directory, deleted on every exit.
     # The native CLI renews auth in its process; no token is copied back or logged.
     with tempfile.TemporaryDirectory(prefix='workbench-quota-', dir='/dev/shm') as temporary:
@@ -98,6 +165,8 @@ def read_account(runtime, key, *, save_renewal=False):
         original_token=None
         for name in (token_name, 'settings.json', 'jetski_state.pbtxt', 'cache/onboarding.json'):
             source = original/name
+            if advanced and name in ('jetski_state.pbtxt','cache/onboarding.json') and not source.exists():
+                continue
             if source.is_symlink() or not source.is_file() or source.stat().st_size > 1024*1024:
                 return {'status': 'authorization_unavailable', 'checked_at': time.time()}
             target = cfg/name; target.parent.mkdir(parents=True, exist_ok=True)
@@ -110,6 +179,10 @@ def read_account(runtime, key, *, save_renewal=False):
                'XDG_DATA_HOME':str(home/'.local/share'), 'PATH':'/usr/bin:/bin', 'LANG':'C.UTF-8',
                'TERM':'xterm-256color', 'SSH_TTY':'quota-read-only', 'SSH_CONNECTION':'quota-read-only'}
         env.update(official_network_env())
+        if advanced:
+            headless=read_headless_usage(account,workspace,env)
+            if headless:
+                return headless
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH',60,4096,0,0))
         process = None
@@ -247,16 +320,18 @@ class QuotaReader:
         self.stop = threading.Event()
         threading.Thread(target=self._auto_refresh_loop, daemon=True, name='official-quota-auto').start()
 
-    def _auto_refresh_tick(self):
+    def _auto_refresh_tick(self, *, advanced_only=False):
         """One scheduled pass over the currently readable accounts.
 
         Failed reads (verification required, network errors) stay on the
         explicit-refresh path exactly like the manual button; the tick only
         re-reads accounts whose numbers are actually shown on the panel."""
+        advanced=self.runtime.text_models() if advanced_only else None
         with self.lock:
             if self.running or not self.rows:
                 return 0
-            keys = tuple(k for k, r in self.rows.items() if r.get('status') in ('ok', 'not_read'))
+            keys = tuple(k for k, r in self.rows.items() if r.get('status') in ('ok', 'not_read')
+                         and (advanced is None or k in advanced))
             if not keys:
                 return 0
             self.running = True
@@ -266,9 +341,13 @@ class QuotaReader:
         return len(keys)
 
     def _auto_refresh_loop(self):
-        while not self.stop.wait(AUTO_REFRESH_SECONDS):
+        next_full=time.monotonic()+AUTO_REFRESH_SECONDS
+        while not self.stop.wait(ADVANCED_REFRESH_SECONDS):
             try:
-                self._auto_refresh_tick()
+                full=time.monotonic()>=next_full
+                self._auto_refresh_tick(advanced_only=not full)
+                if full:
+                    next_full=time.monotonic()+AUTO_REFRESH_SECONDS
             except Exception:
                 # The daemon loop must survive anything a single pass raises.
                 with self.lock:
@@ -277,6 +356,7 @@ class QuotaReader:
     def snapshot(self, force=False, recover=False, refresh=True):
         try: keys = list((self.runtime.settings() or {}).get('accounts',{}))
         except (OSError,ValueError,TypeError): keys = []
+        advanced=self.runtime.text_models()
         now = time.time()
         with self.lock:
             self.rows = {k:self.rows.get(k,{'status':'not_read'}) for k in keys if KEY.fullmatch(k)}
@@ -287,14 +367,23 @@ class QuotaReader:
                 self.explicit_attempted=now
                 if self.running:
                     self.pending_recovery=tuple(self.rows)
-            plan = tuple(k for k,r in self.rows.items() if explicit or r.get('status') in ('ok','not_read'))
+            plan = tuple(sorted((k for k,r in self.rows.items() if explicit or r.get('status') in ('ok','not_read')),
+                                key=lambda key:key not in advanced))
             if refresh and plan and not self.running and (automatic or explicit):
                 self.running=True; self.attempted=now
                 threading.Thread(target=self._refresh,args=(plan,recover),daemon=True,name='official-quota-reader').start()
             rows=copy.deepcopy(self.rows)
+            advanced_rows={k:{**rows.get(k,{'status':'not_read'}),'models':sorted(models)}
+                           for k,models in advanced.items() if k in rows}
             return {'schema_version':1,'source':'official_cli_usage','read_at':now,'attempted_at':self.attempted,
                     'auto_refresh_seconds':AUTO_REFRESH_SECONDS,
+                    'advanced_pool':{'quota_scope':'gemini_models_shared','auto_refresh_seconds':ADVANCED_REFRESH_SECONDS,
+                                     'accounts':advanced_rows,**aggregate(advanced_rows,now)},
                     'refreshing':self.running,'accounts':rows,**aggregate(rows,now)}
+
+    def cached_accounts(self, keys):
+        with self.lock:
+            return {key:copy.deepcopy(self.rows.get(key,{})) for key in keys}
 
     def _refresh(self,keys,recover=False):
         try:

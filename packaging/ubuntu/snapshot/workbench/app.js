@@ -3446,7 +3446,7 @@ $('chatSend').addEventListener('click', async () => {
     chatSending = false; await loadConversations();
     if (record.status === 'failed') await refresh();
   } catch (error) {
-    if (!submitted || [400,403].includes(error.status)) {
+    if (!submitted || [400,403,409].includes(error.status)) {
       sessionStorage.removeItem('conversationRequest'); chatSending = false;
       syncConversationControls();
       $('chatMessage').textContent = error.message;
@@ -4903,9 +4903,28 @@ function renderOfficialQuota() {
     return `<tr><th scope="row">${esc(names.get(key) || `账号 ${index+1}`)}</th>${values.map((v,i)=>`<td><div class="quota-account-value">${number(v)}</div><div class="quota-account-track" role="img" aria-label="${i ? '每周' : '5小时'}剩余 ${v == null ? '未知' : v+'%'}"><i data-quota-fill="${v ?? 0}"></i></div></td>`).join('')}<td>${esc(status)}</td></tr>`;
   }).join('');
   const checked = rows.map(([,r])=>r.checked_at).filter(t=>typeof t==='number');
+  const advanced = data?.advanced_pool;
+  const advancedDispatch = state.channelStatus?.dispatch?.advanced_pool;
+  const advancedRows = Object.entries(advanced?.accounts || {});
+  const advancedQuotaMarkup = advancedRows.length ? `
+    <div class="quota-table-wrap">
+      <table aria-label="高级模型账号额度">
+        <caption>高级模型 · ${advancedDispatch?.ready_accounts ?? '—'} / ${advancedRows.length} 个可派发 · 额度与该账号的 Gemini 模型共享</caption>
+        <thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态</th></tr></thead>
+        <tbody>${advancedRows.map(([key,row])=>{
+          const account = state.channelStatus?.accounts?.find(item=>item.account_key===key);
+          const status = row.status==='verification_required' || account?.block_reason==='verification_required' ? '等待 Google 验证'
+            : account?.advanced_quota_restriction==='quota_exhausted' ? '等待额度恢复'
+            : account?.advanced_quota_restriction==='authorization_required' ? '等待重新授权'
+            : !row.models?.length ? '等待实测开通'
+            : account?.dispatch_eligible===false ? '暂不可派发' : '已开通';
+          return `<tr><th scope="row">${esc(names.get(key) || '已登记账号')}</th><td>${number(savedQuotaValue(row,'five_hour'))}</td><td>${number(savedQuotaValue(row,'weekly'))}</td><td>${status}</td></tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>` : '';
   const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已保存 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : officialQuotaReadFailed ? '额度服务暂不可读取' : '尚未读到官方额度';
   target.setAttribute('aria-busy',String(refreshing));
-  target.innerHTML = `<div class="quota-main">${flowMarkup}${windowMarkup('five_hour','GEMINI · 5 小时额度')}${windowMarkup('weekly','GEMINI · 每周额度')}</div><div class="quota-footer"><div class="quota-source"><span>Gemini：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>Flow 进行中和未确认任务不计入；Gemini 为账号平均剩余，不同账号分别恢复。每 6 小时自动重读一次，点按钮立即刷新。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaBusy ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">Gemini 各账号额度<span>查看剩余与恢复时间</span></summary><div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || '<tr><td colspan="4">正在读取账号列表…</td></tr>'}</tbody></table></div></details>`;
+  target.innerHTML = `<div class="quota-main">${flowMarkup}${windowMarkup('five_hour','GEMINI · 5 小时额度')}${windowMarkup('weekly','GEMINI · 每周额度')}</div><div class="quota-footer"><div class="quota-source"><span>Gemini：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>Gemini 为账号平均剩余，各账号分别恢复。可读的高级模型账号每 5 分钟刷新，其余按原周期刷新。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaBusy ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">Gemini 各账号额度<span>查看剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || '<tr><td colspan="4">正在读取账号列表…</td></tr>'}</tbody></table></div></details>`;
   target.querySelectorAll('[data-quota-fill]').forEach(meter=>{meter.style.width=Number(meter.dataset.quotaFill)+'%';});
   target.querySelector('[data-quota-action="refresh"]').addEventListener('click',()=>refreshOfficialQuota(true));
   if (focused) target.querySelector(`[data-quota-action="${focused}"]`)?.focus({preventScroll:true});

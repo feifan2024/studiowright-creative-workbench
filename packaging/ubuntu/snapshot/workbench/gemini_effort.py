@@ -18,9 +18,9 @@ def resolve(model=None,effort=None):
             return f'{family}-{effort or level}'
         if model == FLASH_FAMILY:
             model=DEFAULT
+    if model not in (None,'',DEFAULT,*MODELS.values()):raise ValueError('请选择工作台支持的 Gemini 模型。')
     if effort is not None and (not isinstance(effort,str) or effort not in MODELS):
         return DEFAULT
-    if model not in (None,'',DEFAULT,*MODELS.values()):raise ValueError('请选择工作台支持的 Gemini 模型。')
     if effort and model not in (None,'',DEFAULT,MODELS[effort]):raise ValueError('model 与 effort 不一致。')
     return MODELS[effort] if effort else model or DEFAULT
 

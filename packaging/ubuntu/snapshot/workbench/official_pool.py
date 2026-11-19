@@ -7,6 +7,8 @@ from official_reauth import Reauthorization,SCHEMA as REAUTH_SCHEMA,private_byte
 import gemini_image_input as vision
 from gemini_completion import saved_capacity_completion, RECOVERED
 from gemini_effort import ADVANCED_MODELS,resolve
+from official_quota import quota_restriction,reader_for
+from dispatch_limit import DispatchBusy
 
 # Ownership is explicit: queued official jobs or a saved native official conversation.
 # Titles, model names and old monitor state never determine channel ownership.
@@ -43,6 +45,7 @@ class OfficialPool:
                 request_id TEXT PRIMARY KEY REFERENCES requests(request_id),conversation_id TEXT NOT NULL,
                 model TEXT NOT NULL,native_before TEXT,started REAL,queue_wait_ms REAL,reason TEXT);
               CREATE TABLE IF NOT EXISTS official_pool_cursor(id INTEGER PRIMARY KEY CHECK(id=1),last_account TEXT);
+              CREATE TABLE IF NOT EXISTS official_advanced_pool_cursor(id INTEGER PRIMARY KEY CHECK(id=1),last_account TEXT);
               CREATE TABLE IF NOT EXISTS official_account_blocks(account_key TEXT PRIMARY KEY,reason TEXT NOT NULL,created REAL NOT NULL);
               CREATE TABLE IF NOT EXISTS official_attempts(
                 request_id TEXT NOT NULL REFERENCES requests(request_id),
@@ -225,20 +228,32 @@ class OfficialPool:
     def public_status(self):
         available=self.runtime.inventory()
         text_models=self.runtime.text_models()
+        quota=reader_for(self.runtime).cached_accounts(text_models) if text_models else {}
+        now=time.time()
         with self.pool.connection() as db:
             blocks=dict(db.execute('SELECT account_key,reason FROM official_account_blocks'))
             result={key:{'authorization':'saved_verified_identity' if ready else 'not_ready',
                          'dispatch_eligible':self.reason(db,key,available) is None,
                          'restriction':self.reason(db,key,available),'block_reason':blocks.get(key),
-                         'busy':busy_official(db,key),'advanced_text_models':sorted(text_models.get(key,())) if ready else []}
+                         'busy':busy_official(db,key),'advanced_text_models':sorted(text_models.get(key,())) if ready else [],
+                         'advanced_quota_restriction':quota_restriction(quota.get(key,{}),now) if key in text_models else None}
                     for key,ready in available.items()}
             queued=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued'").fetchone()[0]
             active=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]
+            model_ids=sorted(ADVANCED_MODELS)
+            advanced_jobs=dict(db.execute(
+                "SELECT r.status,count(*) FROM requests r JOIN official_jobs j USING(request_id) "
+                "WHERE r.status IN ('queued','dispatching') AND j.model IN ("+','.join('?' for _ in model_ids)+") GROUP BY r.status",
+                model_ids))
         account_dispatch={'available':True,'maximum':DEFAULT_MAX_CONCURRENCY,'active':active,
                           'paused':self.pool.maintenance(),'queued':queued,'scope':'gemini_pool'}
         return {'available':any(available.values()),'channel':CHANNEL,'model':MODEL,'accounts':result,'queued':queued,'active':active,
                 'selection':'round_robin','max_concurrency':DEFAULT_MAX_CONCURRENCY,'retry':True,'failover':False,
                 'concurrency_scope':'gemini_pool','per_account_concurrency':None,
+                'advanced_pool':{'selection':'round_robin','configured_accounts':len(text_models),
+                                 'ready_accounts':sum(bool(r['advanced_text_models']) and r['dispatch_eligible']
+                                                      and not r['advanced_quota_restriction'] for r in result.values()),
+                                 'active':advanced_jobs.get('dispatching',0),'queued':advanced_jobs.get('queued',0)},
                 'account_dispatch':account_dispatch,
                 'shared_dispatch':account_dispatch}  # Compatibility alias, never the Flow counter.
 
@@ -327,8 +342,13 @@ class OfficialPool:
         model=resolve(model,effort)
         if not isinstance(account,str):raise ValueError('请选择账号或自动轮询。')
         if account!='auto':self.pool.allowed(account,items)
-        if model in ADVANCED_MODELS and (image_analysis or readiness_probe or model not in self.runtime.text_models().get(account,())):
-            raise ValueError('请手动选择支持该模型和思考等级的账号进行文字对话。')
+        advanced=model in ADVANCED_MODELS
+        if advanced and (image_analysis or readiness_probe):
+            raise ValueError('高级模型仅用于文字对话。')
+        models=self.runtime.text_models() if advanced else {}
+        if advanced and account!='auto' and model not in models.get(account,()):
+            raise ValueError('所选账号未开通该模型和思考等级。')
+        quota=reader_for(self.runtime).cached_accounts(models) if models else {}
         if conversation_id:self.pool.conversation_id(conversation_id)
         payload={'account':account,'prompt':prompt,'conversation_id':conversation_id,'model':model or MODEL}
         if retry_policy == 'never':payload['retry_policy']='never'
@@ -377,14 +397,24 @@ class OfficialPool:
                 eligible=sorted(k for k in available if k in permitted and self.reason(
                     db,k,available,self.readiness_block(db,k) if readiness_probe and k==account else None,
                     readiness_probe=readiness_probe and k==account) is None)
+                if advanced:
+                    if account!='auto' and model not in models.get(account,()):
+                        raise ValueError('原对话账号未开通该模型和思考等级。')
+                    if account!='auto' and quota_restriction(quota.get(account,{}),now):
+                        raise DispatchBusy('原账号需要验证或额度恢复，本次未发送。')
+                    eligible=[k for k in eligible if model in models.get(k,())
+                              and not quota_restriction(quota.get(k,{}),now)]
+                    if account=='auto' and not eligible:
+                        raise DispatchBusy('没有可用的高级模型账号，本次未发送。')
                 if account=='auto':
                     if not eligible:raise Conflict('没有允许派发且授权就绪的账号；暂停和未确认限制均保留。')
                     circle=self.circle_order(eligible)
-                    row=db.execute('SELECT last_account FROM official_pool_cursor WHERE id=1').fetchone();last=row[0] if row else ''
+                    cursor='official_advanced_pool_cursor' if advanced else 'official_pool_cursor'
+                    row=db.execute(f'SELECT last_account FROM {cursor} WHERE id=1').fetchone();last=row[0] if row else ''
                     # Index-based step: with a saved panel order this follows the user's
                     # circle; without one it degenerates to the legacy sorted-key rotation.
                     account=circle[(circle.index(last)+1)%len(circle)] if last in circle else circle[0]
-                    db.execute('INSERT INTO official_pool_cursor(id,last_account) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(account,))
+                    db.execute(f'INSERT INTO {cursor}(id,last_account) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(account,))
                 elif account not in eligible:raise Conflict('该账号授权未就绪、已暂停或存在未确认结果，消息未发送。')
                 if not conv:
                     conversation_id=str(uuid.uuid4())
@@ -415,6 +445,8 @@ class OfficialPool:
                                   FROM requests r JOIN official_jobs j USING(request_id)
                                   JOIN conversation_turns t USING(request_id) JOIN conversations c ON c.id=j.conversation_id
                                   LEFT JOIN official_reauth a USING(request_id) WHERE r.status='queued' ORDER BY j.readiness_probe,r.created,r.rowid""").fetchall()
+                models=self.runtime.text_models() if any(r['model'] in ADVANCED_MODELS for r in rows) else {}
+                quota=reader_for(self.runtime).cached_accounts(models) if models else {}
                 for row in rows:
                     if probe_only is not None and bool(row['readiness_probe']) != probe_only:continue
                     if row['readiness_probe'] and db.execute(
@@ -428,6 +460,11 @@ class OfficialPool:
                     reason=self.reason(db,row['account_key'],available,
                                        (row['block_reason'],row['block_created']) if resumed else timeout_block or recovery,
                                        readiness_probe=bool(row['readiness_probe']))
+                    if row['model'] in ADVANCED_MODELS and not reason:
+                        if row['model'] not in models.get(row['account_key'],()):
+                            reason='model_account_unavailable'
+                        else:
+                            reason=quota_restriction(quota.get(row['account_key'],{}),time.time())
                     if timed_out:
                         previous=db.execute("""SELECT ordinal,status,reason,submitted FROM official_attempts
                             WHERE request_id=? ORDER BY ordinal DESC LIMIT 1""",(row['request_id'],)).fetchone()

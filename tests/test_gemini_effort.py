@@ -1,4 +1,4 @@
-import json,os,sys,tempfile,unittest
+import json,os,sys,tempfile,time,unittest,uuid
 from pathlib import Path
 from types import SimpleNamespace as S
 from unittest.mock import Mock,patch
@@ -6,6 +6,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'packaging/ubuntu/snap
 from gemini_effort import resolve,DEFAULT,NEON_FAMILY,HYDROGEN_FAMILY,THOUGHT_LEVELS,text_model_options
 from official_runtime import OfficialRuntime
 from official_pool import OfficialPool
+from live_pool import RealPool
+from dispatch_limit import DispatchBusy
 import test_gemini_stability as fixtures
 
 class Effort(unittest.TestCase):
@@ -22,6 +24,8 @@ class Effort(unittest.TestCase):
                 self.assertEqual(resolve(family,effort),family+'-'+effort)
             with self.assertRaises(ValueError):
                 resolve(family+'-high','low')
+        with self.assertRaises(ValueError):
+            resolve(NEON_FAMILY+'-typo','typo')
         self.assertEqual(OfficialRuntime._text_models({'neon_text_enabled':True}),{NEON_FAMILY+'-high'})
         configured=OfficialRuntime._text_models({'neon_text_enabled':True,'advanced_text_models':[HYDROGEN_FAMILY+'-xhigh','invalid']})
         self.assertEqual([row['id'] for row in text_model_options(configured)],[
@@ -33,11 +37,73 @@ class Effort(unittest.TestCase):
         pool.pool=S(conversation_id=Mock(),allowed=Mock())
         neon=NEON_FAMILY+'-high'
         pool.runtime=S(inventory=lambda:{'ready':True},text_models=lambda:{'enabled':{neon}})
-        for account,probe in (('auto',False),('other',False),('enabled',True)):
-            with self.assertRaisesRegex(ValueError,'手动选择'):
-                pool.generate(account,'test','request',[],model=neon,readiness_probe=probe)
-        with self.assertRaisesRegex(ValueError,'手动选择'):
+        with self.assertRaisesRegex(ValueError,'仅用于文字'):
+            pool.generate('enabled','test','request',[],model=neon,readiness_probe=True)
+        with self.assertRaisesRegex(ValueError,'未开通'):
+            pool.generate('other','test','request',[],model=neon)
+        with self.assertRaisesRegex(ValueError,'未开通'):
             pool.generate('enabled','test','request',[],model=HYDROGEN_FAMILY)
+
+    @unittest.skipUnless(os.name=='posix','Workbench account pool requires Linux')
+    @patch('official_pool.reader_for')
+    def test_advanced_auto_filters_models_and_quota_and_keeps_its_own_rotation(self,reader_for):
+        a,b,standard=('a'*64,'b'*64,'c'*64)
+        keys=(a,b,standard)
+        models={a:{NEON_FAMILY+'-high',HYDROGEN_FAMILY+'-low'},b:{NEON_FAMILY+'-high'}}
+        quotas={}
+        reader_for.return_value.cached_accounts.side_effect=lambda keys:{k:quotas.get(k,{}) for k in keys}
+        with tempfile.TemporaryDirectory() as directory:
+            pool=RealPool(directory,directory)
+            official=pool.official
+            official.runtime=S(inventory=lambda:dict.fromkeys(keys,True),text_models=lambda:models)
+            official.circle_order=lambda eligible:eligible
+            items=[{'key':'flow-account-'+k} for k in keys]
+            def send(model, rid=None):
+                request=rid or str(uuid.uuid4())
+                return official.generate('auto','test',request,items,model=model)
+            rid=str(uuid.uuid4())
+            self.assertEqual(send(NEON_FAMILY,rid)[0]['account_key'],a)
+            self.assertFalse(send(NEON_FAMILY,rid)[1])
+            self.assertEqual(send(DEFAULT)[0]['account_key'],a)
+            self.assertEqual(send(NEON_FAMILY)[0]['account_key'],b)
+            self.assertEqual(send(HYDROGEN_FAMILY+'-low')[0]['account_key'],a)
+            quotas[a]={'status':'ok','checked_at':time.time(),'five_hour':{'remaining_percent':0}}
+            self.assertEqual(send(NEON_FAMILY)[0]['account_key'],b)
+            with self.assertRaises(DispatchBusy):
+                send(HYDROGEN_FAMILY+'-low')
+            claimed=official.claim()
+            self.assertEqual(claimed['model'],DEFAULT)
+            self.assertEqual(pool.get(rid)['reason'],'quota_exhausted')
+
+    @unittest.skipUnless(os.name=='posix','Workbench account pool requires Linux')
+    @patch('official_pool.reader_for')
+    def test_advanced_auto_continuation_keeps_original_account(self,reader_for):
+        first,second=('a'*64,'b'*64)
+        reader_for.return_value.cached_accounts.return_value={}
+        models={key:{NEON_FAMILY+'-high',NEON_FAMILY+'-low'} for key in (first,second)}
+        with tempfile.TemporaryDirectory() as directory:
+            pool=RealPool(directory,directory)
+            official=pool.official
+            official.runtime=S(inventory=lambda:{first:True,second:True},text_models=lambda:models)
+            official.circle_order=lambda eligible:eligible
+            items=[{'key':'flow-account-'+k} for k in models]
+            rid=str(uuid.uuid4())
+            request,_=official.generate('auto','first',rid,items,model=NEON_FAMILY)
+            conversation=request['conversation_id']
+            native={'channel':'official_antigravity_cli','model':NEON_FAMILY+'-high','official_conversation_id':str(uuid.uuid4())}
+            with pool.connection() as db:
+                db.execute("UPDATE requests SET status='completed' WHERE request_id=?",(rid,))
+                db.execute('UPDATE conversations SET native_json=? WHERE id=?',(json.dumps(native),conversation))
+            def continue_chat():
+                return official.generate('auto','follow up',str(uuid.uuid4()),items,conversation_id=conversation,
+                                         model=NEON_FAMILY,effort='low')
+            reader_for.return_value.cached_accounts.return_value={first:{'status':'verification_required'}}
+            with self.assertRaises(DispatchBusy):
+                continue_chat()
+            reader_for.return_value.cached_accounts.return_value={}
+            result,_=continue_chat()
+            self.assertEqual(result['account_key'],first)
+            self.assertEqual(result['model'],NEON_FAMILY+'-low')
 
     def test_capacity_retry_keeps_level(self):
         p=OfficialPool.__new__(OfficialPool);p.pool=S(state_dir=Path('/unused'))

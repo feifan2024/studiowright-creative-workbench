@@ -179,7 +179,9 @@ class OfficialRuntime:
     def text_models(self):
         try:
             accounts=(self.settings() or {}).get('accounts',{})
-            return {key:self._text_models(item) for key,item in accounts.items() if isinstance(item,dict)}
+            return {key:self._text_models(item) for key,item in accounts.items()
+                    if isinstance(item,dict) and (isinstance(item.get('advanced_text_models'),list)
+                                                   or item.get('neon_text_enabled') is True)}
         except (OSError,ValueError,TypeError,AttributeError):
             return {}
 

@@ -627,8 +627,11 @@ class RealPool:
         result['diagnostic'] = dict(diagnostic) if diagnostic else None
         if official:
             from gemini_image_input import CHANNEL as image_channel
+            from gemini_effort import ADVANCED_MODELS
             result.update({name:official[name] for name in ('conversation_id','queue_wait_ms','model')})
             result['channel']=image_channel if official['channel']==image_channel else 'official_antigravity_cli'
+            if official['model'] in ADVANCED_MODELS:
+                result['reason']=official['reason']
             if result['channel']==image_channel:result['reason']=official['reason']
             else:
                 result['attempts']=attempts

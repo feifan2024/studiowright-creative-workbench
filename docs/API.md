@@ -68,7 +68,11 @@ Gemini CLI 账号池默认总并发 20，与 Flow 的 1～5 并发设置独立�
 
 **`POST /api/real-pool/chat`** · 传 conversation_id、account: "auto"、prompt，返回 request_id 和 status。
 
-使用 Gemini 4 Neon 或 Gemini 4 Hydrogen 时，请新建文字对话并指定支持该模型的账号。可传 `"model": "gemini-4-neon"` 或 `"model": "gemini-4-hydrogen"`，并用 `effort` 选择 `low`、`medium`、`high`、`xhigh`，默认 `high`。也可直接传完整型号，如 `gemini-4-neon-high`。续聊沿用账号与模型，可调整思考等级。浏览器里手选账号后，可查看该账号可用的模型和等级。
+使用 Gemini 4 Neon 或 Gemini 4 Hydrogen 时，请新建文字对话。可传 `"model": "gemini-4-neon"` 或 `"model": "gemini-4-hydrogen"`，并用 `effort` 选择 `low`、`medium`、`high`、`xhigh`，默认 `high`。也可直接传完整型号，如 `gemini-4-neon-high`。
+
+- `"account": "auto"` 会在支持所选模型和档位、授权就绪且没有已知额度限制的高级模型账号中轮询。可手选已开通账号。当前没有可派发账号时返回 HTTP 409。续聊继续使用原账号和模型，可调整思考等级。入队后如额度耗尽，结果接口会返回 `status: "failed"` 和 `reason: "quota_exhausted"`，未发送到 Google。
+- `GET /api/channel-status` 的 `dispatch.advanced_pool` 显示高级模型池的已登记、可派发、执行中和排队数量。每个账号的 `advanced_text_models` 列出已开通的型号及档位。
+- `GET /api/official-quota` 的 `advanced_pool` 显示高级模型池各账号的官方 5 小时和每周额度及恢复时间。Google 按账号返回 Gemini 共享额度，Hydrogen 和 Neon 使用同一份数字。可读账号每 5 分钟刷新，等待验证的账号可在验证后手动刷新。
 
 接着问时沿用 `conversation_id`，为新消息生成新的请求编号。查回复用下方「结果与下载」中的 Gemini 查询接口。
 

@@ -120,13 +120,15 @@ def read_status(database, runtime=None):
                     'block_reason': runtime_accounts.get(key, {}).get('block_reason'),
                     'authorization': runtime_accounts.get(key, {}).get('authorization', 'not_connected'),
                     'dispatch_eligible': runtime_accounts.get(key, {}).get('dispatch_eligible', False),
+                    'advanced_text_models': runtime_accounts.get(key, {}).get('advanced_text_models', []),
+                    'advanced_quota_restriction': runtime_accounts.get(key, {}).get('advanced_quota_restriction'),
                     'busy': runtime_accounts.get(key, {}).get('busy', False),
                     'restriction': runtime_accounts.get(key, {}).get('restriction'), 'source': 'saved_official_requests'})
             result['conversations'] = {ident: value[2] for ident,value in official.items()}
             if runtime:
                 result.update(channel='official_antigravity_cli', production_send_available=runtime.get('available') is True,
                               authorization_source='saved_verified_identity',
-                              dispatch={k:runtime.get(k) for k in ('queued','active','selection','max_concurrency','retry','failover','model','shared_dispatch','account_dispatch','concurrency_scope','per_account_concurrency')})
+                              dispatch={k:runtime.get(k) for k in ('queued','active','selection','max_concurrency','retry','failover','model','shared_dispatch','account_dispatch','concurrency_scope','per_account_concurrency','advanced_pool')})
             result['available'] = True
     except (sqlite3.Error, OSError):
         # Do not forward DB errors, private native metadata, response bodies or URLs.
