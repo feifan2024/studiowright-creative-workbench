@@ -3183,9 +3183,20 @@ function syncConversationControls(announce = false) {
   $('chatPrompt').disabled=!!item?.simulated || imageAnalysis;
   $('chatFiles').disabled=true;
   $('chatFiles').title='当前接入文字对话；已有附件和草稿保留。';
-  $('chatModel').innerHTML='<option value="gemini-3.8-flash-medium">Gemini 3.8 Flash · 官方调用</option>';
-  if(archived && item?.model) $('chatModel').innerHTML=`<option>${esc(item.model)}</option>`;
-  $('chatModel').disabled=true;
+  const modelSelect=$('chatModel'), previousModel=modelSelect.value;
+  const flash={id:'gemini-3.8-flash-medium',label:'Gemini 3.8 Flash · 官方调用'};
+  const account=accounts.find(row=>row.key==='flow-account-'+select.value);
+  let choices=[flash];
+  if(item && !archived && !item.account_key && account) {
+    choices=account.gemini_model_options?.length ? account.gemini_model_options : choices;
+  }
+  if(item?.model && (archived || item.account_key)) {
+    const saved=account?.gemini_model_options?.find(option=>option.id===item.model);
+    choices=[saved || {id:item.model,label:item.model}];
+  }
+  modelSelect.replaceChildren(...choices.map(option=>new Option(option.label,option.id)));
+  if(choices.some(option=>option.id===previousModel)) modelSelect.value=previousModel;
+  modelSelect.disabled=!ready || !item || archived || pending || chatSending || !!item.hidden || choices.length<2;
   $('chatModelNote').textContent=imageAnalysis ? 'API 识图记录 · 每次识图独立提问。' : archived ? '历史归档只读；原问答与草稿保留，请新建官方对话。' : '官方调用 · 同一对话固定账号与模型，不依赖网页常驻。';
   $('chatSend').disabled=!ready || !item || archived || pending || chatSending || !!item.hidden || !geminiSelectionReady(select.value);
   if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理；可在原消息下查看处理和重试进度。' : !ready ? '官方调用暂不可用，草稿保留。' : '新对话轮询分配；多轮固定账号。单条新文字对话确认超时后，最多用原账号重试三次。';

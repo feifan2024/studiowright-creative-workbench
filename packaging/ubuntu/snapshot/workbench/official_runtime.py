@@ -3,7 +3,7 @@ import ast,errno,http.client,json,os,re,selectors,signal,subprocess,time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from gemini_execution import call_budget
-from gemini_effort import resolve
+from gemini_effort import NEON,resolve
 from gemini_completion import completed_after_capacity_error, RECOVERED
 
 CHANNEL='official_antigravity_cli'
@@ -166,7 +166,15 @@ class OfficialRuntime:
         if not DENY<=set(policy.get('permissions',{}).get('deny',[])):return None
         if not (root/'workspace').is_dir():return None
         self._backup_token(key,token)
-        return {'root':root,'binary':Path(data['binary']),'email':identity}
+        return {'root':root,'binary':Path(data['binary']),'email':identity,
+                'neon_text_enabled':item.get('neon_text_enabled') is True}
+
+    def neon_text_accounts(self):
+        try:
+            accounts=(self.settings() or {}).get('accounts',{})
+            return {key for key,item in accounts.items() if item.get('neon_text_enabled') is True}
+        except (OSError,ValueError,TypeError,AttributeError):
+            return set()
 
     def inventory(self):
         try:data=self.settings()
@@ -187,6 +195,11 @@ class OfficialRuntime:
         env={'HOME':str(home),'XDG_CONFIG_HOME':str(home/'.config'),'XDG_CACHE_HOME':str(home/'.cache'),
              'XDG_DATA_HOME':str(home/'.local/share'),'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','TERM':'xterm-256color'}
         env.update(official_network_env())
+        if selected == NEON:
+            if not account.get('neon_text_enabled'):
+                return {'submitted':False,'status':'failed','reason':'model_account_unavailable'}
+            # Match the SSH OAuth path used to enroll this headless CLI account.
+            env['SSH_TTY']='workbench'
         argv=[str(account['binary']),'--print',prompt,'--output-format','stream-json','--model',selected,
               '--disable-slash-commands','--print-timeout','0']
         if native:argv+=['--conversation',native]

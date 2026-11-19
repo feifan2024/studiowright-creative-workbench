@@ -330,6 +330,7 @@ class RealPool:
             return
         if self.official.ready:
             from official_pool import OFFICIAL_REQUEST_SQL,busy_official
+            from gemini_effort import NEON
             status = self.official.public_status()
             for item in real_accounts.get('items', []):
                 account = item.get('key', '').removeprefix('flow-account-')
@@ -338,6 +339,8 @@ class RealPool:
                             gemini_channel=status['channel'], gemini_auto_state='eligible' if official.get('dispatch_eligible') else official.get('restriction', 'authorization_not_ready'),
                             gemini_model_options=[{'id':status['model'],'label':'Gemini 3.8 Flash · 官方调用'}],
                             keepalive_state='not_required', keepalive_note='官方调用不使用网页保活；手动暂停和官方通道未确认限制保留。')
+                if official.get('neon_text_enabled'):
+                    item['gemini_model_options'].append({'id':NEON,'label':'Gemini 4 Neon · High'})
                 with self.connection() as db:
                     pref=db.execute('SELECT gemini_enabled FROM account_preferences WHERE account_key=?',(account,)).fetchone()
                     item['gemini_enabled']=not pref or pref[0] != 0
