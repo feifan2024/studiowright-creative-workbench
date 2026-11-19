@@ -84,6 +84,7 @@ class ProbePriority(unittest.TestCase):
             db.executescript('''
               CREATE TABLE requests(request_id TEXT PRIMARY KEY, account_key TEXT,created REAL,finished REAL,status TEXT,note TEXT);
               CREATE TABLE official_jobs(request_id TEXT PRIMARY KEY,reason TEXT,conversation_id TEXT,native_before TEXT,readiness_probe INTEGER,no_retry INTEGER,started REAL,queue_wait_ms REAL,model TEXT DEFAULT 'gemini-3.8-flash-medium');
+              CREATE TABLE official_model_fallbacks(request_id TEXT PRIMARY KEY, requested_model TEXT, fallback_model TEXT, permitted_accounts TEXT, reason TEXT);
               CREATE TABLE conversation_turns(request_id TEXT, prompt TEXT, attachments TEXT, conversation_id TEXT);
               CREATE TABLE conversations(id TEXT PRIMARY KEY,hidden INTEGER,native_json TEXT);
               CREATE TABLE official_reauth(request_id TEXT,state TEXT,block_reason TEXT,block_created REAL,account_key TEXT);
