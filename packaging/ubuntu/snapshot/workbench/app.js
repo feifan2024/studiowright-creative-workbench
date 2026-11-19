@@ -3481,6 +3481,7 @@ function materialSize(bytes) {
 }
 function materialSource(origin) {
   if (origin.source === 'studiowright') return 'StudioWright';
+  if (origin.source === 'windows_local') return 'Windows 素材';
   if (origin.source === 'flow2api-windows') return 'Flow2API · Windows';
   if (origin.source === 'flow2api-ubuntu') return 'Flow2API · Ubuntu';
   return origin.source || '原来源未记录';
@@ -3536,7 +3537,7 @@ function materialTagGroups(item, compact = false) {
 function materialCard(item) {
   const id = encodeURIComponent(item.id);
   const origin = item.origins?.[0] || {};
-  const title = origin.prompt || '原记录未保存提示词';
+  const title = item.original_name || origin.prompt || '原记录未保存提示词';
   const audio = item.media_type === 'audio';
   const video = item.media_type === 'video';
   const url = '/api/library/' + id + '/file';
@@ -4009,7 +4010,7 @@ async function showMaterial(id) {
     + esc(origin.account_email || origin.account_id || '未记录') + ((item.origins || []).length > 1 ? '　·　共 ' + item.origins.length + ' 条来源' : '') + '</p>'
     + (item.origins || []).filter(o => typeof o.style_id === 'string').map(o =>
       '<p>画风 ID：<code style="white-space:pre-wrap">' + esc(o.style_id) + '</code> · ' + esc(o.request_id || o.source_id || '') + '</p>').join('')
-    + '<div class="material-prompt">' + esc(origin.prompt || '原记录未保存提示词') + '</div></div><div class="material-panel"><h3>素材与标签</h3>'
+    + '<div class="material-prompt">' + esc(origin.prompt || item.original_name || '原记录未保存提示词') + '</div></div><div class="material-panel"><h3>素材与标签</h3>'
     + '<a class="text-link material-download" href="' + url + '?download=1" download>下载原文件 ↓</a>'
     + '<div id="materialShotContent">' + materialShotNotes(item, extra) + '</div>'
     + '<button id="materialShotAnalyze" class="button button-light" type="button"' + (Object.keys(extra.shot_notes || {}).length || extra.shot_job ? ' hidden' : '') + '>用 Gemini 补充镜头说明</button>'

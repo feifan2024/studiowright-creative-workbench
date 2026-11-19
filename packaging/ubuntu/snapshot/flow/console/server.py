@@ -1035,7 +1035,7 @@ def create_app(root, adapter, test=False):
         return FileResponse(
             path,
             media_type=item["mime"],
-            filename=path.name,
+            filename=item.get("original_name") or path.name,
             content_disposition_type="attachment"
             if request.query_params.get("download") == "1"
             else "inline",

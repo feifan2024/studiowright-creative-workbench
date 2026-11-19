@@ -1490,7 +1490,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         kind = upstream.headers.get_content_type()
                         length = upstream.headers.get('Content-Length', '')
                         is_media = bool(re.fullmatch(r'/api/library/[0-9a-f]{64}/(?:file|thumbnail)', urlsplit(self.path).path))
-                        if is_media and status in (200, 206) and kind.startswith(('image/', 'video/', 'audio/')) and length.isdigit() and int(length) <= 1024**3:
+                        if is_media and status in (200, 206) and kind.startswith(('image/', 'video/', 'audio/')) and length.isdigit() and int(length) <= 2 * 1024**3:
                             self.send_response(status)
                             self.send_header('Content-Type', kind)
                             self.send_header('Content-Length', length)

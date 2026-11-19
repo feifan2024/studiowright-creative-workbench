@@ -56,6 +56,8 @@ class Library(TagIndex):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         (self.root / "objects").mkdir(exist_ok=True)
+        for category in AUDIO_CATEGORIES:
+            (self.root / "objects" / "audio" / category).mkdir(parents=True, exist_ok=True)
         (self.root / "staging").mkdir(exist_ok=True)
         self.db = self.root / "library.db"
         with self.connect() as c:
@@ -90,11 +92,11 @@ class Library(TagIndex):
         finally:
             c.close()
 
-    def archive(self, path, meta, expected=None):
+    def archive(self, path, meta, expected=None, *, max_bytes=1024**3):
         source, source_id = meta["source"], str(meta["source_id"])
         path = Path(path).resolve()
-        if not path.is_file() or not 0 < path.stat().st_size <= 1024**3:
-            raise ValueError("素材文件不存在、为空或超过 1GB。")
+        if not path.is_file() or not 0 < path.stat().st_size <= max_bytes:
+            raise ValueError("素材文件不存在、为空或超过大小限制。")
         stage = self.root / "staging" / (uuid.uuid4().hex + ".part")
         try:
             with path.open("rb") as src, stage.open("xb") as dst:
@@ -121,7 +123,8 @@ class Library(TagIndex):
                 and header[4:8] == b"ftyp"
                 and not any(b in header[8:] for b in (b"avif", b"avis"))
             ):
-                kind, mime, ext = "video", "video/mp4", ".mp4"
+                kind, mime, ext = ("video", "video/quicktime", ".mov") if header[8:12] == b"qt  " else (
+                    "video", "video/mp4", ".mp4")
                 size, offset, boxes = stage.stat().st_size, 0, set()
                 with stage.open("rb") as f:
                     while offset < size:
@@ -158,7 +161,12 @@ class Library(TagIndex):
             if meta.get("media_type") and meta["media_type"] != kind:
                 raise ValueError("素材类型与原记录不一致。")
             duration = audio_duration(stage, mime) if kind == "audio" else meta.get("duration")
-            rel = Path("objects") / sha[:2] / (sha + ext)
+            category = meta.get("details", {}).get("audio_category")
+            if category not in AUDIO_CATEGORIES:
+                category = "music" if source == "flow_music" else "other"
+            existing = self.file(sha)
+            rel = existing.relative_to(self.root) if existing else self.object_path(
+                sha, ext, category if kind == "audio" else None)
             dest = self.root / rel
             dest.parent.mkdir(exist_ok=True)
             if dest.exists():
@@ -233,9 +241,47 @@ class Library(TagIndex):
                 c.execute("INSERT OR IGNORE INTO index_jobs(asset_id) VALUES(?)", (sha,))
                 if meta.get("index_provenance"):
                     c.execute("UPDATE index_jobs SET provenance=?,state=? WHERE asset_id=? AND state='pending'", (json.dumps(meta["index_provenance"]), meta.get("index_status", "pending"), sha))
+                if kind == "audio":
+                    self.organize_audio(c, sha)
             return sha
         finally:
             stage.unlink(missing_ok=True)
+
+    @staticmethod
+    def object_path(ident, extension, category=None):
+        base = Path("objects")
+        if category is not None:
+            base = base / "audio" / category
+        return base / ident[:2] / (ident + extension)
+
+    def organize_audio(self, connection, ident):
+        row = connection.execute(
+            f"SELECT relative_path, {AUDIO_CATEGORY_SQL} FROM assets a WHERE id=? AND media_type='audio'", (ident,)
+        ).fetchone()
+        if not row:
+            return False
+        original = (self.root / row[0]).resolve()
+        target = self.object_path(ident, original.suffix, row[1])
+        if row[0] == target.as_posix():
+            return False
+        if not original.is_relative_to(self.root / "objects") or not original.is_file() or digest(original) != ident:
+            raise ValueError("原音频文件无法通过校验，未更改分类位置。")
+        destination = self.root / target
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(original, destination)
+        except FileExistsError:
+            if digest(destination) != ident:
+                raise ValueError("音频分类目录有冲突，未覆盖原文件。") from None
+        # Keep the old link available for readers and rollback. It shares the same bytes.
+        connection.execute("UPDATE assets SET relative_path=? WHERE id=?", (target.as_posix(), ident))
+        return True
+
+    def organize_existing_audio(self):
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            ids = [row[0] for row in connection.execute("SELECT id FROM assets WHERE media_type='audio'")]
+            return sum(self.organize_audio(connection, ident) for ident in ids)
 
     def get(self, ident):
         with self.connect() as c:
@@ -258,6 +304,11 @@ class Library(TagIndex):
                 origin["details"] = json.loads(origin["details"])
                 if isinstance(origin["details"], dict) and "style_id" in origin["details"]:
                     origin["style_id"] = origin["details"]["style_id"]
+            original_names = [origin["details"].get("original_name") for origin in result["origins"]
+                              if isinstance(origin["details"], dict)]
+            original_name = next((name for name in original_names if isinstance(name, str) and name), None)
+            if original_name:
+                result["original_name"] = original_name
             if result["media_type"] != "audio":
                 result.pop("audio_category")
             result["tags"] = [
@@ -387,9 +438,9 @@ class Library(TagIndex):
             args.extend([tag,tag])
         if q:
             filters.append(
-                "(EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND (instr(lower(coalesce(o.prompt,'')),lower(?))>0 OR instr(lower(coalesce(o.model,'')),lower(?))>0 OR instr(lower(coalesce(o.project_id,'')),lower(?))>0 OR instr(lower(coalesce(o.account_email,'')),lower(?))>0 OR instr(lower(coalesce(o.media_id,'')),lower(?))>0)) OR EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND instr(lower(t.value),lower(?))>0) OR EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND instr(lower(d.value),lower(?))>0))"
+                "(EXISTS(SELECT 1 FROM origins o WHERE o.asset_id=a.id AND (instr(lower(coalesce(o.prompt,'')),lower(?))>0 OR instr(lower(coalesce(o.model,'')),lower(?))>0 OR instr(lower(coalesce(o.project_id,'')),lower(?))>0 OR instr(lower(coalesce(o.account_email,'')),lower(?))>0 OR instr(lower(coalesce(o.media_id,'')),lower(?))>0 OR instr(lower(json_extract(o.details,'$.original_path')),lower(?))>0)) OR EXISTS(SELECT 1 FROM tags t WHERE t.asset_id=a.id AND instr(lower(t.value),lower(?))>0) OR EXISTS(SELECT 1 FROM dimension_tags d WHERE d.asset_id=a.id AND instr(lower(d.value),lower(?))>0))"
             )
-            args.extend([q] * 7)
+            args.extend([q] * 8)
         where = " WHERE " + " AND ".join(filters) if filters else ""
         with self.connect() as c:
             total = c.execute("SELECT count(*) FROM assets a" + where, args).fetchone()[0]

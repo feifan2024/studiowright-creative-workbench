@@ -242,6 +242,8 @@ if record.get("task_id"):
 - `POST /api/music/jobs`：提交一次，返回 `202 {"job": {...}}`。
 - `GET /api/music/jobs/{request_id}`：查询原任务，返回 `{"job": {...}}`；不存在返回404，不会生成。
 - `GET /api/library?kind=audio&tag=钢琴`：筛选音乐标签。可叠加 `style_id` 精确匹配，参数请 URL 编码。
+- Windows 导入素材与 Ubuntu 原有素材使用同一检索接口。`q` 可匹配导入文件名或来源目录。导入素材保留 `original_name`，可通过同一库的下载地址获取原文件。
+- 音频物理文件按分类存到 `objects/audio/music`、`objects/audio/sound_effect` 或 `objects/audio/other`。素材 ID、检索和下载地址沿用同一套接口。
 - `GET /api/library/{asset_id}`：素材详情；`GET /api/library/{asset_id}/file`：携带相同密钥下载原文件。
 
 参数：`request_id` 为必填标准小写 UUID；`prompt` 为1～2000字；`model` 可选，默认 `lyria-fast`。如同时传 `Idempotency-Key`，必须与 `request_id` 一致。
