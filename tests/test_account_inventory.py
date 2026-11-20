@@ -2,12 +2,28 @@ import ast
 import hashlib
 import math
 import re
+from tempfile import TemporaryDirectory
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SOURCE = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot/workbench/server.py'
 
 class AccountInventory(unittest.TestCase):
+    def test_browser_discovery_ignores_the_reserved_export_profile(self):
+        adapter = SOURCE.parent.parent / 'flow/console/adapter.py'
+        tree = ast.parse(adapter.read_text(encoding='utf-8'))
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'RealAdapter')
+        discover = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'discover')
+        scope = {'re': re}
+        exec(compile(ast.Module(body=[discover], type_ignores=[]), str(adapter), 'exec'), scope)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('music-export', 'account-2f8797411d41', 'real-unlinked'):
+                (root / 'data/profiles' / name).mkdir(parents=True)
+            self.assertEqual(scope['discover'](SimpleNamespace(root=root)),
+                             ['account-2f8797411d41', 'real-unlinked'])
+
     def test_export_window_excluded_but_unlinked_real_account_retained(self):
         tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
         fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'account_rows')

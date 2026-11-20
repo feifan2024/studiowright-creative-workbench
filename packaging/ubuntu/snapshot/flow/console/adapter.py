@@ -74,7 +74,8 @@ class RealAdapter:
             sorted(
                 p.name
                 for p in directory.iterdir()
-                if p.is_dir() and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", p.name)
+                if p.is_dir() and p.name != "music-export"
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", p.name)
             )
             if directory.exists()
             else []
