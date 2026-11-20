@@ -951,9 +951,6 @@ class Sources:
         repairs = {}
         if repair:
             if automatic:
-                if time.monotonic() < getattr(self, '_automatic_recovery_after', 0):
-                    return self.flow_readiness()
-                self._automatic_recovery_after = time.monotonic() + 300
                 payload['safe_only'] = True
             recovery = ROOT/'flow_readiness_recovery.py'
             if recovery.is_symlink() or not recovery.is_file():
@@ -974,11 +971,26 @@ class Sources:
                 if not isinstance(before_checks, dict):
                     raise ValueError('invalid_readiness_result')
                 recovery_payload['accounts'] = readiness_repair_accounts(payload, before_checks)
+                if automatic:
+                    now = time.monotonic()
+                    self._automatic_recovery_after = {
+                        profile: until for profile, until in getattr(self, '_automatic_recovery_after', {}).items()
+                        if until > now
+                    }
+                    recovery_payload['accounts'] = [
+                        a for a in recovery_payload['accounts']
+                        if a['profile'] not in self._automatic_recovery_after
+                    ]
                 recovery_payload['safe_only'] = True
             if recovery_payload['accounts']:
                 result = subprocess.run([str(python),'-B',str(recovery)],input=json.dumps(recovery_payload).encode(),
                                         capture_output=True,check=True,timeout=175)
                 repairs = json.loads(result.stdout)
+                if automatic:
+                    self._automatic_recovery_after.update({
+                        profile: time.monotonic() + 300 for profile, item in repairs.items()
+                        if item.get('page') != 'busy'
+                    })
             if manual_review:
                 return {'released':any('release_review' in r.get('actions',[]) for r in repairs.values())}
             state, _ = self.read('flow','/api/state')

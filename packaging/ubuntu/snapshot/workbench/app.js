@@ -1200,20 +1200,23 @@ async function refreshFlowReadinessStatus() {
 }
 
 let autoFlowRecovery = null;
-let autoFlowRecoveryAfter = 0;
+const autoFlowRecoveryAfter = new Map();
 let autoFlowRecoveryProfiles = new Set();
 function autoRecoverFlowPages(pageChecks) {
-  if (autoFlowRecovery || Date.now() < autoFlowRecoveryAfter || !state.snapshotFresh) return;
+  if (autoFlowRecovery || !state.snapshotFresh) return;
   const candidates = Object.entries(pageChecks?.accounts || {}).filter(([profile, value]) => {
     const account = state.snapshot?.real_accounts?.items?.find(a => a.profile === profile);
-    return ['binding','project','editor','overlay','unconfirmed','draft'].includes(value) && !pageChecks?.review?.[profile] &&
+    return Date.now() >= (autoFlowRecoveryAfter.get(profile) || 0) &&
+      ['binding','project','editor','overlay','unconfirmed','draft'].includes(value) && !pageChecks?.review?.[profile] &&
       account?.flow_login === 'verified' && account?.flow_risk_paused !== true && account?.flow_cooling !== true;
   });
   if (!candidates.length) return;
   autoFlowRecoveryProfiles = new Set(candidates.map(([profile]) => profile));
-  autoFlowRecoveryAfter = Date.now() + 300000;
   autoFlowRecovery = postJson('/api/flow-readiness/auto', {}).then(result => {
     if (!result || !result.accounts) return;
+    for (const [profile] of candidates) {
+      if (result.accounts[profile] !== 'busy') autoFlowRecoveryAfter.set(profile, Date.now() + 300000);
+    }
     rememberFlowReadiness(result, flowReadinessObservation?.dispatch);
     if (state.view === 'accounts') renderAccounts();
   }).catch(() => {

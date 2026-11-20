@@ -26,6 +26,22 @@ test('usage bars preserve zero, exact usage, and unknown values', () => {
   }
 });
 
+test('Flow refresh cooldown belongs to the account that was already rechecked', async () => {
+  const first = {profile:'first', flow_login:'verified'};
+  const second = {profile:'second', flow_login:'verified'};
+  const context = vm.createContext({
+    state:{snapshotFresh:true,snapshot:{real_accounts:{items:[first,second]}}},
+    flowReadinessObservation:{}, rememberFlowReadiness:()=>{},
+    autoFlowRecovery:null, autoFlowRecoveryProfiles:new Set(),
+    autoFlowRecoveryAfter:new Map([['first',Date.now()+300000]]),
+    postJson:async () => ({accounts:{first:'overlay',second:'ok'}}),
+  });
+  load('autoRecoverFlowPages',context);
+  vm.runInContext("autoRecoverFlowPages({accounts:{first:'overlay',second:'overlay'}})",context);
+  assert.deepEqual(Array.from(context.autoFlowRecoveryProfiles), ['second']);
+  await context.autoFlowRecovery;
+});
+
 test('compact Gemini quota keeps recovery dates in hover details', () => {
   const now = 1800000000;
   const context = vm.createContext({
