@@ -26,6 +26,24 @@ test('usage bars preserve zero, exact usage, and unknown values', () => {
   }
 });
 
+test('account quota shows confirmed future dates visibly and never shows an expired reset', () => {
+  const now = 1800000000;
+  const context = vm.createContext({
+    Date: {now: () => now * 1000}, dateTime: value => '日期' + value,
+    officialQuotaReadFailed: false, governanceAudits: {},
+    officialQuotaData: {accounts: {sample: {status: 'ok', checked_at: now - 60,
+      five_hour: {remaining_percent: 72, reset_at: now + 300},
+      weekly: {remaining_percent: 60, reset_at: now - 60}}}},
+  });
+  for (const name of ['esc', 'savedQuotaValue', 'accountOfficialQuotaMarkup']) load(name, context);
+  const markup = () => vm.runInContext("accountOfficialQuotaMarkup('sample').html", context);
+  assert.match(markup(), /<small class="account-quota-reset">恢复 日期1800000300<\/small>/);
+  assert.match(markup(), /<small class="account-quota-reset">恢复时间待官方更新<\/small>/);
+  assert.doesNotMatch(markup(), /日期1799999940/);
+  context.officialQuotaData.accounts.sample.checked_at = now - 601;
+  assert.match(markup(), /<small class="account-quota-reset">恢复 日期1800000300（上次读取）<\/small>/);
+});
+
 test('cooldown counts down and becomes awaiting confirmation without changing eligibility', () => {
   const time = {textContent: ''};
   const label = {textContent: ''};
