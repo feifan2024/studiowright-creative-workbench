@@ -178,3 +178,29 @@ class FlowVideoPipeline(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await page.project_video_posters({media}), {media: '/asb/example-ID'})
                 data.append(record(other_media, project, poster))
                 self.assertEqual(await page.project_video_posters({media}), {})
+
+    async def test_original_video_address_fallback_does_not_take_foreground(self):
+        with flow_modules(), tempfile.TemporaryDirectory() as directory:
+            from studiowright.studio import Studio
+
+            project, media, workflow = (str(uuid.uuid4()) for _ in range(3))
+            video_url = 'https://flow-content.google/video/' + media
+            video = b'\x00\x00\x00\x18ftypmp42'
+            page = SimpleNamespace(goto=AsyncMock())
+
+            async def save(_url, target):
+                target.write_bytes(video)
+
+            flow = SimpleNamespace(
+                project_id=project, url='https://flow.google.com/project/' + project, page=page,
+                project_video_posters=AsyncMock(return_value={}),
+                edit_view_urls=AsyncMock(return_value={'video': video_url}),
+                download=AsyncMock(side_effect=save),
+                foreground_interaction=Mock(side_effect=AssertionError('original video download took foreground')),
+            )
+            studio = Studio.__new__(Studio)
+            studio.store = SimpleNamespace(add_asset=Mock())
+            paths = await studio._download_all(flow, [(media, None, workflow)], Path(directory), 'clip', '.mp4')
+            self.assertEqual(Path(paths[0]).read_bytes(), video)
+            flow.edit_view_urls.assert_awaited_once_with(media, workflow_id=workflow)
+            page.goto.assert_awaited_once_with(flow.url, wait_until='domcontentloaded')

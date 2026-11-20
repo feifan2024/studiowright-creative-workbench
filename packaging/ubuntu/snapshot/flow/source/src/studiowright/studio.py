@@ -16,6 +16,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -561,6 +562,7 @@ class Studio:
         files = []
         upscaled = False
         grid_posters = None
+        original_video = default_suffix == ".mp4" and not size
         for number, (media_id, url, workflow_id) in enumerate(items, start=1):
             saved = None
             if size:
@@ -583,7 +585,7 @@ class Studio:
                     except DownloadAddressExpired:
                         url = None
                 from_grid = False
-                if not url and default_suffix == ".mp4" and not size:
+                if not url and original_video:
                     if grid_posters is None:
                         grid_posters = await flow.project_video_posters({item[0] for item in items})
                     poster = grid_posters.get(media_id)
@@ -592,9 +594,12 @@ class Studio:
                 if not url and not from_grid:
                     from studiowright.flow.page import record_recovery
                     record_recovery('refresh_original_download_address')
-                    async with flow.foreground_interaction():
-                        addresses = await flow.edit_view_urls(media_id)
-                        if default_suffix == ".mp4" and not size:
+                    interaction = nullcontext() if original_video else flow.foreground_interaction()
+                    async with interaction:
+                        addresses = await flow.edit_view_urls(
+                            media_id, workflow_id=workflow_id if original_video else None
+                        )
+                        if original_video:
                             await flow.page.goto(flow.url, wait_until="domcontentloaded")
                     key='video' if default_suffix=='.mp4' else 'image'
                     if not addresses.get(key):

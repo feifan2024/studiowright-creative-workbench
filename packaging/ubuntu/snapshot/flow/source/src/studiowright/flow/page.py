@@ -1177,7 +1177,7 @@ class FlowPage:
         return matched
 
     async def download_grid_original(self, poster_path: str, target: Path) -> bool:
-        """Download the original from an exact video card, with no editor navigation."""
+        """Download from the exact card in the existing tab, without activating its window."""
         if not replies.GRID_POSTER_PATH.fullmatch(poster_path):
             return False
         poster_url = FLOW_ROOT.rstrip("/") + poster_path
@@ -1194,20 +1194,16 @@ class FlowPage:
                 frame_id = tree["frameTree"]["frame"]["id"]
             finally:
                 await frame.detach()
+            if (re.split(r"[?#]", self.page.url, maxsplit=1)[0].rstrip("/") != self.url
+                    or await tile.count() != 1):
+                return False
+            await tile.hover(timeout=4000)
+            await tile.locator(s.TILE_MENU).click(timeout=4000)
+            await self.page.locator(s.MENU_DOWNLOAD).click(timeout=4000)
+            await original.wait_for(state="visible", timeout=4000)
             with tempfile.TemporaryDirectory(prefix=".flow-download-", dir=target.parent) as folder:
-                async with contextlib.AsyncExitStack() as downloads:
-                    async with self.foreground_interaction():
-                        if (re.split(r"[?#]", self.page.url, maxsplit=1)[0].rstrip("/") != self.url
-                                or await tile.count() != 1):
-                            return False
-                        await tile.hover(timeout=4000)
-                        await tile.locator(s.TILE_MENU).click(timeout=4000)
-                        await self.page.locator(s.MENU_DOWNLOAD).click(timeout=4000)
-                        await original.wait_for(state="visible", timeout=4000)
-                        catcher = await downloads.enter_async_context(
-                            DownloadCatcher(self.session, Path(folder), frame_id=frame_id)
-                        )
-                        await original.click(timeout=4000)
+                async with DownloadCatcher(self.session, Path(folder), frame_id=frame_id) as catcher:
+                    await original.click(timeout=4000)
                     if not await catcher.started(8):
                         return False
                     saved = await catcher.saved(30)
@@ -1253,11 +1249,12 @@ class FlowPage:
         await self.ready()
         return urls
 
-    async def edit_view_urls(self, media_id: str) -> dict[str, str]:
+    async def edit_view_urls(self, media_id: str, *, workflow_id: str | None = None) -> dict[str, str]:
         """Fresh signed URLs of one medium, from its own edit view (no grid needed)."""
         found: dict[str, str] = {}
+        edit_id = workflow_id if replies.is_uuid(workflow_id) else media_id
         async with ReplyWatch(self.page, ["as29s"]) as watch:
-            await self.page.goto(f"{self.url}/edit/{media_id}", wait_until="domcontentloaded")
+            await self.page.goto(f"{self.url}/edit/{edit_id}", wait_until="domcontentloaded")
             started = last = time.monotonic()
             while time.monotonic() - started < 20:
                 if await watch.wait(0.5):
