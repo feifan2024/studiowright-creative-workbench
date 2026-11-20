@@ -70,6 +70,8 @@ async def inspect_page(account, binding):
         return 'project'
     if not state.get('account'):
         return 'login'
+    if state.get('busy'):
+        return 'busy'
     if state.get('draft'):
         return 'draft'
     if state.get('overlay'):

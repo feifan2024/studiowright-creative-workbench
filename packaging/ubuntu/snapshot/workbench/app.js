@@ -232,7 +232,7 @@ function flowWindowIssue(profile, snapshot) {
 }
 
 function flowAccountReason(account, snapshot, row, pageState) {
-  if (row?.recovering) return {label:'自动修复中',text:'正在重新核对窗口、现有项目和输入框；完成后自动更新状态。'};
+  if (row?.recovering) return {label:'刷新复查中',text:'正在刷新 Flow 任务页，随后复查页面和积分。'};
   const window = (snapshot?.flow_coordination?.windows || []).find(w => w.profile === account.profile);
   const tasks = (snapshot?.tasks || []).filter(t => ['image','video'].includes(t.kind) &&
     (t.source_profile === account.profile || (t.retry?.attempts || []).some(a => a.profile === account.profile)));
@@ -2214,6 +2214,7 @@ function renderAccounts() {
   const issueCounts = new Map();
   for (const account of accounts) for (const issue of accountIssues(account,state.snapshot,geminiReadinessNow.rows.get(account.key))) {
     if (['historical_unconfirmed', 'quota_stale', 'gemini_confirmed_verification'].includes(issue.key)) continue;
+    if (autoFlowRecoveryProfiles.has(account.profile) && ['flow_unknown','flow_page_state'].includes(issue.key)) continue;
     const previous = issueCounts.get(issue.key);
     issueCounts.set(issue.key, {title: issue.title, count: (previous?.count || 0) + 1});
   }
@@ -2223,7 +2224,10 @@ function renderAccounts() {
   $("realAccountTable").innerHTML = `${issueSummary}<div class="account-grid">${accounts.map((item) => {
     const identity = item.email || item.label || item.profile;
     const official = officialAccount(item);
-    const flowRow=flowReadinessNow.rows.get(item.profile);
+    const auditedFlowRow=flowReadinessNow.rows.get(item.profile);
+    const flowRow=autoFlowRecoveryProfiles.has(item.profile)
+      ? {...auditedFlowRow, checking:true, recovering:true, status:'checking', issues:[]}
+      : auditedFlowRow;
     const geminiRow=geminiReadinessNow.rows.get(item.key);
     const auth=governanceReauthFor(item);
     const authControl=auth?.mode!=='login_only' ? '' : auth.state==='waiting' ? '<span class="subtle">请到 Ubuntu 浏览器完成授权</span>' :
@@ -2266,7 +2270,7 @@ function renderAccounts() {
     const flowIssues = flowRow?.issues || [];
     const geminiIssues = issues.filter(issue => !issue.key.startsWith('flow_') && issue.key !== 'quota_stale' && issue.key !== 'gemini_confirmed_verification');
     const windowIssue = flowWindowIssue(item.profile, state.snapshot);
-    const flowFallback = (!flowReady && !cooling && !flowPaused && !windowIssue && !flowIssues.length)
+    const flowFallback = (!flowReady && !flowRow?.recovering && !cooling && !flowPaused && !windowIssue && !flowIssues.length)
       ? ({blocked:'账号处于不可派发状态，等待就绪核对通过。', unknown:'账号状态尚未完成核对，等待下次检查。', checking:'正在验活，请稍候。'}[flowRow?.status] || '账号状态待核对，等待下次检查。') : '';
     const geminiFallback = (!geminiReady && !geminiIssues.length && !(geminiRow?.checking))
       ? ({blocked:'Gemini 处于不可派发状态，等待就绪核对通过。', unknown:'Gemini 状态尚未完成核对，等待下次检查。'}[geminiRow?.status] || 'Gemini 状态待核对，等待下次检查。') : '';

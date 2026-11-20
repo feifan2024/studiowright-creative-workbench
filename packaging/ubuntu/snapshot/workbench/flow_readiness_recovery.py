@@ -242,6 +242,31 @@ async def evaluate(ws, expression):
     return raw.get('result',{}).get('value',{})
 
 
+async def reload_overlay(ws, account, expected, project, actions):
+    """Refresh the same idle project once before reporting its overlay."""
+    await asyncio.to_thread(guard_live, account)
+    frame = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
+    before = await evaluate(ws, expected)
+    if (canonical_project_url(frame['url']) != project
+            or 'https://flow.google.com' + before.get('path', '').rstrip('/') != project
+            or not before.get('origin') or not before.get('account')
+            or before.get('busy') or before.get('draft') or not before.get('overlay')):
+        return before
+    await asyncio.wait_for(command(ws, 'Page.reload', {'loaderId': frame['loaderId']}), timeout=3)
+    actions.append('reload')
+    for _ in range(16):
+        await asyncio.sleep(.35)
+        loaded = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
+        if loaded['loaderId'] == frame['loaderId']:
+            continue
+        if canonical_project_url(loaded['url']) != project:
+            return {}
+        status = await evaluate(ws, expected)
+        if status.get('account') and (status.get('editor') or status.get('overlay')):
+            return status
+    return {}
+
+
 def restart_managed(binding, allow_responsive=False):
     """Never stop a process just because its port stopped answering."""
     p = binding['profile']
@@ -382,6 +407,11 @@ async def repair(account, initial, actions, safe_only=False):
                         return 'unconfirmed',None
             elif before.get('draft'):
                 return 'draft',None
+            if initial != 'draft' and same and before.get('overlay') and not before.get('busy') and 'reload' not in actions:
+                before = await reload_overlay(ws, account, expected, project, actions)
+                navigated_once = navigated_once or 'reload' in actions
+                if not before:
+                    return 'unconfirmed',None
             if initial != 'draft' and before.get('overlay') and not before.get('busy'):
                 await asyncio.to_thread(guard_live,account)
                 latest = await evaluate(ws,expected)
@@ -403,7 +433,7 @@ async def repair(account, initial, actions, safe_only=False):
             if initial != 'draft' and (not before.get('account') or before.get('draft')):
                 return ('draft' if before.get('draft') else 'login'),None
             if initial != 'draft' and (not same or not before.get('editor')):
-                if same and initial == 'after_restart':
+                if same and (initial == 'after_restart' or 'reload' in actions):
                     return 'editor',None
                 await asyncio.to_thread(guard_live,account)
                 frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']

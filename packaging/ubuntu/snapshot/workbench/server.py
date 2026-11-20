@@ -1002,6 +1002,12 @@ class Sources:
         for profile, item in repairs.items():
             if checks.get(profile) in ('binding','project','editor','unconfirmed') and item.get('page') in ('draft','login','overlay'):
                 checks[profile] = item['page']
+        if any(checks.get(profile) == 'ok' and 'reload' in item.get('actions', ())
+               for profile, item in repairs.items()):
+            try:
+                self.refresh_flow_balances_once()
+            except (ValueError, OSError, URLError):
+                pass  # A successful page recheck is independent of balance availability.
         now = time.time()
         return {'accounts':checks,'checked_at':now,'repairs':repairs,
                 'evidence':generation_evidence(state['tasks'],windows,now),
