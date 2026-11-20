@@ -698,7 +698,7 @@ class FlowPage:
         return await chooser_info.value
 
     async def upload(
-        self, files: Sequence[Path], timeout_s: float = 90
+        self, files: Sequence[Path], timeout_s: float = 90, *, dialog_handler=None
     ) -> list[replies.UploadResult]:
         """Upload files through one file chooser, in the order given."""
         log.info("upload %d file(s)", len(files))
@@ -706,11 +706,13 @@ class FlowPage:
             chooser = await self._open_file_chooser()
             await chooser.set_files([str(f) for f in files])
             deadline = time.monotonic() + timeout_s
+            dialog_handled = False
             while len(watch.bodies) < len(files) and time.monotonic() < deadline:
-                if await self.page.locator("[role='dialog']").count():
-                    raise FlowError(
-                        "Flow is asking for upload consent; answer it once in the Chrome window"
-                    )
+                dialogs = self.page.get_by_role('dialog').filter(visible=True)
+                if await dialogs.count():
+                    if dialog_handler is None or dialog_handled or not await dialog_handler(dialogs):
+                        raise FlowError("Flow 上传被弹窗拦截，未获自动处理授权，请在原账号窗口核对。")
+                    dialog_handled = True
                 await watch.wait(1.0)
         results: list[replies.UploadResult] = []
         for _rpc_id, _status, text in watch.bodies:

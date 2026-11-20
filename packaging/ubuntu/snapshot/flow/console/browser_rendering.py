@@ -1,7 +1,8 @@
 """Ubuntu Chrome rendering compatibility; upstream files and auth stay untouched."""
 import asyncio
-from contextlib import asynccontextmanager
-from contextlib import suppress
+from contextlib import asynccontextmanager, closing, suppress
+from pathlib import Path
+import sqlite3
 import sys
 import time
 from filelock import FileLock, Timeout
@@ -246,9 +247,71 @@ async def select_offered_model(self, pane, label):
     await self.page.wait_for_timeout(200)
 
 
+def is_same_project_image(database, path, profile, email, project):
+    from hashlib import file_digest
+
+    if path.suffix.lower() not in {'.jpg', '.jpeg', '.png', '.webp'} or not database.is_file():
+        return False
+    try:
+        with path.open('rb') as file:
+            digest = file_digest(file, 'sha256').hexdigest()
+        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+            return db.execute("""SELECT 1 FROM origins o JOIN assets a ON a.id=o.asset_id
+                WHERE a.sha256=? AND a.media_type='image' AND o.source='studiowright'
+                AND o.account_id=? AND lower(o.account_email)=? AND o.project_id=? LIMIT 1""",
+                (digest, profile, email.lower(), project)).fetchone() is not None
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def reference_dialog_choice(labels):
+    positive = {'我同意', '同意', 'I agree', 'Agree'}
+    cancel = {'取消', 'Cancel'}
+    if len(set(labels)) != len(labels):
+        return None
+    if len(labels) == 1 and labels[0] in positive | cancel:
+        return labels[0]
+    if len(labels) == 2 and len(positive.intersection(labels)) == len(cancel.intersection(labels)) == 1:
+        return next(label for label in labels if label in positive)
+    if len(labels) == 3 and len(cancel.intersection(labels)) == 1:
+        return next(label for label in labels if label in cancel)
+    return None
+
+
+async def handle_reference_dialog(page, dialogs, email, project):
+    from adapter import READ_STATE
+    from urllib.parse import urlsplit
+
+    if await dialogs.count() != 1:
+        return False
+    dialog = dialogs.first
+    lines = (await dialog.inner_text(timeout=2000)).splitlines()
+    if not lines or lines[0].strip() != '此图片的使用权' or not any('使用限制政策' in line for line in lines):
+        return False
+    buttons = dialog.get_by_role('button').filter(visible=True)
+    labels = [await button.inner_text(timeout=2000) for button in await buttons.all()]
+    choice = reference_dialog_choice([' '.join(text.split()) for text in labels])
+    if not choice:
+        return False
+    url = urlsplit(page.url)
+    identity = await page.evaluate(READ_STATE)
+    if (url.scheme != 'https' or url.netloc != 'flow.google.com' or url.path.rstrip('/') != '/project/' + project
+            or not identity.get('signed_in') or identity.get('emails') != [email.lower()]):
+        return False
+    button = dialog.get_by_role('button', name=choice, exact=True).filter(visible=True)
+    if await button.count() != 1 or not await button.is_enabled():
+        return False
+    await button.click(timeout=3000)
+    await dialog.wait_for(state='hidden', timeout=3000)
+    if choice in {'取消', 'Cancel'}:
+        raise ValueError('已按设置取消 Flow 图片使用权弹窗，未提交生成。')
+    return True
+
+
 class RenderingStudio(Studio):
-    def configure_reference_uploads(self, project, files):
+    def configure_reference_uploads(self, project, files, *, library_db=None, email=None):
         self._scoped_references = (project, tuple(files))
+        self._reference_consent = (library_db, email)
 
     async def _generation_page(self, project_id):
         lease, flow = await super()._generation_page(project_id)
@@ -271,16 +334,21 @@ class RenderingStudio(Studio):
                 or url.netloc != 'flow.google.com' or url.path.rstrip('/') != '/project/' + project):
             raise ValueError('参考图目标项目页面不一致，已停止生成。')
         results = []
+        library_db, email = self._reference_consent
+        handler = None
+        if library_db and email and await asyncio.to_thread(
+                lambda: all(is_same_project_image(library_db, Path(path), self.profile, email, project) for path in files)):
+            async def handler(dialogs):
+                return await handle_reference_dialog(flow.page, dialogs, email, project)
         # Do not consult the upstream hash cache, which only keys on project ID.
         # Each upload is performed inside the verified account's project page.
-        from pathlib import Path
         try:
             async with asyncio.timeout(180):
                 for path in map(Path, files):
                     if path.suffix == '.mp4':
                         uploaded = [await flow.upload_reference_video(path)]
                     else:
-                        uploaded = await flow.upload([path])
+                        uploaded = await flow.upload([path], dialog_handler=handler) if handler else await flow.upload([path])
                     if len(uploaded) != 1 or (uploaded[0].name and uploaded[0].name != path.name):
                         raise ValueError('参考素材上传结果无法对应，已停止生成。')
                     results.append(uploaded[0].media_id)
