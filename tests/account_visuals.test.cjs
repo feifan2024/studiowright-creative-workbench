@@ -26,7 +26,7 @@ test('usage bars preserve zero, exact usage, and unknown values', () => {
   }
 });
 
-test('account quota shows confirmed future dates visibly and never shows an expired reset', () => {
+test('compact Gemini quota keeps recovery dates in hover details', () => {
   const now = 1800000000;
   const context = vm.createContext({
     Date: {now: () => now * 1000}, dateTime: value => '日期' + value,
@@ -37,11 +37,12 @@ test('account quota shows confirmed future dates visibly and never shows an expi
   });
   for (const name of ['esc', 'savedQuotaValue', 'accountOfficialQuotaMarkup']) load(name, context);
   const markup = () => vm.runInContext("accountOfficialQuotaMarkup('sample').html", context);
-  assert.match(markup(), /<small class="account-quota-reset">恢复 日期1800000300<\/small>/);
-  assert.match(markup(), /<small class="account-quota-reset">恢复时间待官方更新<\/small>/);
+  assert.match(markup(), /title="5 小时额度 · 恢复 日期1800000300"/);
+  assert.match(markup(), /title="每周额度 · 恢复时间待官方更新"/);
+  assert.doesNotMatch(markup(), /account-quota-reset/);
   assert.doesNotMatch(markup(), /日期1799999940/);
   context.officialQuotaData.accounts.sample.checked_at = now - 601;
-  assert.match(markup(), /<small class="account-quota-reset">恢复 日期1800000300（上次读取）<\/small>/);
+  assert.match(markup(), /title="5 小时额度 · 恢复 日期1800000300（上次读取）"/);
 });
 
 test('cooldown counts down and becomes awaiting confirmation without changing eligibility', () => {
