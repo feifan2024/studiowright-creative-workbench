@@ -178,11 +178,11 @@ class RealAdapter:
                 time.sleep(0.3)
             raise ValueError("Ubuntu 浏览器未就绪。请确认已进入 Ubuntu 桌面，稍后再检查。")
 
-    async def run(self, task, account):
+    async def run(self, task, account, *, on_video_submitted=None):
         if task['kind'] in {'image', 'video'}:
             from playwright.async_api import TimeoutError as PlaywrightTimeout
             from browser_rendering import generation_lease
-            phase = {'generation_invoked': False}
+            phase = {'generation_invoked': False, 'on_video_submitted': on_video_submitted}
             try:
                 async with generation_lease(task['profile']):
                     return await self._run(task, account, phase)
@@ -387,7 +387,8 @@ class RealAdapter:
                 VideoRequest(
                     p["prompt"], options, refs=() if frame_fields else reference_files, project=project,
                     out_dir=out, max_credits=p["max_credits"], **frame_fields
-                )
+                ),
+                on_submitted=phase.get('on_video_submitted') if phase else None,
             )
 
     def source_jobs(self, profile):
@@ -435,7 +436,7 @@ class FakeAdapter:
         if params["model"] not in [m["id"] for m in self.models[kind]]:
             raise ValueError("未知模型")
 
-    async def run(self, task, account):
+    async def run(self, task, account, *, on_video_submitted=None):
         self.calls.append(task)
         await asyncio.sleep(0.12)
         if task["params"].get("prompt") == "模拟失败":

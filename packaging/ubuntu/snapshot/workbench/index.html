@@ -69,7 +69,7 @@
           <section class="overview-distributions" aria-label="任务和素材分布"><div id="overviewTaskChart" class="overview-chart"><div class="empty">正在读取任务统计…</div></div><div id="overviewMaterialChart" class="overview-chart"><div class="empty">正在读取素材统计…</div></div></section>
           <section class="overview-quick panel" aria-labelledby="overviewQuickHeading">
             <div><span class="section-kicker">QUICK ACTIONS</span><h2 id="overviewQuickHeading">常用操作</h2><p>从总览进入设置和接入文档。</p></div>
-            <div class="overview-quick-actions"><button id="overviewSchedule" class="button button-light" type="button">通道与设置 <span aria-hidden="true">→</span></button><button id="overviewApiCopy" class="button button-light" type="button">复制 API 调用文档</button><label class="overview-concurrency" title="仅限制 Flow；Gemini CLI 默认总并发 20，独立执行。超出时等待；调低不会中断已执行的任务。">Flow 最大并发 <select id="dispatchConcurrency" aria-label="Flow 最大并发任务数" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span><span id="overviewCopyStatus" class="overview-copy-status" role="status" aria-live="polite"></span></div>
+            <div class="overview-quick-actions"><button id="overviewSchedule" class="button button-light" type="button">通道与设置 <span aria-hidden="true">→</span></button><button id="overviewApiCopy" class="button button-light" type="button">复制 API 调用文档</button><label class="overview-concurrency" title="Flow 确认接收视频后，派发名额可交给其他账号。">Flow 派发名额 <select id="dispatchConcurrency" aria-label="Flow 派发名额" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span><span id="overviewCopyStatus" class="overview-copy-status" role="status" aria-live="polite"></span></div>
           </section>
 
 
@@ -339,6 +339,7 @@ print(call("/api/real-pool/image-analysis-validate", payload, rid))
             <section class="api-panel" aria-labelledby="api-aigc">
               <div class="api-heading"><span>04</span><div><h2 id="api-aigc" tabindex="-1">Flow · 生成图片或视频</h2></div></div>
               <div class="api-endpoint"><b>POST</b><code>/api/real-pool/flow</code><span>传 kind、confirm: true 和 params。返回 request_id、status、task_id；submitted 表示已排队。</span></div>
+              <p>Flow 确认接收视频后释放派发名额，其他账号可以继续上传和提交。同账号依次处理自己的任务，已提交视频由工作台跟进并下载。提交后保留原 <code>task_id</code>，可继续提交新请求并轮询前一条的结果。</p>
               <p>在 <code>params</code> 里填写 <code>prompt</code>、<code>model</code>、<code>aspect</code>、<code>count</code>、<code>resolution</code>、<code>duration</code>。模型 ID 从快照取。时长按模型区分：Omni 1.1 Flash 为 4/6/8/10 秒，Omni 1.2 Flash 为 3～15 秒连续可调；画面比例 16:9 或 9:16。账号和项目由工作台安排；积分按 Flow 实际报价计费，平台不设单笔上限。非约定参数（如 <code>max_credits</code>、<code>auto_retry</code>）携带了也会被忽略，不产生效果。</p>
               <div class="api-code-head"><span>复制纯文字生成请求 · 实际提交</span><button type="button" data-copy-code="api-code-generate">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-generate">rid = str(uuid4())
 print("请求编号:", rid, flush=True)

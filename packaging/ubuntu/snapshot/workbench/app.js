@@ -850,7 +850,7 @@ function taskFailureMarkup(item) {
     preparation_recovery:'尝试恢复页面',preparation_recovered:'页面恢复成功',project_page_reload:'重新加载原项目页面',desktop_overview_dismissed:'收起桌面总览，恢复浏览器前台',
     input_preparation_recovery:'恢复窗口焦点与输入准备',paste_started:'开始单次粘贴',input_preparation_stopped:'输入准备停止，未重复粘贴',
     original_image_result_lookup:'查询原图片结果',original_video_address_lookup:'补取原视频地址',
-    original_download_retry:'重新下载原文件',original_download_recovered:'原文件下载恢复成功',refresh_original_download_address:'刷新原作品下载地址',window_retained:'保留固定窗口'};
+    original_video_grid_download:'从项目列表下载原片',original_download_retry:'重新下载原文件',original_download_recovered:'原文件下载恢复成功',refresh_original_download_address:'刷新原作品下载地址',window_retained:'保留固定窗口'};
   labels.login_page_recheck='重新核对原账号登录页面';
   labels.confirmed_rejection_released='核对原提交已被拒绝，释放旧任务占用';
   const events=(item.self_recovery || []).filter(e=>labels[e.action]);
@@ -1420,13 +1420,18 @@ const governanceAudits = {flow:null,gemini:null};
 const governanceAuditLabels = {ready:'可立即派发',queue:'需排队',blocked:'暂不可用',unknown:'待确认'};
 const flowRecoveryLabels = {rebind:'重新绑定原窗口',open_project:'进入原账号项目',reload:'刷新原页面',restart:'重启该账号浏览器',dismiss_update:'关闭 Flow 更新提示',release_review:'已核对原任务，解除限制'};
 
+function flowOccupiedSlots(dispatch) {
+  return dispatch?.occupied_slots ?? dispatch?.active;
+}
+
 function auditDispatchState({issues=[], busy=false, dispatch, gemini=false, quota}={}) {
   if (issues.length) return 'blocked';
   const limit=gemini ? dispatch?.max_concurrency : dispatch?.maximum;
+  const occupied=gemini ? dispatch?.active : flowOccupiedSlots(dispatch);
   if (!dispatch || (!gemini && dispatch.available!==true) || !Number.isInteger(limit) ||
-      limit<1 || !Number.isInteger(dispatch.active) || dispatch.active<0) return 'unknown';
+      limit<1 || !Number.isInteger(occupied) || occupied<0) return 'unknown';
   if (gemini && quota!=='ok') return 'unknown';
-  if (dispatch.paused || busy || dispatch.active>=limit || (gemini && dispatch.queued>0)) return 'queue';
+  if (dispatch.paused || busy || occupied>=limit || (gemini && dispatch.queued>0)) return 'queue';
   return 'ready';
 }
 
@@ -1466,7 +1471,7 @@ function auditFlowAccounts(snapshot, dispatch, pageChecks, probeStartedAt) {
     const history=(repair?.actions || []).map(action=>flowRecoveryLabels[action]).filter(Boolean);
     let note=status==='queue' ? '已有任务正在处理，新任务等待账号空闲。' : status==='ready' ? (evidence==='generating' ? 'Flow 已接收，正在生成。' : evidence==='recent_success' ? '最近 10 分钟已生成产物。' : '输入框和发送入口已核对。') :
       status==='unknown' ? (busy ? '任务处理中，尚未确认 Flow 已接收。' : '实际页面或派发服务尚未核对通过。') : '';
-    if (status==='ready' && (dispatch.paused || busy || dispatch.active>=dispatch.maximum)) note+=' 新任务可接收，等调度放行或空出名额。';
+    if (status==='ready' && (dispatch.paused || busy || flowOccupiedSlots(dispatch)>=dispatch.maximum)) note+=' 新任务可接收，等调度放行或空出名额。';
     if (history.length) note+=` 本轮处理：${history.join('、')}。${status==='ready' ? '复查通过。' : '复查未通过。'}`;
     return {account,status,page,evidence,review,issues:blocked,note};
   });
@@ -1749,8 +1754,9 @@ function renderGovernance() {
   const rows=audit?.rows || [];
   const counts=Object.fromEntries(Object.keys(governanceAuditLabels).map(key=>[key,rows.filter(row=>row.status===key).length]));
   const dispatch=audit?.dispatch;
-  const slots=!isGemini && Number.isInteger(dispatch?.active) && Number.isInteger(dispatch?.maximum)
-    ? ` · 执行 ${dispatch.active} / ${dispatch.maximum}${dispatch.paused ? ' · 调度已暂停' : ''}` : '';
+  const occupied=flowOccupiedSlots(dispatch);
+  const slots=!isGemini && Number.isInteger(occupied) && Number.isInteger(dispatch?.maximum)
+    ? ` · 派发名额 ${occupied} / ${dispatch.maximum}${dispatch.background_videos ? ` · 视频跟进 ${dispatch.background_videos}` : ''}${dispatch.paused ? ' · 调度已暂停' : ''}` : '';
   const summary=rows.length ? [`${isGemini ? '可立即派发' : '就绪'} ${counts.ready} / ${rows.length}`, ...['queue','blocked','unknown'].filter(key=>counts[key]).map(key=>governanceAuditLabels[key]+' '+counts[key])].join(' · ')+slots : '';
   const authorization=audit?.authorization;
   const authProgress=isGemini && authorization?.state==='waiting'
@@ -4440,13 +4446,15 @@ function updateDispatchState(paused) {
   if (detail) detail.textContent = dispatchStateText(state.dispatchPaused);
 }
 function showDispatchConcurrency(data) {
-  if (!Number.isInteger(data.maximum) || data.maximum < 1 || data.maximum > 5 || !Number.isInteger(data.active)) throw new Error('并发设置暂不可读取。');
+  const occupied=flowOccupiedSlots(data);
+  if (!Number.isInteger(data.maximum) || data.maximum < 1 || data.maximum > 5 || !Number.isInteger(occupied)) throw new Error('并发设置暂不可读取。');
   updateDispatchState(data.available === true ? data.paused : null);
   dispatchConcurrencyMaximum = data.maximum;
   $('dispatchConcurrency').value = String(data.maximum);
   $('dispatchConcurrency').disabled = false;
-  $('dispatchConcurrencyStatus').textContent = data.paused ? '维护中' : `执行中 ${data.active} / ${data.maximum}`;
-  $('dispatchConcurrencyStatus').title = data.active > data.maximum ? '已有任务继续完成，新任务按新上限派发。' : '仅限制 Flow 任务；Gemini CLI 独立执行，默认总并发 20。';
+  const following=data.background_videos ? ` · 视频跟进 ${data.background_videos}` : '';
+  $('dispatchConcurrencyStatus').textContent = data.paused ? '维护中' : `占用 ${occupied} / ${data.maximum}${following}`;
+  $('dispatchConcurrencyStatus').title = 'Flow 确认接收视频后释放派发名额，成片继续在后台跟进。调低名额时，已有任务继续完成。';
 }
 async function refreshDispatchConcurrency() {
   if (dispatchConcurrencySaving || document.activeElement === $('dispatchConcurrency')) return;

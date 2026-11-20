@@ -165,8 +165,9 @@ class DownloadCatcher:
     Chrome's own download events are used instead, only while this catcher is active.
     """
 
-    def __init__(self, session: ChromeSession, folder: Path) -> None:
+    def __init__(self, session: ChromeSession, folder: Path, *, frame_id: str | None = None) -> None:
         self.session = session
+        self.frame_id = frame_id
         self.folder = folder.resolve()  # Chrome cancels downloads into a relative folder
         self.names: dict[str, str] = {}
         loop = asyncio.get_running_loop()
@@ -190,6 +191,8 @@ class DownloadCatcher:
         await self._cdp.detach()
 
     def _on_begin(self, event: dict[str, Any]) -> None:
+        if self.frame_id is not None and event.get("frameId") != self.frame_id:
+            return
         self.names[event["guid"]] = event.get("suggestedFilename") or event["guid"]
         if not self.begun.done():
             self.begun.set_result(event["guid"])

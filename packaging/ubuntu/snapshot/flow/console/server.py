@@ -24,7 +24,7 @@ from adapter import AccountWindowBusy, PreSubmissionTransient, PreSubmissionFail
 from api_keys import APIKeys
 from account_insights import Insights
 from console_store import RETRY_KINDS, Store
-from dispatch_limit import DispatchLimit, MAX_CONCURRENCY
+from dispatch_limit import DispatchLimit
 from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
 from web_auth import WebAuth
 from login_sessions import Vault, normalize_bundle
@@ -88,7 +88,7 @@ class Console:
             del self.generation_busy[profile]
         self.busy.discard(profile)
 
-    async def execute(self, task):
+    async def execute(self, task, *, on_video_submitted=None):
         # This second check is before the adapter is called, so a racing restriction
         # can safely leave the existing task in the queue without resubmission.
         ordinal = task.get('attempt_ordinal', 0)
@@ -115,7 +115,11 @@ class Console:
         before = []
         try:
             before = [dict(r)["id"] for r in self.adapter.source_jobs(task["profile"])]
-            result = await self.adapter.run(task, self.store.account(task["profile"]))
+            account = self.store.account(task["profile"])
+            if on_video_submitted is None:
+                result = await self.adapter.run(task, account)
+            else:
+                result = await self.adapter.run(task, account, on_video_submitted=on_video_submitted)
             if task["kind"] in {"sync", "session_import"}:
                 self.store.update_account(task["profile"], result["email"], "verified")
                 if not self.test:
@@ -202,11 +206,21 @@ class Console:
                     self.vault.remove(task["params"]["bundle_id"])
             self.release_profile(task)
 
-    async def execute_with_slot(self, task, slot):
+    async def execute_with_slot(self, task, slot, *, scoped=False):
+        background = None
+
+        def on_video_submitted():
+            nonlocal background
+            if background is None:
+                background = self.dispatch_limit.track_submitted_video(slot, task['profile'])
+
+        handoff = on_video_submitted if task['kind'] == 'video' and not scoped else None
         try:
-            await self.execute(task)
+            await self.execute(task, on_video_submitted=handoff)
         finally:
             slot.close()
+            if background is not None:
+                background.close()
             # A retryable completion selects directly from the current healthy
             # pool after releasing this attempt's account and dispatch slot.
             # The periodic scheduler only backs up tasks already waiting.
@@ -306,8 +320,7 @@ class Console:
                 next_switch_check = time.monotonic() + 1.0
             from flow_stress_scope import read_scope, acquire_scope_slot, validate_task
             scope = read_scope(self.dispatch_limit.root)
-            ceiling = 9 if scope and scope.get('ready') else MAX_CONCURRENCY
-            while len(self.running) < ceiling:
+            while True:
                 slot = (acquire_scope_slot(self.dispatch_limit, scope) if scope
                         else self.dispatch_limit.try_acquire())
                 if slot is None:
@@ -341,7 +354,7 @@ class Console:
                     if task['kind'] in ('image', 'video'):
                         self.generation_busy[task['profile']] = self.generation_busy.get(task['profile'], 0) + 1
                         self.generation_projects.add((task['profile'], task['project']))
-                    self.running.add(asyncio.create_task(self.execute_with_slot(task, slot)))
+                    self.running.add(asyncio.create_task(self.execute_with_slot(task, slot, scoped=scope is not None)))
                 except BaseException:
                     slot.close()
                     raise

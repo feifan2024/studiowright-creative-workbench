@@ -11,7 +11,9 @@ import asyncio
 import base64
 import contextlib
 import logging
+import os
 import re
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -20,6 +22,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import CDPSession, FileChooser, Locator, Page
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from studiowright.browser import ChromeSession, DownloadCatcher, ensure_rendering
@@ -99,7 +102,7 @@ class AssetNotFound(FlowError):
 @dataclass(frozen=True)
 class VideoClip:
     media_id: str
-    url: str
+    url: str | None
     poster_url: str | None
     workflow_id: str | None = None
 
@@ -1021,13 +1024,16 @@ class FlowPage:
         *,
         on_ids: Callable[[list[str]], None] | None = None,
         on_submit: Callable[[], None] | None = None,
+        on_accepted: Callable[[list[str]], None] | None = None,
+        expected_count: int = 1,
     ) -> list[VideoClip]:
-        """Submit and follow the clip(s) until their signed URLs arrive.
+        """Submit and follow the clips until Flow offers the files or reports completion.
 
         Flow's submit RPC differs per mode and can change, so the new clips are recognised
         by shape: any record of this project that appears queued or running after the click.
         ``on_ids`` receives a snapshot whenever a new media id is accepted, before URLs
-        arrive. Observer errors are logged without interrupting the generation.
+        arrive. ``on_accepted`` requires a verified reply to this click. Observer
+        errors are logged without interrupting the generation.
         """
         async with ReplyWatch(self.page, None) as watch:
             def before_submit() -> None:
@@ -1043,12 +1049,9 @@ class FlowPage:
             records: dict[str, replies.VideoRecord] = {}
             urls: dict[str, dict[str, str]] = {}
             seen = 0
-            finished_at: float | None = None
-            url_refreshes = 0
-            last_url_refresh = 0.0
             while time.monotonic() < deadline:
                 await watch.wait(2.0)
-                for rpc_id, _status, text in watch.bodies[seen:]:
+                for rpc_id, http_status, text in watch.bodies[seen:]:
                     seen += 1
                     try:
                         payload = be.parse_reply(text, rpc_id)
@@ -1070,7 +1073,8 @@ class FlowPage:
                         if balance is not None:
                             self.credits_left = balance
                             log.info("credits left: %s", balance)
-                    for record in replies.video_records(payload, self.project_id):
+                    video_records = replies.video_records(payload, self.project_id)
+                    for record in video_records:
                         active = record.status in (replies.STATUS_QUEUED, replies.STATUS_RUNNING)
                         if record.media_id not in new_ids and (
                             active or rpc_id in VIDEO_SUBMIT_RPCS
@@ -1087,38 +1091,30 @@ class FlowPage:
                             if previous is None or previous.status != record.status:
                                 log.info("clip %s status %s", record.media_id, record.status)
                             records[record.media_id] = record
+                    if (on_accepted is not None and rpc_id in VIDEO_SUBMIT_RPCS and 200 <= http_status < 300
+                            and watch.verified_submit(seen - 1, rpc_id)):
+                        accepted = [record.media_id for record in video_records if record.status in (
+                            replies.STATUS_QUEUED, replies.STATUS_RUNNING, replies.STATUS_DONE,
+                        )]
+                        if accepted:
+                            try:
+                                on_accepted(accepted)
+                            except Exception:
+                                log.exception("could not hand off accepted video")
+                            else:
+                                on_accepted = None
                     for media_id, found in replies.media_urls(payload).items():
                         urls.setdefault(media_id, {}).update(found)
-                done = bool(new_ids) and all(
+                done = len(new_ids) >= expected_count and all(
                     records.get(i) and records[i].status == replies.STATUS_DONE for i in new_ids
                 )
-                if done and finished_at is None:
-                    finished_at = time.monotonic()
-                if (
-                    finished_at is not None
-                    and time.monotonic() - finished_at > 8
-                    and not all("video" in urls.get(i, {}) for i in new_ids)
-                    and url_refreshes < 2
-                    and time.monotonic() - last_url_refresh > 15
-                ):
-                    # Some modes never fetch the finished clip's URL on their own; opening
-                    # the edit view makes the page fetch fresh URLs for every medium.
-                    log.info("clip done; fetching its URL through the edit view")
-                    url_refreshes += 1
-                    last_url_refresh = time.monotonic()
-                    record_recovery('original_video_address_lookup',attempt=url_refreshes,media_count=len(new_ids))
-                    async with self.foreground_interaction():
-                        fresh_urls = await self.fresh_media_urls()
-                    for media_id, found in fresh_urls.items():
-                        urls.setdefault(media_id, {}).update(found)
-                if new_ids and all("video" in urls.get(i, {}) for i in new_ids):
-                    log.info("clip URLs received")
+                if done or (new_ids and all("video" in urls.get(i, {}) for i in new_ids)):
                     return [
                         VideoClip(
                             i,
-                            urls[i]["video"],
-                            urls[i].get("image"),
-                            records[i].workflow_id if i in records else urls[i].get("workflow"),
+                            urls.get(i, {}).get("video"),
+                            urls.get(i, {}).get("image"),
+                            records[i].workflow_id,
                         )
                         for i in sorted(new_ids)
                     ]
@@ -1148,6 +1144,81 @@ class FlowPage:
         pending = " ".join(sorted(new_ids))
         hint = f"; it may still finish: sw download {pending}" if pending else ""
         raise FlowError(f"the clip was not ready within {timeout_s:.0f} s{hint}")
+
+    async def project_video_posters(self, media_ids: set[str]) -> dict[str, str]:
+        """Read the project's normal list reply, without bringing its window forward."""
+        if re.split(r"[?#]", self.page.url, maxsplit=1)[0].rstrip("/") != self.url:
+            return {}
+        posters: dict[str, set[str]] = {}
+        owners: dict[str, set[str]] = {}
+        try:
+            async with ReplyWatch(self.page, [LIST_RPC]) as watch:
+                await self.page.reload(wait_until="domcontentloaded", timeout=12_000)
+                deadline = time.monotonic() + 6
+                while not watch.bodies and not watch.unreadable and time.monotonic() < deadline:
+                    await watch.wait(0.5)
+        except PlaywrightError:
+            return {}
+        for rpc_id, _status, text in watch.bodies:
+            try:
+                payload = be.parse_reply(text, rpc_id)
+            except (be.RpcError, be.MissingReply):
+                continue
+            for media_id, path in replies.video_grid_posters(payload, self.project_id):
+                owners.setdefault(path, set()).add(media_id)
+                if media_id in media_ids:
+                    posters.setdefault(media_id, set()).add(path)
+        matched = {}
+        for media_id, paths in posters.items():
+            if len(paths) == 1:
+                path = next(iter(paths))
+                if owners[path] == {media_id}:
+                    matched[media_id] = path
+        return matched
+
+    async def download_grid_original(self, poster_path: str, target: Path) -> bool:
+        """Download the original from an exact video card, with no editor navigation."""
+        if not replies.GRID_POSTER_PATH.fullmatch(poster_path):
+            return False
+        poster_url = FLOW_ROOT.rstrip("/") + poster_path
+        image = self.page.locator(f'img:is([src="{poster_url}"], [src="{poster_path}"])')
+        tile = self.page.locator(s.VIDEO_TILE).filter(has=image)
+        original = self.page.locator(f"{s.OVERLAY} {s.MENU_ITEM}").filter(
+            has_text=re.compile(r"\boriginal\b|原始", re.IGNORECASE)
+        )
+        try:
+            await tile.wait_for(state="visible", timeout=3500)
+            frame = await self.page.context.new_cdp_session(self.page)
+            try:
+                tree = await frame.send("Page.getFrameTree")
+                frame_id = tree["frameTree"]["frame"]["id"]
+            finally:
+                await frame.detach()
+            with tempfile.TemporaryDirectory(prefix=".flow-download-", dir=target.parent) as folder:
+                async with contextlib.AsyncExitStack() as downloads:
+                    async with self.foreground_interaction():
+                        if (re.split(r"[?#]", self.page.url, maxsplit=1)[0].rstrip("/") != self.url
+                                or await tile.count() != 1):
+                            return False
+                        await tile.hover(timeout=4000)
+                        await tile.locator(s.TILE_MENU).click(timeout=4000)
+                        await self.page.locator(s.MENU_DOWNLOAD).click(timeout=4000)
+                        await original.wait_for(state="visible", timeout=4000)
+                        catcher = await downloads.enter_async_context(
+                            DownloadCatcher(self.session, Path(folder), frame_id=frame_id)
+                        )
+                        await original.click(timeout=4000)
+                    if not await catcher.started(8):
+                        return False
+                    saved = await catcher.saved(30)
+                    with saved.open("rb") as stream:
+                        if stream.read(12)[4:8] != b"ftyp":
+                            return False
+                    os.link(saved, target)
+        except (PlaywrightError, TimeoutError, RuntimeError):
+            return False
+        record_recovery('original_video_grid_download')
+        return True
 
     async def fresh_media_urls(self) -> dict[str, dict[str, str]]:
         """Signed URLs for every medium in the project, keyed by media id.
@@ -1294,8 +1365,6 @@ class FlowPage:
                 await self.ready()
 
     async def download(self, url: str, target: Path) -> Path:
-        import os
-        import tempfile
         for attempt in range(3):
             response = None
             try:

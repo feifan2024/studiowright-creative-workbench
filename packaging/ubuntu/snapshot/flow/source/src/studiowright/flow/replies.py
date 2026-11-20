@@ -11,11 +11,13 @@ import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 IMAGE_URL_PREFIX = "https://flow-content.google/image/"
 VIDEO_URL_PREFIX = "https://flow-content.google/video/"
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _URL_UUID = re.compile(r"/(?:image|video)/([0-9a-f-]{36})")
+GRID_POSTER_PATH = re.compile(r"/asb/[A-Za-z0-9_-]+={0,2}")
 
 #: Video record status codes seen on the wire.
 STATUS_QUEUED = 6
@@ -177,6 +179,22 @@ def video_records(payload: Any, project_id: str | None = None) -> list[VideoReco
         poster_url = next((s for s in strings(node) if s.startswith(IMAGE_URL_PREFIX)), None)
         found[node[0]] = VideoRecord(node[2], node[0], status, video_url, poster_url)
     return list(found.values())
+
+
+def video_grid_posters(payload: Any, project_id: str) -> Iterator[tuple[str, str]]:
+    """The exact poster paths Flow uses for this project's video cards."""
+    for node in walk(payload):
+        if not (isinstance(node, list) and len(node) > 7 and is_uuid(node[0])
+                and node[1] == project_id and is_uuid(node[2])
+                and isinstance(node[7], list) and isinstance(node[5], list) and len(node[5]) > 5):
+            continue
+        # The media record's own poster travels under the same path on the grid's host.
+        poster = node[5][5]
+        if not isinstance(poster, str) or not poster.startswith("https://lh3.googleusercontent.com/"):
+            continue
+        address = urlsplit(poster)
+        if not address.query and not address.fragment and GRID_POSTER_PATH.fullmatch(address.path):
+            yield node[0], address.path
 
 
 def media_urls(payload: Any) -> dict[str, dict[str, str]]:

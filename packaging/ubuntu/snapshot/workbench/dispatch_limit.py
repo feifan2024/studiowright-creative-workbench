@@ -1,8 +1,4 @@
-"""One persistent 1..5 admission limit shared by local worker processes.
-
-Slots are OS locks held for the whole operation, and released after a crash.
-The admission lock makes counting and claiming atomic across Flow and Gemini.
-"""
+"""Shared Flow admission and tracking locks, released automatically after a crash."""
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -135,10 +131,18 @@ class DispatchLimit:
     def status(self):
         with self._guard():
             maximum = self._limit()
-            active, free = self._slots()
+            occupied, free = self._slots()
             for fd in free:
                 os.close(fd)
-            return {'maximum': maximum, 'active': active, 'minimum': 1,
+            background = 0
+            for path in self.root.glob('video-background-*.lock'):
+                fd = _open(path)
+                try:
+                    background += not _lock(fd)
+                finally:
+                    os.close(fd)
+            return {'maximum': maximum, 'active': occupied + background, 'occupied_slots': occupied,
+                    'background_videos': background, 'minimum': 1,
                     'ceiling': MAX_CONCURRENCY, 'paused': self.paused(), 'scope': 'shared', 'available': True}
 
     def public_status(self):

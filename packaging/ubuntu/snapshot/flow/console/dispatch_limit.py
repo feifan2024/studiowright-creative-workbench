@@ -1,11 +1,8 @@
-"""One persistent 1..5 admission limit shared by local worker processes.
-
-Slots are OS locks held for the whole operation, and released after a crash.
-The admission lock makes counting and claiming atomic across Flow and Gemini.
-"""
+"""Shared Flow admission and tracking locks, released automatically after a crash."""
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -127,13 +124,43 @@ class DispatchLimit:
                 os.close(fd)
             raise
 
+    def _background_videos(self):
+        count = 0
+        for path in self.root.glob('video-background-*.lock'):
+            fd = _open(path)
+            try:
+                count += not _lock(fd)
+            finally:
+                os.close(fd)
+        return count
+
+    def track_submitted_video(self, slot, profile):
+        """Keep the accepted video visible to maintenance while freeing admission."""
+        if slot.fd is None:
+            return None
+        key = sha256(profile.encode('utf-8')).hexdigest()
+        with self._guard(timeout=.1):
+            fd = _open(self.root / f'video-background-{key}.lock')
+            try:
+                if not _lock(fd):
+                    return None
+                slot.close()
+                background = Slot(fd, self.root)
+                fd = None
+                return background
+            finally:
+                if fd is not None:
+                    os.close(fd)
+
     def status(self):
         with self._guard():
             maximum = self._limit()
-            active, free = self._slots()
+            occupied, free = self._slots()
             for fd in free:
                 os.close(fd)
-            return {'maximum': maximum, 'active': active, 'minimum': 1,
+            background = self._background_videos()
+            return {'maximum': maximum, 'active': occupied + background, 'occupied_slots': occupied,
+                    'background_videos': background, 'minimum': 1,
                     'ceiling': MAX_CONCURRENCY, 'paused': self.paused(), 'scope': 'shared', 'available': True}
 
     def public_status(self):

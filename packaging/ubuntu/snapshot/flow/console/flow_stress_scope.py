@@ -47,7 +47,7 @@ def acquire_scope_slot(limit,scope):
             # Do not overlap a previously admitted ordinary operation.
             active,ordinary=limit._slots()
             for fd in ordinary:os.close(fd)
-            if active:return None
+            if active or limit._background_videos():return None
             for index in range(9):
                 fd=_open(limit.root/('stress-slot-'+str(index)+'.lock'))
                 if _lock(fd):

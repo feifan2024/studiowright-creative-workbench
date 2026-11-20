@@ -551,7 +551,7 @@ class Studio:
     async def _download_all(
         self,
         flow: FlowPage,
-        items: list[tuple[str, str, str | None]],
+        items: list[tuple[str, str | None, str | None]],
         out: Path,
         stem: str,
         default_suffix: str,
@@ -560,6 +560,7 @@ class Studio:
     ) -> list[str]:
         files = []
         upscaled = False
+        grid_posters = None
         for number, (media_id, url, workflow_id) in enumerate(items, start=1):
             saved = None
             if size:
@@ -576,13 +577,25 @@ class Studio:
             else:
                 target = out / f"{stem}-{number}{default_suffix}"
                 from studiowright.flow.page import DownloadAddressExpired
-                try:
-                    await flow.download(url, target)
-                except DownloadAddressExpired:
+                if url:
+                    try:
+                        await flow.download(url, target)
+                    except DownloadAddressExpired:
+                        url = None
+                from_grid = False
+                if not url and default_suffix == ".mp4" and not size:
+                    if grid_posters is None:
+                        grid_posters = await flow.project_video_posters({item[0] for item in items})
+                    poster = grid_posters.get(media_id)
+                    if poster:
+                        from_grid = await flow.download_grid_original(poster, target)
+                if not url and not from_grid:
                     from studiowright.flow.page import record_recovery
                     record_recovery('refresh_original_download_address')
                     async with flow.foreground_interaction():
                         addresses = await flow.edit_view_urls(media_id)
+                        if default_suffix == ".mp4" and not size:
+                            await flow.page.goto(flow.url, wait_until="domcontentloaded")
                     key='video' if default_suffix=='.mp4' else 'image'
                     if not addresses.get(key):
                         raise FlowError('original_media_download_address_missing')
@@ -716,7 +729,9 @@ class Studio:
             finally:
                 self._lock.release()
 
-    async def video(self, request: VideoRequest) -> dict[str, Any]:
+    async def video(
+        self, request: VideoRequest, *, on_submitted: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
         await self._locked()
         try:
             project_id = await self._project(request.project)
@@ -788,10 +803,17 @@ class Studio:
             if options.mode is VideoMode.INGREDIENTS:
                 for media_id in ref_ids:
                     await flow.attach_reference(media_id)
+            def confirm_submission(ids: list[str]) -> None:
+                self._progress(job_id, "submitted", ids)
+                if on_submitted is not None:
+                    on_submitted()
+
             clips = await self._submit_guarded(
                 lambda: flow.generate_video(
                     request.prompt, on_ids=lambda ids: self._progress(job_id, "submitted", ids),
                     on_submit=lambda: self._progress(job_id, "submitting", []),
+                    on_accepted=confirm_submission if on_submitted is not None else None,
+                    expected_count=options.count,
                 ), paced=foreground_lease is not None
             )
             self._progress(job_id, "generated", [c.media_id for c in clips])
