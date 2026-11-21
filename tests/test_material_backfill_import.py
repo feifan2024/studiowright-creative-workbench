@@ -5,6 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packaging/ubuntu/snapshot/workbench"))
+from live_pool import RealPool
 from material_backfill import MaterialBackfill
 
 
@@ -46,3 +47,37 @@ class ImportedBackfillTest(unittest.TestCase):
         self.assertEqual([tuple(row) for row in db.execute(
             "SELECT substr(asset_id,1,1),run_id,status FROM material_backfill_jobs ORDER BY asset_id"
         )], [("1", "new", "waiting"), ("2", "prior", "waiting"), ("3", "prior", "failed"), ("4", "new", "waiting")])
+
+
+class AutomaticMaterialTaggingTest(unittest.TestCase):
+    def test_invalid_labels_only_stop_that_asset(self):
+        for outcome, job_state, pauses in (
+            ('invalid', 'failed', False),
+            ('completed', 'completed', False),
+            ('unknown', 'unknown', True),
+            ('failed', 'failed', True),
+        ):
+            with self.subTest(outcome=outcome):
+                db = sqlite3.connect(':memory:', isolation_level=None)
+                self.addCleanup(db.close)
+                db.row_factory = sqlite3.Row
+                db.executescript("""
+                    CREATE TABLE material_analyses(request_id TEXT, status TEXT, note TEXT);
+                    CREATE TABLE auto_material_jobs(request_id TEXT, status TEXT, updated REAL, note TEXT);
+                    CREATE TABLE auto_material_settings(id INTEGER, paused_reason TEXT);
+                    INSERT INTO auto_material_jobs VALUES('current', 'running', 0, NULL);
+                    INSERT INTO auto_material_jobs VALUES('next', 'waiting', 0, NULL);
+                    INSERT INTO auto_material_settings VALUES(1, NULL);
+                """)
+                db.execute("INSERT INTO material_analyses VALUES('current', ?, 'diagnostic')", (outcome,))
+                pool = PoolFixture(db)
+
+                self.assertEqual(RealPool.finish_auto_material(pool, 'current'), job_state)
+                self.assertEqual([tuple(row) for row in db.execute(
+                    'SELECT status,note FROM auto_material_jobs ORDER BY request_id'
+                )], [(job_state, 'diagnostic'), ('waiting', None)])
+                self.assertEqual(bool(db.execute('SELECT paused_reason FROM auto_material_settings').fetchone()[0]), pauses)
+
+                db.execute('UPDATE auto_material_settings SET paused_reason=NULL')
+                RealPool.finish_auto_material(pool, 'current')
+                self.assertIsNone(db.execute('SELECT paused_reason FROM auto_material_settings').fetchone()[0])

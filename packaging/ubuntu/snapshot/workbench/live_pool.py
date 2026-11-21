@@ -930,10 +930,18 @@ class RealPool:
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT status,note FROM material_analyses WHERE request_id=?', (request,)).fetchone()
-            status = 'completed' if row and row['status'] == 'completed' else ('unknown' if not row or row['status'] in ('unknown','preparing','saving') else 'failed')
+            analysis_status = row['status'] if row else 'unknown'
+            if analysis_status in ('unknown', 'preparing', 'saving'):
+                status = 'unknown'
+            else:
+                status = 'completed' if analysis_status == 'completed' else 'failed'
             note = row['note'] if row and row['note'] else ('已分析' if status == 'completed' else '分析结果需核对')
-            db.execute("UPDATE auto_material_jobs SET status=?,updated=?,note=? WHERE request_id=? AND status='running'", (status, time.time(), note, request))
-            if status != 'completed':
+            changed = db.execute(
+                "UPDATE auto_material_jobs SET status=?,updated=?,note=? WHERE request_id=? AND status='running'",
+                (status, time.time(), note, request),
+            ).rowcount
+            # A received reply with invalid labels needs review for this asset only.
+            if changed and status != 'completed' and analysis_status != 'invalid':
                 db.execute("UPDATE auto_material_settings SET paused_reason='有素材分析未完成，请核对后再继续；不会自动重试' WHERE id=1")
             db.execute('COMMIT')
         return status
