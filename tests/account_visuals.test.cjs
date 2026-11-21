@@ -11,6 +11,21 @@ function load(name, context) {
   vm.runInContext(match[0], context);
 }
 
+test('account avatars mark only enabled advanced Gemini model choices', () => {
+  const context = vm.createContext({});
+  load('esc', context);
+  load('accountAvatarMarkup', context);
+  const render = families => vm.runInContext(`accountAvatarMarkup('account', ${JSON.stringify(families.map(family => ({family})))})`, context);
+  for (const family of ['gemini-4-neon', 'gemini-4-hydrogen']) {
+    const markup = render(['gemini-3.8-flash', family]);
+    assert.match(markup, /account-avatar is-gemini-advanced/);
+    assert.match(markup, /aria-label="支持 Gemini 高级模型"/);
+  }
+  for (const families of [[], ['gemini-3.8-flash']]) {
+    assert.match(render(families), /class="account-avatar" aria-hidden="true"/);
+  }
+});
+
 test('usage bars preserve zero, exact usage, and unknown values', () => {
   const context = vm.createContext({Intl});
   load('esc', context);
