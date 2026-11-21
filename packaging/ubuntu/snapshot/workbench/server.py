@@ -992,7 +992,15 @@ class Sources:
                         if item.get('page') != 'busy'
                     })
             if manual_review:
-                return {'released':any('release_review' in r.get('actions',[]) for r in repairs.values())}
+                profile = payload['accounts'][0]['profile']
+                released = 'release_review' in repairs.get(profile, {}).get('actions', [])
+                if released:
+                    from flow_warning_archive import purge_reviewed_screenshots
+                    try:
+                        purge_reviewed_screenshots(profile, task_id)
+                    except (OSError, ValueError, sqlite3.Error):
+                        pass  # Desktop sync or the next archive read retries the cleanup.
+                return {'released':released}
             state, _ = self.read('flow','/api/state')
             if not state or state.get('test') is True:
                 raise ValueError('flow_not_connected')

@@ -1816,12 +1816,12 @@ async function handleGovernanceClick(event) {
     openGovernance(button.dataset.governRecheck);
   } else if (button.dataset.governReview) {
     const task=button.dataset.governReview;
-    if (!window.confirm(`确认已核对原任务 ${task}，允许此账号接收后续任务？原任务不会重发。`)) return;
+    if (!window.confirm(`已核对任务 ${task}，现在放行账号并删除本次警告截图？原任务不会重发。`)) return;
     button.disabled=true;
     governanceError='';
     try {
       await postJson('/api/flow-readiness/review',{account:button.dataset.reviewAccount,task,confirmed:true});
-      await startGovernanceAudit('flow',false);
+      await Promise.all([startGovernanceAudit('flow',false), refresh({background:true})]);
     } catch (error) { governanceError=error.message; renderGovernance(); }
     finally { button.disabled=false; }
   } else if (button.dataset.governService) {
@@ -2849,7 +2849,7 @@ $("realAccountTable").addEventListener("click", async (event) => {
   if (event.target.closest('[data-govern-reauth]')) return handleGovernanceClick(event);
   const govReleaseButton = event.target.closest('[data-govern-review]');
   if (govReleaseButton) {
-    if (!window.confirm(`确认已核对原任务 ${govReleaseButton.dataset.governReview}，允许此账号接收后续任务？原任务不会重发。`)) return;
+    if (!window.confirm(`已核对任务 ${govReleaseButton.dataset.governReview}，现在放行账号并删除本次警告截图？原任务不会重发。`)) return;
     govReleaseButton.disabled = true;
     try {
       await postJson('/api/flow-readiness/review', {account: govReleaseButton.dataset.reviewAccount, task: govReleaseButton.dataset.governReview, confirmed: true});

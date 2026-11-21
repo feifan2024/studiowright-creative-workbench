@@ -1,4 +1,4 @@
-"""Copy Flow warning screenshots to the user's Windows desktop."""
+"""Sync Flow warning screenshots to the Windows desktop until they are reviewed."""
 import argparse
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -73,10 +73,22 @@ def save_png(target, data):
 
 def sync_once(read, destination, database):
     transferred = 0
+    removed = 0
     failures = 0
-    rows = json.loads(read('list'))
+    index = json.loads(read('sync'))
+    if not isinstance(index, dict) or any(not isinstance(index.get(key), list) for key in ('active', 'reviewed')):
+        raise ValueError('警告截图状态不可用。')
     database.execute('CREATE TABLE IF NOT EXISTS delivered(job_id TEXT PRIMARY KEY)')
-    for row in rows:
+    for row in index['reviewed']:
+        try:
+            target = destination / capture_name(row)
+            if (database.execute('SELECT 1 FROM delivered WHERE job_id=?', (row['id'],)).fetchone()
+                    and not target.is_symlink() and target.is_file()):
+                target.unlink(missing_ok=True)
+                removed += 1
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+            failures += 1
+    for row in index['active']:
         try:
             name = capture_name(row)
             ident = row['id']
@@ -88,7 +100,7 @@ def sync_once(read, destination, database):
             transferred += 1
         except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.SubprocessError):
             failures += 1
-    return transferred, failures
+    return transferred, removed, failures
 
 
 def main():
@@ -110,12 +122,12 @@ def main():
     with closing(sqlite3.connect(options.state / 'delivered.sqlite3')) as database:
         while True:
             try:
-                transferred, failures = sync_once(remote_reader(options.configuration), destination, database)
-                if transferred or failures != previous_failures:
-                    logging.info('已连接 Ubuntu，保存 %d 张截图，%d 张待同步。', transferred, failures)
+                transferred, removed, failures = sync_once(remote_reader(options.configuration), destination, database)
+                if transferred or removed or failures != previous_failures:
+                    logging.info('已连接 Ubuntu，保存 %d 张截图，清除 %d 张，%d 项待处理。', transferred, removed, failures)
                 previous_failures = failures
                 if options.once:
-                    print(json.dumps({'transferred': transferred, 'pending': failures}))
+                    print(json.dumps({'transferred': transferred, 'removed': removed, 'pending': failures}))
                     return bool(failures)
             except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError):
                 if previous_failures != 'offline':

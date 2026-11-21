@@ -1,7 +1,8 @@
-"""Read the Flow console's warning screenshots through the existing SSH connection."""
+"""Serve Flow warning screenshots and remove them after an operator releases the task hold."""
 import argparse
 from contextlib import closing
 import json
+import logging
 from pathlib import Path
 import re
 import sqlite3
@@ -9,6 +10,7 @@ import sys
 
 
 FLOW_ROOT = Path.home() / '.local/share/studiowright-evaluation'
+REVIEW_DATABASE = Path.home() / '.local/state/creative-unified-workbench/task-coordination/state.sqlite3'
 JOB = re.compile(r'[0-9a-f]{12}')
 MAX_PNG_BYTES = 16 * 1024 * 1024
 
@@ -19,7 +21,7 @@ def database(path):
     return closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=4))
 
 
-def records(root, job_id=None, *, task_ids=None):
+def _reconcile(root, job_id=None, *, task_ids=None, review_database=None, profile_filter=None):
     if job_id is not None and not JOB.fullmatch(job_id):
         raise ValueError('Invalid Flow job ID.')
     incidents = root / 'data/incidents'
@@ -37,35 +39,77 @@ def records(root, job_id=None, *, task_ids=None):
                     AND (CASE WHEN json_valid(result) THEN json_extract(result,'$.warning_screenshot') END) = id || '.png'
                     AND (? IS NULL OR id=?)
                 ORDER BY finished, id""", (job_id, job_id)).fetchall()
+    if not rows:
+        return
+    with database(review_database if review_database is not None else REVIEW_DATABASE) as db:
+        approvals = {(profile, task): created for profile, task, created in db.execute("""
+            SELECT profile, task_id, max(created) FROM events
+            WHERE action='readiness_hold_reviewed_by_operator' GROUP BY profile, task_id
+        """)}
     for ident, profile, finished, error, task_id in rows:
         if not JOB.fullmatch(ident) or not isinstance(task_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', task_id):
             continue
         if task_ids is not None and task_id not in task_ids:
             continue
-        path = incidents / (ident + '.png')
-        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= MAX_PNG_BYTES:
+        if profile_filter is not None and profile != profile_filter:
             continue
+        path = incidents / (ident + '.png')
+        approved_at = approvals.get((profile, task_id))
+        reviewed = approved_at is not None and finished <= approved_at
         name = (emails.get(profile) or profile).split('@', 1)[0]
         name = re.sub(r'[^A-Za-z0-9_.+-]', '_', name)[:48] or 'account'
         reason = 'unusual' if 'PUBLIC_ERROR_UNUSUAL_ACTIVITY' in (error or '') else 'generation'
-        yield {'id': ident, 'task_id': task_id, 'profile': profile, 'account': name,
-               'finished': finished, 'reason': reason}, path
+        record = {'id': ident, 'task_id': task_id, 'profile': profile, 'account': name,
+                  'finished': finished, 'reason': reason}
+        if reviewed:
+            try:
+                if not path.is_symlink() and path.is_file():
+                    path.unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning('Could not remove reviewed Flow screenshot %s', ident)
+            # Keep the approval discoverable even after the PNG is gone, for offline Windows clients.
+            yield record, path, True
+        elif not path.is_symlink():
+            try:
+                if path.is_file() and 0 < path.stat().st_size <= MAX_PNG_BYTES:
+                    yield record, path, False
+            except FileNotFoundError:
+                continue
 
 
-def current_window_screenshots(coordination, root=FLOW_ROOT):
+def records(root, job_id=None, *, task_ids=None, review_database=None):
+    for record, path, reviewed in _reconcile(root, job_id, task_ids=task_ids, review_database=review_database):
+        if not reviewed:
+            yield record, path
+
+
+def purge_reviewed_screenshots(profile, task_id):
+    # Reconcile the persisted review immediately; subsequent reads retry any failed removal.
+    for _ in _reconcile(FLOW_ROOT, task_ids={task_id}, profile_filter=profile):
+        pass
+
+
+def sync_index(root=FLOW_ROOT, *, review_database=None):
+    index = {'active': [], 'reviewed': []}
+    for record, _, reviewed in _reconcile(root, review_database=review_database):
+        index['reviewed' if reviewed else 'active'].append(record)
+    return index
+
+
+def current_window_screenshots(coordination, root=FLOW_ROOT, *, review_database=None):
     task_by_profile = {row['profile']: row['task_id'] for row in (coordination or {}).get('windows', [])
                        if row.get('profile') and row.get('task_id')}
     if not task_by_profile:
         return {}
     shots = {}
-    for record, _ in records(root, task_ids=set(task_by_profile.values())):
+    for record, _ in records(root, task_ids=set(task_by_profile.values()), review_database=review_database):
         if task_by_profile.get(record['profile']) == record['task_id']:
             shots[record['profile']] = {key: record[key] for key in ('id', 'task_id')}
     return shots
 
 
-def read_png(root, job_id):
-    match = next(records(root, job_id), None)
+def read_png(root, job_id, *, review_database=None):
+    match = next(records(root, job_id, review_database=review_database), None)
     if match is None:
         raise FileNotFoundError('Warning screenshot is not available.')
     with match[1].open('rb') as stream:
@@ -75,15 +119,17 @@ def read_png(root, job_id):
     return data
 
 
-def main(argv=None, root=FLOW_ROOT):
+def main(argv=None, root=FLOW_ROOT, *, review_database=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('list', 'read'))
+    parser.add_argument('action', choices=('list', 'read', 'sync'))
     parser.add_argument('job_id', nargs='?')
     options = parser.parse_args(argv)
     if options.action == 'list' and options.job_id is None:
-        print(json.dumps([record for record, _ in records(root)]))
+        print(json.dumps([record for record, _ in records(root, review_database=review_database)]))
+    elif options.action == 'sync' and options.job_id is None:
+        print(json.dumps(sync_index(root, review_database=review_database)))
     elif options.action == 'read' and options.job_id:
-        sys.stdout.buffer.write(read_png(root, options.job_id))
+        sys.stdout.buffer.write(read_png(root, options.job_id, review_database=review_database))
     else:
         parser.error('Only read takes a job ID.')
 

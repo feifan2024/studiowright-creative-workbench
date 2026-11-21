@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 ROOT = Path(__file__).resolve().parents[1] / 'packaging'
 sys.path[:0] = [str(ROOT / name) for name in ('windows', 'ubuntu/snapshot/workbench',
                                             'ubuntu/snapshot/flow/source/src')]
-from flow_warning_archive import current_window_screenshots, read_png, records
+from flow_warning_archive import current_window_screenshots, purge_reviewed_screenshots, read_png, records, sync_index
 from flow_warning_desktop import capture_name, sync_once
 
 try:
@@ -53,43 +53,97 @@ class Capture(unittest.IsolatedAsyncioTestCase):
 
 
 class Delivery(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.incidents = self.root / 'data/incidents'
+        self.incidents.mkdir(parents=True)
+        (self.root / 'console-data').mkdir()
+        self.desktop = self.root / 'desktop'
+        self.desktop.mkdir()
+        self.state = self.enterContext(closing(sqlite3.connect(':memory:')))
+        self.jobs = self.enterContext(closing(sqlite3.connect(self.root / 'data/studiowright.db')))
+        self.review_database = self.root / 'reviews.db'
+        self.review = self.enterContext(closing(sqlite3.connect(self.review_database)))
+        self.finished = 1795249440
+        with closing(sqlite3.connect(self.root / 'console-data/console.db')) as db, db:
+            db.execute('CREATE TABLE accounts(profile TEXT, email TEXT)')
+            db.execute("INSERT INTO accounts VALUES('profile-a','new@example.test')")
+        with self.jobs:
+            self.jobs.execute('CREATE TABLE jobs(id TEXT, profile TEXT, kind TEXT, status TEXT, finished REAL, error TEXT, params TEXT, result TEXT)')
+        with self.review:
+            self.review.execute('CREATE TABLE events(profile TEXT, task_id TEXT, action TEXT, created REAL)')
+
+    def capture(self, ident, *, profile='profile-a', marked=True, later=0):
+        with self.jobs:
+            self.jobs.execute("INSERT INTO jobs VALUES(?,?,'image','failed',?,?,?,?)",
+                              (ident, profile, self.finished + later, 'PUBLIC_ERROR_UNUSUAL_ACTIVITY',
+                               '{"origin_console_task":"task-a"}',
+                               json.dumps({'warning_screenshot': ident + '.png'} if marked else {})))
+        screenshot = self.incidents / (ident + '.png')
+        screenshot.write_bytes(PNG)
+        return screenshot
+
+    def read(self, action, ident=None):
+        if action == 'sync':
+            return json.dumps(sync_index(self.root, review_database=self.review_database)).encode()
+        return read_png(self.root, ident, review_database=self.review_database)
+
     def test_only_new_recorded_screenshots_are_synced_once(self):
-        with tempfile.TemporaryDirectory() as directory, closing(sqlite3.connect(':memory:')) as state:
-            root = Path(directory)
-            incidents = root / 'data/incidents'
-            incidents.mkdir(parents=True)
-            (root / 'console-data').mkdir()
-            desktop = root / 'desktop'
-            desktop.mkdir()
-            with closing(sqlite3.connect(root / 'console-data/console.db')) as db, db:
-                db.execute('CREATE TABLE accounts(profile TEXT, email TEXT)')
-                db.execute("INSERT INTO accounts VALUES('profile-a','new@example.test')")
-            with closing(sqlite3.connect(root / 'data/studiowright.db')) as db, db:
-                db.execute('CREATE TABLE jobs(id TEXT, profile TEXT, kind TEXT, status TEXT, finished REAL, error TEXT, params TEXT, result TEXT)')
-                for ident, marker in ((JOB_ID, JOB_ID + '.png'), ('0123456789ab', None)):
-                    db.execute("INSERT INTO jobs VALUES(?,'profile-a','image','failed',1795249440,?,?,?)",
-                               (ident, 'PUBLIC_ERROR_UNUSUAL_ACTIVITY', '{"origin_console_task":"task-a"}',
-                                json.dumps({'warning_screenshot': marker})))
-                    (incidents / (ident + '.png')).write_bytes(PNG)
+        active = self.capture(JOB_ID)
+        self.capture('0123456789ab', marked=False)
+        windows = {'windows': [
+            {'profile': 'profile-a', 'task_id': 'task-a'},
+            {'profile': 'profile-b', 'task_id': 'task-a'},
+        ]}
+        self.assertEqual(current_window_screenshots(windows, self.root, review_database=self.review_database),
+                         {'profile-a': {'id': JOB_ID, 'task_id': 'task-a'}})
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (1, 0, 0))
+        saved = self.desktop / capture_name(next(records(self.root, review_database=self.review_database))[0])
+        self.assertEqual(saved.read_bytes(), PNG)
+        self.assertIn('new_异常活动_task-a', saved.name)
+        active.unlink()
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (0, 0, 0))
+        self.assertTrue(saved.is_file())  # A missing source without a review is not a deletion signal.
+        saved.unlink()
+        active.write_bytes(PNG)
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (0, 0, 0))
+        self.assertEqual(list(self.desktop.iterdir()), [])
 
-            def read(action, ident=None):
-                if action == 'list':
-                    return json.dumps([row for row, _ in records(root)]).encode()
-                return read_png(root, ident)
+    def test_only_confirmed_review_for_this_account_and_warning_removes_both_copies(self):
+        warning = self.capture(JOB_ID)
+        other_account = self.capture('aaaaaaaaaaaa', profile='profile-b')
+        later_warning = self.capture('bbbbbbbbbbbb', later=20)
+        history = self.capture('cccccccccccc', marked=False)
+        initial = {row['id']: self.desktop / capture_name(row)
+                   for row, _ in records(self.root, review_database=self.review_database)}
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (3, 0, 0))
+        saved = initial[JOB_ID]
+        personal_copy = self.desktop / 'saved-for-my-notes.png'
+        personal_copy.write_bytes(PNG)
+        with self.review:
+            self.review.executemany('INSERT INTO events VALUES(?,?,?,?)', [
+                ('profile-a', 'task-a', 'confirmed_rejection_released', self.finished + 3),
+                ('profile-a', 'other-task', 'readiness_hold_reviewed_by_operator', self.finished + 4),
+                ('profile-a', 'task-a', 'readiness_hold_reviewed_by_operator', self.finished - 1),
+            ])
+        self.assertEqual(self.read('read', JOB_ID), PNG)
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (0, 0, 0))
+        self.assertTrue(warning.is_file() and saved.is_file())
 
-            windows = {'windows': [
-                {'profile': 'profile-a', 'task_id': 'task-a'},
-                {'profile': 'profile-b', 'task_id': 'task-a'},
-            ]}
-            self.assertEqual(current_window_screenshots(windows, root),
-                             {'profile-a': {'id': JOB_ID, 'task_id': 'task-a'}})
-            self.assertEqual(sync_once(read, desktop, state), (1, 0))
-            saved = desktop / capture_name(next(records(root))[0])
-            self.assertEqual(saved.read_bytes(), PNG)
-            self.assertIn('new_异常活动_task-a', saved.name)
-            saved.unlink()
-            self.assertEqual(sync_once(read, desktop, state), (0, 0))
-            self.assertEqual(list(desktop.iterdir()), [])
+        with self.review:
+            self.review.execute('INSERT INTO events VALUES(?,?,?,?)',
+                                ('profile-a', 'task-a', 'readiness_hold_reviewed_by_operator', self.finished + 5))
+        with patch('flow_warning_archive.FLOW_ROOT', self.root), \
+             patch('flow_warning_archive.REVIEW_DATABASE', self.review_database):
+            purge_reviewed_screenshots('profile-a', 'task-a')
+        self.assertFalse(warning.exists())
+        with self.assertRaises(FileNotFoundError):
+            self.read('read', JOB_ID)
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (0, 1, 0))
+        self.assertFalse(saved.exists())
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (0, 0, 0))
+        self.assertTrue(all(path.is_file() for path in (other_account, later_warning, history, personal_copy,
+                                                       initial['aaaaaaaaaaaa'], initial['bbbbbbbbbbbb'])))
 
 
 if __name__ == '__main__':
