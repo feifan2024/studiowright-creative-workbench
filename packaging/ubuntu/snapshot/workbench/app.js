@@ -58,7 +58,7 @@ const retryProjectDrafts = new Map(), accountActionsInFlight = new Set();
 let lastProjectCountsRead = 0;
 const viewReads = new Map();
 let officialQuotaData = null;
-let officialQuotaBusy = false;
+let officialQuotaRequest = null;
 let officialQuotaReadFailed = false;
 let projectActionsLoading = false;
 const SNAPSHOT_REFRESH_MS = 5000;
@@ -549,8 +549,9 @@ function syncVisiblePage(view, background) {
   };
   if (['overview', 'accounts', 'conversations'].includes(view)) read('channel', refreshChannelStatus);
   if (view === 'overview' || view === 'accounts') {
-    // Load saved quota once; only explicit refresh performs a provider query.
-    if (!officialQuotaData && !officialQuotaReadFailed) read('quota', refreshOfficialQuota);
+    // Read the saved quota and follow an in-progress refresh using the same snapshot.
+    if ((!officialQuotaData && !officialQuotaReadFailed) || officialQuotaData?.refreshing)
+      read('quota', refreshOfficialQuota);
     read('flowReadinessStatus', refreshFlowReadinessStatus);
   }
   if (view === 'overview') {
@@ -1600,16 +1601,13 @@ async function startGovernanceAudit(service, repair = true) {
       rememberFlowReadiness(pageChecks,extra);
       if (!pageChecks) audit.error='实际任务窗口检查暂未返回。';
     } else {
-      // Readiness repair never refreshes quota or changes healthy authorization.
-      let quota=repair ? await postJson('/api/gemini-readiness',{}) :
-        await getJson('/api/official-quota',{timeoutMs:8000});
-      const quotaRows=Object.values(quota?.accounts || {});
-      const quotaComplete=quotaRows.filter(row=>row.status==='ok' && ['five_hour','weekly'].every(
-        window=>Number.isFinite(row[window]?.remaining_percent)) && Number.isFinite(row.checked_at) &&
-        Math.abs(Date.now()/1000-row.checked_at)<=600).length;
-      audit.quotaSummary=quotaRows.length ? ` · 两项额度已读取 ${quotaComplete}/${quotaRows.length}` : '';
-      renderAccountQuotas();
-      const probes=Array.isArray(quota.readiness_probes) ? quota.readiness_probes : [];
+      // Quota is an independent, read-only check. Let dispatch readiness finish while it runs.
+      const [latestQuota, readiness] = await Promise.all([
+        refreshOfficialQuota(repair),
+        repair ? postJson('/api/gemini-readiness',{}) : null
+      ]);
+      const quota=latestQuota || readiness;
+      const probes=Array.isArray(readiness?.readiness_probes) ? readiness.readiness_probes : [];
       const expected=new Map(probes.map(p=>[p.account_key,p.request_id]));
       audit.probes=probes.length;
       let latest=extra;
@@ -1624,7 +1622,7 @@ async function startGovernanceAudit(service, repair = true) {
       while (probePending() && Date.now()<checkDeadline) {
         await new Promise(resolve=>setTimeout(resolve,2000));
         latest=await getJson('/api/channel-status',{timeoutMs:8000}).catch(()=>null) || latest;
-        audit.rows=auditGeminiAccounts(snapshot,latest,quota,expected);
+        audit.rows=auditGeminiAccounts(snapshot,latest,officialQuotaData || quota,expected);
         renderGovernance();
       }
       if (probePending()) audit.error='部分账号的云端验活还在排队或执行，可在对话管理查看。';
@@ -1632,9 +1630,9 @@ async function startGovernanceAudit(service, repair = true) {
       const [currentSnapshot,currentChannel]=await Promise.all([
         getJson('/api/snapshot',{timeoutMs:10000}).catch(()=>null),
         getJson('/api/channel-status',{timeoutMs:8000}).catch(()=>null)]);
-      if (currentSnapshot?.real_accounts?.available===true) audit.rows=auditGeminiAccounts(currentSnapshot,currentChannel,quota,expected);
-      else throw new Error('额度读取后未能重新核对账号和队列。');
-      if (quota) {officialQuotaData=quota;officialQuotaReadFailed=false;}
+      if (currentSnapshot?.real_accounts?.available===true)
+        audit.rows=auditGeminiAccounts(currentSnapshot,currentChannel,officialQuotaData || quota,expected);
+      else throw new Error('本轮未能重新核对账号和队列。');
       if (currentChannel?.available) {state.channelStatus=currentChannel;channelReadFailed=false;}
       await refreshGovernanceCases();
       if (repair) {
@@ -1649,7 +1647,7 @@ async function startGovernanceAudit(service, repair = true) {
           audit.checkAfterAuthorization=true;
           const [updated,channel]=await Promise.all([getJson('/api/snapshot',{timeoutMs:10000}),
             getJson('/api/channel-status',{timeoutMs:8000})]);
-          audit.rows=auditGeminiAccounts(updated,channel,quota,expected);
+          audit.rows=auditGeminiAccounts(updated,channel,officialQuotaData || quota,expected);
           if (channel.available) {state.channelStatus=channel;channelReadFailed=false;}
         }
 
@@ -1769,9 +1767,15 @@ function renderGovernance() {
   const verificationProgress=isGemini && verification?.state==='waiting'
     ? `请在 Ubuntu 完成 ${verification.email} 的 Google 官方验证。完成后自动重读额度。`
     : isGemini && verification?.state==='rechecking' ? '正在重读已验证账号的额度…' : '';
-  const status = governanceError || verificationProgress || authProgress+(audit?.running ? (authorization?.state==='waiting' ? '' : audit?.quotaChecking ? '正在自动读取 5 小时和每周额度…' : '正在自动检查全部账号…') : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
-    (audit.probes ? ` · 云端验活 ${audit.probes} 个账号` : '') + (audit.quotaSummary || '') : '') +
-    (audit?.error ? ' '+audit.error : '');
+  const quota = officialQuotaReadFailed ? null : officialQuotaData;
+  let quotaSummary = '';
+  if (isGemini && audit?.checkedAt) {
+    quotaSummary = quota?.known_accounts > 0
+      ? ` · 两项额度已读取 ${quota.known_accounts}/${quota.total_accounts}` : ' · 额度暂未获取';
+  }
+  if (isGemini && audit && quota?.refreshing) quotaSummary = ' · 正在读取额度…';
+  const status = governanceError || verificationProgress || authProgress+(audit?.running ? (authorization?.state==='waiting' ? '' : '正在自动检查全部账号…') : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
+    (audit.probes ? ` · 云端验活 ${audit.probes} 个账号` : '') : '') + quotaSummary + (audit?.error ? ' '+audit.error : '');
   if ($('governanceStatus').textContent !== status) $('governanceStatus').textContent = status;
   const detailRows=rows.map(({account,status,issues,note})=>{
     const visibleIssues=isGemini && audit?.running ? issues.filter(issue=>!['confirmed_verification','confirmed_reauth'].includes(issue.key)) : issues;
@@ -1949,6 +1953,7 @@ function accountOfficialQuotaMarkup(key) {
   const now = Date.now()/1000;
   const age = row && typeof row.checked_at === 'number' ? now-row.checked_at : null;
   const fresh = row?.status === 'ok' && age !== null && Number.isFinite(age) && age >= 0 && age <= 600;
+  const complete = ['five_hour','weekly'].every(window=>savedQuotaValue(row,window)!==null);
   const windowMarkup = (window, label, title) => {
     const value = savedQuotaValue(row,window);
     const reset = row?.[window]?.reset_at;
@@ -1964,11 +1969,12 @@ function accountOfficialQuotaMarkup(key) {
   const quotaReason = {
     verification_required:row?.reason==='provider_validation_no_entry' ? '额度查询受限，Google 未提供验证入口' : 'Google 验证尚未通过，额度暂不可读',
     authorization_required:'Google 要求重新授权后读取额度',
-    authorization_unavailable:'上次读取时授权不可用，额度待重新读取',
-    eligibility_failed:'官方资格检查未通过，额度暂不可读',
   }[row?.status];
-  const recoveringQuota = (governanceAudits.gemini?.running || officialQuotaData?.refreshing) && !fresh;
-  const message = recoveringQuota ? '正在检查并恢复额度读取…' : officialQuotaReadFailed ? '额度服务暂不可读取' : quotaReason ? quotaReason : row?.status === 'ok' && !fresh ? '上次读取 '+dateTime(row.checked_at)+'；仅供参考，点刷新更新' : row?.status === 'network_error' ? '连接失败，额度暂未读到' : !fresh ? '额度暂未读到' : '';
+  let message = quotaReason || '';
+  if (!officialQuotaReadFailed && officialQuotaData?.refreshing && (!fresh || !complete))
+    message = '正在读取额度…';
+  else if (!message && !complete) message = '额度暂未获取';
+  else if (!message && !fresh) message = '上次读取 '+dateTime(row.checked_at)+'，仅供参考';
   const html = `<div class="account-quota-windows">${windowMarkup('five_hour','5 小时','5 小时额度')}${windowMarkup('weekly','每周','每周额度')}</div>`;
   return {html, message};
 }
@@ -4889,7 +4895,7 @@ function renderOfficialQuota() {
   const windowMarkup = (key, title) => {
     const window = saved.windows[key];
     const value = percent(window?.average_remaining_percent);
-    return `<div class="quota-window"><div class="quota-window-label"><span>${title}</span><strong>${number(value)}<small> 平均剩余</small></strong></div><div class="quota-track ${value == null ? 'is-unknown' : ''}" ${value == null ? 'role="img" aria-label="额度尚未读取"' : `role="progressbar" aria-label="${title}账号平均剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`}><i data-quota-fill="${value ?? 0}"></i></div><span class="quota-reset">${value == null ? '等待手动读取额度' : '上次读取的平均剩余，非实时额度'}</span></div>`;
+    return `<div class="quota-window"><div class="quota-window-label"><span>${title}</span><strong>${number(value)}<small> 平均剩余</small></strong></div><div class="quota-track ${value == null ? 'is-unknown' : ''}" ${value == null ? 'role="img" aria-label="额度暂未获取"' : `role="progressbar" aria-label="${title}账号平均剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`}><i data-quota-fill="${value ?? 0}"></i></div><span class="quota-reset">${value == null ? '额度暂未获取' : '上次读取的平均剩余，非实时额度'}</span></div>`;
   };
   const taskKnown = state.snapshot?.flow_state?.available === true && Array.isArray(state.snapshot?.tasks);
   const tasks = taskKnown ? state.snapshot.tasks.filter(t=>['image','video'].includes(t.kind)) : [];
@@ -4904,7 +4910,14 @@ function renderOfficialQuota() {
     const fresh = row.status === 'ok' && Date.now()/1000-row.checked_at <= 600;
     const values = ['five_hour','weekly'].map(w=>savedQuotaValue(row,w));
     const resets = ['five_hour','weekly'].map(w=>row[w]?.reset_at).filter(t=>fresh && typeof t==='number' && t>Date.now()/1000);
-    const status = fresh ? (resets.length ? resetText(Math.min(...resets)) : '额度可用') : row.status==='verification_required' ? '额度查询提示核验（不限制对话）' : row.status==='eligibility_failed' ? '官方资格检查未通过（未确认需核验）' : row.status==='network_error' ? '连接官方服务失败' : row.status==='authorization_required' ? '官方要求重新授权' : row.status==='authorization_unavailable' ? '本地授权资料未就绪' : row.status==='not_read' ? (refreshing ? '等待本轮读取' : '尚未读取') : row.status==='ok' ? '上次读取 '+dateTime(row.checked_at)+'，仅供参考' : '本轮未读到额度';
+    let status = '额度暂未获取';
+    if (row.status==='verification_required') status = '额度查询提示核验（不限制对话）';
+    else if (row.status==='authorization_required') status = '官方要求重新授权';
+    else if (row.status==='not_read' && refreshing) status = '等待本轮读取';
+    else if (values.every(value=>value!==null)) {
+      status = fresh ? (resets.length ? resetText(Math.min(...resets)) : '已读取额度')
+        : '上次读取 '+dateTime(row.checked_at)+'，仅供参考';
+    }
     return `<tr><th scope="row">${esc(names.get(key) || `账号 ${index+1}`)}</th>${values.map((v,i)=>`<td><div class="quota-account-value">${number(v)}</div><div class="quota-account-track" role="img" aria-label="${i ? '每周' : '5小时'}剩余 ${v == null ? '未知' : v+'%'}"><i data-quota-fill="${v ?? 0}"></i></div></td>`).join('')}<td>${esc(status)}</td></tr>`;
   }).join('');
   const checked = rows.map(([,r])=>r.checked_at).filter(t=>typeof t==='number');
@@ -4927,31 +4940,43 @@ function renderOfficialQuota() {
         }).join('')}</tbody>
       </table>
     </div>` : '';
-  const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已保存 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : officialQuotaReadFailed ? '额度服务暂不可读取' : '尚未读到官方额度';
+  const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已保存 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : '额度暂未获取';
   target.setAttribute('aria-busy',String(refreshing));
-  target.innerHTML = `<div class="quota-main">${flowMarkup}${windowMarkup('five_hour','GEMINI · 5 小时额度')}${windowMarkup('weekly','GEMINI · 每周额度')}</div><div class="quota-footer"><div class="quota-source"><span>Gemini：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>Gemini 为账号平均剩余，各账号分别恢复。可读的高级模型账号每 5 分钟刷新，其余按原周期刷新。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaBusy ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">Gemini 各账号额度<span>查看剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || '<tr><td colspan="4">正在读取账号列表…</td></tr>'}</tbody></table></div></details>`;
+  target.innerHTML = `<div class="quota-main">${flowMarkup}${windowMarkup('five_hour','GEMINI · 5 小时额度')}${windowMarkup('weekly','GEMINI · 每周额度')}</div><div class="quota-footer"><div class="quota-source"><span>Gemini：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>Gemini 为账号平均剩余，各账号分别恢复。可读的高级模型账号每 5 分钟刷新，其余按原周期刷新。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaRequest ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">Gemini 各账号额度<span>查看剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || `<tr><td colspan="4">${refreshing ? '正在读取额度…' : '额度暂未获取'}</td></tr>`}</tbody></table></div></details>`;
   target.querySelectorAll('[data-quota-fill]').forEach(meter=>{meter.style.width=Number(meter.dataset.quotaFill)+'%';});
   target.querySelector('[data-quota-action="refresh"]').addEventListener('click',()=>refreshOfficialQuota(true));
   if (focused) target.querySelector(`[data-quota-action="${focused}"]`)?.focus({preventScroll:true});
 }
 async function refreshOfficialQuota(force=false) {
-  if (officialQuotaBusy) return;
-  officialQuotaBusy = true;
-  try {
-    let data;
-    if (force) {
-      const response = await fetch('/api/official-quota/refresh',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Workbench-Request':'1'},body:'{}',signal:AbortSignal.timeout(8000)});
-      if (!response.ok) throw new Error('unavailable');
-      data = await response.json();
-    } else data = await getJson('/api/official-quota',{timeoutMs:8000});
-    if (data.schema_version !== 1 || data.source !== 'official_cli_usage' || !data.accounts || !data.windows) throw new Error('unavailable');
-    officialQuotaData = data; officialQuotaReadFailed = false;
-  } catch (_) { officialQuotaReadFailed = true; }
-  finally {
-    officialQuotaBusy = false;
-    renderOfficialQuota();
-    renderAccountQuotas();
-    if (state.snapshot && state.view==='accounts') renderAccounts();
-    if (state.snapshot && state.view==='overview') renderAccountInsights(state.snapshot, $('overviewInsights'));
+  if (officialQuotaRequest) {
+    if (!force || officialQuotaRequest.force) return officialQuotaRequest.pending;
+    await officialQuotaRequest.pending;
+    return refreshOfficialQuota(true);
   }
+  const pending = Promise.resolve().then(async () => {
+    try {
+      let data;
+      if (force) {
+        const response = await fetch('/api/official-quota/refresh',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Workbench-Request':'1'},body:'{}',signal:AbortSignal.timeout(8000)});
+        if (!response.ok) throw new Error('unavailable');
+        data = await response.json();
+      } else data = await getJson('/api/official-quota',{timeoutMs:8000});
+      if (data.schema_version !== 1 || data.source !== 'official_cli_usage' || !data.accounts || !data.windows) throw new Error('unavailable');
+      officialQuotaData = data;
+      officialQuotaReadFailed = false;
+      return data;
+    } catch (_) {
+      officialQuotaReadFailed = true;
+      return null;
+    } finally {
+      officialQuotaRequest = null;
+      renderOfficialQuota();
+      renderAccountQuotas();
+      if (state.snapshot && state.view==='accounts') renderAccounts();
+      if (state.snapshot && state.view==='overview') renderAccountInsights(state.snapshot, $('overviewInsights'));
+      else renderGovernance();
+    }
+  });
+  officialQuotaRequest = {force,pending};
+  return pending;
 }

@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'packaging', 'ubuntu', 'snapshot', 'workbench', 'app.js'), 'utf8');
 function load(name, context) {
-  const match = source.match(new RegExp('^function ' + name + '\\([^]*?^}', 'm'));
+  const match = source.match(new RegExp('^(?:async )?function ' + name + '\\([^]*?^}', 'm'));
   assert.ok(match, name + ' should exist');
   vm.runInContext(match[0], context);
 }
@@ -74,6 +74,55 @@ test('compact Gemini quota keeps recovery dates in hover details', () => {
   assert.doesNotMatch(markup(), /日期1799999940/);
   context.officialQuotaData.accounts.sample.checked_at = now - 601;
   assert.match(markup(), /title="5 小时额度 · 恢复 日期1800000300（上次读取）"/);
+});
+
+test('a missing Gemini quota is neutral, and a confirmed zero stays visible', () => {
+  const now = 1800000000;
+  const context = vm.createContext({
+    Date: {now: () => now * 1000}, officialQuotaReadFailed: false,
+    officialQuotaData: {accounts: {}},
+  });
+  for (const name of ['esc', 'savedQuotaValue', 'accountOfficialQuotaMarkup']) load(name, context);
+  const show = row => {
+    context.officialQuotaData.accounts.account = row;
+    return vm.runInContext("accountOfficialQuotaMarkup('account')", context);
+  };
+  for (const status of ['not_read', 'unavailable', 'network_error', 'eligibility_failed']) {
+    const {message, html} = show({status});
+    assert.equal(message, '额度暂未获取');
+    assert.doesNotMatch(html, /aria-valuenow=/);
+  }
+  const partial = show({status: 'ok', checked_at: now, five_hour: {remaining_percent: 0}});
+  assert.equal(partial.message, '额度暂未获取');
+  assert.match(partial.html, /aria-valuenow="0"/);
+  assert.match(show({status: 'authorization_required'}).message, /重新授权/);
+});
+
+test('Gemini readiness requests quota recovery and still finishes when quota is unavailable', async () => {
+  const snapshot = {real_accounts: {available: true, items: []}};
+  const channel = {available: true};
+  const requests = [];
+  const quotaReads = [];
+  const context = vm.createContext({
+    governanceAudits: {}, state: {view: 'accounts'}, officialQuotaData: null, channelReadFailed: false,
+    async getJson(path) { return path === '/api/snapshot' ? snapshot : channel; },
+    async postJson(path) {
+      requests.push(path);
+      return path === '/api/gemini-readiness' ? {readiness_probes: []} : {state: 'completed', completed: 0};
+    },
+    async refreshOfficialQuota(force) { quotaReads.push(force); return null; },
+    auditGeminiAccounts: () => [{status: 'ready'}],
+    renderGovernance() {}, renderAccountQuotas() {}, refreshGovernanceCases: async () => {},
+  });
+  load('startGovernanceAudit', context);
+  await vm.runInContext("startGovernanceAudit('gemini')", context);
+  assert.deepEqual(quotaReads, [true]);
+  assert.deepEqual(requests, ['/api/gemini-readiness', '/api/official-reauth/activate']);
+  const audit = context.governanceAudits.gemini;
+  assert.equal(audit.rows[0].status, 'ready');
+  assert.equal(audit.error, '');
+  assert.equal(audit.running, false);
+  assert.ok(audit.checkedAt);
 });
 
 test('cooldown counts down and becomes awaiting confirmation without changing eligibility', () => {
