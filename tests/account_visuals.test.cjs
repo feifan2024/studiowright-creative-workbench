@@ -207,19 +207,22 @@ test('account reason identifies running work without inventing a failure', () =>
   assert.match(reason.text, /尚未收到失败回执/);
 });
 
-test('account reason exposes the original task failure and handles missing detail honestly', () => {
+test('the account card shows only the matching failure screenshot', () => {
   const context = vm.createContext({});
   load('flowAccountReason', context);
+  load('flowAccountNoticeMarkup', context);
   context.account = {profile:'a'};
   context.snapshot = {flow_coordination:{windows:[{profile:'a',task_id:'stopped',stage:'submitting'}]},
     tasks:[{source_id:'stopped',source_profile:'a',kind:'image',status:'interrupted',
       retry:{state:'needs_review',attempts:[{profile:'a',status:'failed',failure_reason:'等待图片回执超时，结果未确认'}]}}]};
-  const reason = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'busy')", context);
-  assert.equal(reason.label, '失败原因');
-  assert.match(reason.text, /等待图片回执超时.*stopped/);
-  context.snapshot.tasks[0].retry.attempts[0].failure_reason = '';
-  const unknown = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'busy')", context);
-  assert.match(unknown.text, /未返回具体错误/);
+  context.reason = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'busy')", context);
+  assert.equal(context.reason.taskId, 'stopped');
+  const markup = vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'stopped'})", context);
+  assert.match(markup, /href="\/api\/flow-warning-screenshots\/123456789abc\.png"/);
+  assert.match(markup, /<img .*src="\/api\/flow-warning-screenshots\/123456789abc\.png"/);
+  assert.doesNotMatch(markup, /失败原因|等待图片回执超时/);
+  assert.equal(vm.runInContext("flowAccountNoticeMarkup(reason,null)", context), '');
+  assert.equal(vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'other'})", context), '');
 });
 
 test('unlinked busy state cannot be described as a confirmed failure', () => {
@@ -269,5 +272,5 @@ test('ready account clears historical failure but preserves task history and cur
   const original=JSON.stringify(context.snapshot);
   assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{status:'ready',issues:[]},'ready')",context),null);
   assert.equal(JSON.stringify(context.snapshot),original);
-  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked',issues:[{title:'风控暂停'}]},'ready').label",context),'失败原因');
+  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked',issues:[{title:'风控暂停'}]},'ready').taskId",context),'old');
 });

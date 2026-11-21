@@ -1046,7 +1046,15 @@ class Sources:
         for item in state.get('retry_projects', []) if isinstance(state, dict) else []:
             if isinstance(item, dict) and (item.get('profile'), item.get('project')) in valid_projects:
                 retry_projects[item['profile']] = valid_projects[(item['profile'], item['project'])]
-        flow_task_notes(tasks, accounts, state.get('coordination') if state is not None else None)
+        coordination = state.get('coordination') if isinstance(state, dict) else None
+        flow_task_notes(tasks, accounts, coordination)
+        screenshots = {}
+        if coordination:
+            from flow_warning_archive import current_window_screenshots
+            try:
+                screenshots = current_window_screenshots(coordination)
+            except (OSError, ValueError, sqlite3.Error):
+                pass
         return {
             "checked_at": time.time(),
             "flow_state": {"available": state is not None, "message": state_error,
@@ -1059,7 +1067,8 @@ class Sources:
             "retry_projects": retry_projects,
             "tasks": tasks,
             "flow_insights": flow_insights_summary(state) if state is not None else None,
-            "flow_coordination": state.get('coordination') if isinstance(state,dict) else None,
+            "flow_coordination": coordination,
+            "flow_warning_screenshots": screenshots,
             "flow_models": model_rows(state) if state is not None else {'image': [], 'video': []},
             "real_accounts": {"available": accounts is not None, "items": accounts or [],
                               "message": state_error if state is None else
@@ -1416,6 +1425,16 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 return self.stream_tasks()
             if self.path == '/api/frontend/events':
                 return self.stream_frontend()
+            warning = re.fullmatch(r'/api/flow-warning-screenshots/([0-9a-f]{12})\.png', self.path)
+            if warning and deployment == 'ubuntu':
+                from flow_warning_archive import FLOW_ROOT, read_png
+                try:
+                    body = read_png(FLOW_ROOT, warning.group(1))
+                except FileNotFoundError:
+                    return self.json_response(404, {'error': '未找到这张警告截图。'})
+                except (OSError, ValueError, sqlite3.Error):
+                    return self.json_response(503, {'error': '警告截图暂不可读取。'})
+                return self.respond(200, body, 'image/png')
             if self.path == '/api/flow-readiness' and deployment == 'ubuntu':
                 try:
                     return self.json_response(200,sources.flow_readiness())

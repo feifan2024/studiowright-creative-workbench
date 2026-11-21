@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import shutil
@@ -20,6 +21,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from filelock import FileLock
 from playwright.async_api import Error as PlaywrightError
@@ -482,25 +484,40 @@ class Studio:
             "screenshots": doctor.screenshots,
         }
 
-    async def _fail(self, job_id: str, exc: BaseException, site: str) -> None:
+    async def _fail(self, job_id: str, exc: BaseException, site: str, *, page=None) -> None:
         """Record a failed job with a screenshot of the page it failed on."""
-        shot = None
-        try:
-            page = self.session.find_page(site)
-            if page is not None:
-                paths.incidents_dir().mkdir(parents=True, exist_ok=True)
-                shot = paths.incidents_dir() / f"{job_id}.png"
-                await page.screenshot(path=str(shot))
-        except Exception:
-            shot = None
-        detail = f"{type(exc).__name__}: {exc}"
-        if shot is not None:
-            detail += f" (screenshot: {shot})"
-            if isinstance(exc, FlowError | PlaywrightError):
-                exc.args = (f"{exc.args[0] if exc.args else exc} (screenshot: {shot})",)
         job = self.store.job(job_id)
         result = json.loads(job["result"]) if job and job["result"] else {}
         params = json.loads(job["params"]) if job and job["params"] else {}
+        shot = None
+        try:
+            if page is None:
+                page = self.session.find_page(site)
+            if page is not None:
+                candidate = paths.incidents_dir() / f"{job_id}.png"
+                if site == FLOW_ROOT:
+                    project = f"/project/{job['project_id']}" if job else None
+                    if project and self._incident_project(page.url, project):
+                        png = await page.screenshot(type="png", timeout=4000)
+                        if self._incident_project(page.url, project):
+                            candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                            with os.fdopen(fd, "wb") as output:
+                                output.write(png)
+                            shot = candidate
+                else:
+                    candidate.parent.mkdir(parents=True, exist_ok=True)
+                    await page.screenshot(path=str(candidate))
+                    shot = candidate
+        except Exception:
+            log.warning("Unable to capture the failure page for job %s", job_id)
+        detail = f"{type(exc).__name__}: {exc}"
+        if shot is not None:
+            detail += f" (screenshot: {shot})"
+            if site == FLOW_ROOT and params.get("origin_console_task"):
+                result["warning_screenshot"] = shot.name
+            if isinstance(exc, FlowError | PlaywrightError):
+                exc.args = (f"{exc.args[0] if exc.args else exc} (screenshot: {shot})",)
         stage, media = result.get("stage"), result.get("media_ids", [])
         # Only narrow, positively identified cases are safe to retry. Any missing
         # stage, accepted id, partial result, or failure after clicking is unknown.
@@ -513,6 +530,12 @@ class Studio:
         else:
             result["retry_evidence"] = "not_safe_to_repeat"
         self.store.update_job(job_id, status="failed", result=result, error=detail, finished=time.time())
+
+    @staticmethod
+    def _incident_project(url: str, project: str) -> bool:
+        page = urlsplit(url)
+        return (page.scheme == "https" and page.netloc == "flow.google.com"
+                and (page.path == project or page.path.startswith(project + "/")))
 
     # --- generation -------------------------------------------------------------------
     def _progress(self, job_id: str, stage: str, media_ids: Sequence[str]) -> None:
@@ -685,6 +708,7 @@ class Studio:
         started = time.time()
         self.store.update_job(job_id, status="running", started=started)
         foreground_lease = None
+        flow = None
         try:
             self._progress(job_id, "preparing", [])
             foreground_lease, flow = await self._generation_page(project_id)
@@ -725,7 +749,7 @@ class Studio:
             self.store.update_job(job_id, status="done", result=result, finished=time.time())
             return result
         except BaseException as exc:
-            await self._fail(job_id, exc, FLOW_ROOT)
+            await self._fail(job_id, exc, FLOW_ROOT, page=flow.page if flow is not None else None)
             raise
         finally:
             try:
@@ -767,6 +791,7 @@ class Studio:
         started = time.time()
         self.store.update_job(job_id, status="running", started=started)
         foreground_lease = None
+        flow = None
         try:
             if not request.dry_run:
                 self._progress(job_id, "preparing", [])
@@ -854,7 +879,7 @@ class Studio:
             self.store.update_job(job_id, status="done", result=result, finished=time.time())
             return result
         except BaseException as exc:
-            await self._fail(job_id, exc, FLOW_ROOT)
+            await self._fail(job_id, exc, FLOW_ROOT, page=flow.page if flow is not None else None)
             raise
         finally:
             try:

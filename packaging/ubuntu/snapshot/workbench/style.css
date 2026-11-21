@@ -748,6 +748,8 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .governance-result[data-state="blocked"] { background: #f5e5d9; color: #854620; }
 
 .account-flow-reason { margin: 10px 0; padding: 9px 11px; border-left: 3px solid #bf8651; border-radius: 5px; background: #fff5e7; color: #704f2b; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.account-flow-warning { display: inline-block; max-width: 100%; margin: 8px 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; cursor: zoom-in; }
+.account-flow-warning img { display: block; max-width: 100%; height: auto; }
 
 .records-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
 .records-tabs [aria-selected="true"] { background:#e3eee8; color:#214b3c; border-color:#a7c1b2; font-weight:700; }
