@@ -98,6 +98,30 @@ test('a missing Gemini quota is neutral, and a confirmed zero stays visible', ()
   assert.match(show({status: 'authorization_required'}).message, /重新授权/);
 });
 
+test('an open account page re-reads saved Gemini quota after its initial load', async () => {
+  let now = 1800000000000;
+  let quotaReads = 0;
+  const noop = () => {};
+  const context = vm.createContext({
+    Date: {now: () => now}, viewReads: new Map(),
+    officialQuotaData: {refreshing: false}, officialQuotaReadAt: now, OFFICIAL_QUOTA_SYNC_MS: 15000,
+    refreshOfficialQuota: () => { quotaReads++; },
+    refreshChannelStatus: noop, refreshFlowReadinessStatus: noop, refreshGovernanceCases: noop,
+    refreshGeminiActivity: noop, refreshActivation: noop,
+    activationScheduleSaving: true, activationPollSaving: true,
+  });
+  load('syncVisiblePage', context);
+  const sync = async () => {
+    vm.runInContext("syncVisiblePage('accounts', true)", context);
+    await Promise.all(context.viewReads.values());
+  };
+  await sync();
+  assert.equal(quotaReads, 0);
+  now += context.OFFICIAL_QUOTA_SYNC_MS;
+  await sync();
+  assert.equal(quotaReads, 1);
+});
+
 test('Gemini readiness requests quota recovery and still finishes when quota is unavailable', async () => {
   const snapshot = {real_accounts: {available: true, items: []}};
   const channel = {available: true};

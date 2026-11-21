@@ -60,8 +60,10 @@ const viewReads = new Map();
 let officialQuotaData = null;
 let officialQuotaRequest = null;
 let officialQuotaReadFailed = false;
+let officialQuotaReadAt = 0;
 let projectActionsLoading = false;
 const SNAPSHOT_REFRESH_MS = 5000;
+const OFFICIAL_QUOTA_SYNC_MS = 15000;
 let dispatchPolicyDirty = false;
 let dispatchPolicySaving = false;
 let activationUpdating = false;
@@ -549,8 +551,8 @@ function syncVisiblePage(view, background) {
   };
   if (['overview', 'accounts', 'conversations'].includes(view)) read('channel', refreshChannelStatus);
   if (view === 'overview' || view === 'accounts') {
-    // Read the saved quota and follow an in-progress refresh using the same snapshot.
-    if ((!officialQuotaData && !officialQuotaReadFailed) || officialQuotaData?.refreshing)
+    // Sync saved results from desktop checks, other tabs, and scheduled refreshes.
+    if (!background || officialQuotaData?.refreshing || Date.now()-officialQuotaReadAt >= OFFICIAL_QUOTA_SYNC_MS)
       read('quota', refreshOfficialQuota);
     read('flowReadinessStatus', refreshFlowReadinessStatus);
   }
@@ -4953,6 +4955,7 @@ async function refreshOfficialQuota(force=false) {
     await officialQuotaRequest.pending;
     return refreshOfficialQuota(true);
   }
+  officialQuotaReadAt = Date.now();
   const pending = Promise.resolve().then(async () => {
     try {
       let data;
@@ -4966,7 +4969,7 @@ async function refreshOfficialQuota(force=false) {
       officialQuotaReadFailed = false;
       return data;
     } catch (_) {
-      officialQuotaReadFailed = true;
+      if (force || !officialQuotaData || officialQuotaData.refreshing) officialQuotaReadFailed = true;
       return null;
     } finally {
       officialQuotaRequest = null;

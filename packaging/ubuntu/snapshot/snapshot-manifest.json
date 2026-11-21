@@ -127,7 +127,7 @@
   "workbench/POOL_DESK_NOTICE.md": "1f0481613ff7428eb7228696d6364997cde64075a0c0ad98a7af1b2bea8d1d28",
   "workbench/activation.py": "d4e0d33dc8d61c29b700ed6134ed6c2d8550cf7842b18483e9d026b7af641218",
   "workbench/activation_browser.py": "6e3fb1ad7d0ac6e58051f1f7a71efbb55d9c9a894871f88ba4a9eaa728727eb0",
-  "workbench/app.js": "b9ab9efe8e58147311bae2be5e295d46f6161ec7ba6e161203021269713b548f",
+  "workbench/app.js": "cea3d7843ecaa68a027bf139bafb5c46099b414f6747abc48d263840945a0b66",
   "workbench/channel_status.py": "2ac4536e1e523bac706d4d1398e4b958f331bcb9659e91a04bb62d57b29dffc5",
   "workbench/crash_recovery.py": "5ec9681a28a218815b1d0d313f10298541fdd4a42474c283b47611efe324952d",
   "workbench/create_flow_project.py": "cec9b440df33f423f14e77fd74b2b70bb2f8356aa671ed2d513ebaed60187053",
