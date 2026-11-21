@@ -139,7 +139,7 @@ print(call("/api/real-pool/image-analysis-validate", payload, rid))
 
 ## Flow · 生成图片或视频
 
-**源码更新（尚未部署到 Ubuntu）：** 启用前台输入的 Flow 会先输入最多 3 个字符，再一次粘贴剩余提示词。输入框聚焦后，输入和全文核对须在 3 秒内完成；超时不提交生成。这个时限不包含排队、页面准备或生成，也不是 API 请求超时。请求字段和调用方式保持不变。
+Flow 在提交前按编辑器实际段落核对提示词，保留原文的换行和空行。核对一致后才提交生成。输入或核对超时的任务会停在提交前，失败原因可用原任务编号查询。
 
 **`POST /api/real-pool/flow`** · 传 kind、confirm: true 和 params。返回 request_id、status、task_id；submitted 表示已排队。
 

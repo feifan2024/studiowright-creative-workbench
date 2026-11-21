@@ -11,6 +11,28 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+FLOW_PROMPT_TEXT = r"""editor => {
+    const paragraphs = Array.from(editor.childNodes);
+    if (!editor.classList.contains('ProseMirror') || !paragraphs.length ||
+        paragraphs.some(node => node.nodeName !== 'P')) {
+        return editor.innerText;
+    }
+    // Chrome adds an extra visual line break between paragraphs in editor.innerText.
+    return paragraphs.map(paragraph => {
+        const child = paragraph.firstChild;
+        if (paragraph.childNodes.length === 1 && child.nodeName === 'BR' &&
+            child.classList.contains('ProseMirror-trailingBreak')) {
+            return '';
+        }
+        return paragraph.innerText;
+    }).join('\n');
+}"""
+
+
+async def read_flow_prompt(composer):
+    return (await composer.evaluate(FLOW_PROMPT_TEXT)).replace('\r\n', '\n')
+
+
 def choose_prompt_input(prompt):
     import re
     if re.fullmatch(r'[A-Za-z0-9 ,.]{1,120}', prompt) and random.randrange(2) == 0:
@@ -71,7 +93,7 @@ async def enter_hybrid_prompt(driver, page, composer, target, prompt):
         record('hybrid_input_phase', stage='insert_start', characters=len(prompt))
         await page.keyboard.insert_text(prompt[len(prefix):])
         record('hybrid_input_phase', stage='insert_finished', characters=len(prompt))
-    observed = (await driver.composer_text(page, composer)).replace('\r\n', '\n')
+    observed = await read_flow_prompt(composer)
     if observed != prompt:
         # Record lengths only; prompt and clipboard content never enter logs.
         record('hybrid_input_verification_pending', expected_characters=len(prompt),
@@ -80,7 +102,7 @@ async def enter_hybrid_prompt(driver, page, composer, target, prompt):
         if not await driver.confirm_focus(target, page, composer):
             raise InputNotSubmitted('window_focus_lost')
         await asyncio.sleep(.05)
-        observed = (await driver.composer_text(page, composer)).replace('\r\n', '\n')
+        observed = await read_flow_prompt(composer)
     if not await driver.confirm_focus(target, page, composer):
         raise InputNotSubmitted('window_focus_lost')
 

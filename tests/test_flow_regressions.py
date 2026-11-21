@@ -5,9 +5,12 @@ from contextlib import contextmanager
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot/workbench'))
 from live_pool import RealPool
+from foreground_input import FLOW_PROMPT_TEXT, InputNotSubmitted, Target, paste_and_submit_reserved
 
 
 @contextmanager
@@ -20,6 +23,49 @@ def fixture_directory():
     finally:
         assert root.resolve().parent == parent and root.name.startswith('.fixture-')
         shutil.rmtree(root)
+
+
+class FlowPromptVerification(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.prompt = '第一行\n第二行\n\n第四行'
+        self.driver = SimpleNamespace(
+            composer_text=AsyncMock(return_value=''), activate_and_confirm=AsyncMock(return_value=True),
+            composer_ready_cdp=AsyncMock(return_value=True), confirm_focus=AsyncMock(return_value=True),
+            type_prompt_chars=AsyncMock(),
+        )
+        self.composer = SimpleNamespace(evaluate=AsyncMock())
+        self.page = SimpleNamespace(keyboard=SimpleNamespace(insert_text=AsyncMock()))
+        self.checkpoint = AsyncMock()
+        self.send = AsyncMock()
+
+    async def submit(self):
+        with (
+            fixture_directory() as directory,
+            patch('foreground_input.Path.home', return_value=directory),
+            patch('foreground_input._pacing_wait', new_callable=AsyncMock),
+            patch('pointer_sequence.record_input_action'),
+        ):
+            await paste_and_submit_reserved(
+                driver=self.driver, page=self.page, composer=self.composer,
+                target=Target('fixture', 1, 1, 0), prompt=self.prompt,
+                checkpoint=self.checkpoint, submit=self.send, hybrid=True,
+            )
+
+    async def test_flow_compares_the_paragraph_text_before_sending(self):
+        self.composer.evaluate.return_value = self.prompt
+        await self.submit()
+        self.composer.evaluate.assert_awaited_once_with(FLOW_PROMPT_TEXT)
+        self.page.keyboard.insert_text.assert_awaited_once_with(self.prompt[3:])
+        self.checkpoint.assert_awaited_once()
+        self.send.assert_awaited_once()
+
+    async def test_incorrect_text_keeps_a_flow_task_before_submission(self):
+        self.composer.evaluate.return_value = self.prompt.replace('第二行', '改一行')
+        with patch('foreground_input.hybrid_input_timeout', return_value=.02):
+            with self.assertRaisesRegex(InputNotSubmitted, '^prompt_input_timeout$'):
+                await self.submit()
+        self.checkpoint.assert_not_awaited()
+        self.send.assert_not_awaited()
 
 
 class ImageCreditCompatibility(unittest.TestCase):
