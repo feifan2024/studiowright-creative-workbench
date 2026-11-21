@@ -82,10 +82,8 @@ def claim(pool, auto):
                 return None
             eligible=sorted(k for k in available if official.reason(db,k,available) is None and not busy_official(db,k))
             if not eligible:return None
-            row=db.execute('SELECT last_account FROM official_pool_cursor WHERE id=1').fetchone()
-            last=row[0] if row else ''
-            key=next((k for k in eligible if k>last),eligible[0]);request_id=str(uuid.uuid4())
-            db.execute('INSERT INTO official_pool_cursor VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(key,))
+            key=official.rotate_account(db,eligible,advanced=False)
+            request_id=str(uuid.uuid4())
             db.execute("INSERT INTO requests(request_id,account_key,prompt_digest,status,created,note,selection) VALUES(?,?,?,'dispatching',?,?,?)",
                        (request_id,key,hashlib.sha256(((SHOT_PROMPT if shot else PROMPT)+ident).encode()).hexdigest(),now,'正在分析素材；固定账号，不会自动重试。','auto'))
             # Reuse the official pool's busy and unknown guards without creating a chat.

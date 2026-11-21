@@ -334,10 +334,13 @@ class OfficialPool:
 
     def rotate_account(self, db, eligible, advanced):
         cursor='official_advanced_pool_cursor' if advanced else 'official_pool_cursor'
-        circle=self.circle_order(eligible)
         row=db.execute(f'SELECT last_account FROM {cursor} WHERE id=1').fetchone()
         last=row[0] if row else ''
-        account=circle[(circle.index(last)+1)%len(circle)] if last in circle else circle[0]
+        candidates=set(eligible)
+        # Keep the previous position in the circle even when that account is temporarily unavailable.
+        circle=self.circle_order(sorted(candidates | {last}) if last else eligible)
+        start=circle.index(last)+1 if last in circle else 0
+        account=next(key for key in circle[start:]+circle[:start] if key in candidates)
         db.execute(f'INSERT INTO {cursor}(id,last_account) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(account,))
         return account
 
