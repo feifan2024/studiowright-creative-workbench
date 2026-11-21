@@ -376,7 +376,7 @@ class Store:
             previous = db.execute("""SELECT e.*,r.state FROM flow_task_execution_rows e
                 LEFT JOIN flow_retry_roots r ON r.root_id=e.root_id
                 WHERE e.root_id=? ORDER BY e.ordinal DESC LIMIT 1""", (root,)).fetchone()
-            repeated = db.execute("SELECT project,reason FROM flow_retry_executions WHERE root_id=? AND ordinal=?",
+            repeated = db.execute("SELECT project,retry_reason AS reason FROM flow_task_execution_rows WHERE root_id=? AND ordinal=?",
                                   (root,expected_ordinal+1)).fetchone()
             if repeated and repeated['reason']=='same_account' and repeated['project']==project:
                 return root

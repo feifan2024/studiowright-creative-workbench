@@ -36,6 +36,8 @@ def allowed_route(method, target):
         if re.fullmatch(r'/api/tasks/[A-Za-z0-9_-]{1,128}(?:/files/[0-9]{1,4})?', path):
             return 'flow'
     if method == 'POST' and not parts.query:
+        if re.fullmatch(r'/api/tasks/[A-Za-z0-9_-]{1,128}/retry', path):
+            return 'flow'
         if path in ('/api/music/jobs', '/api/conversations', '/api/real-pool/chat', '/api/real-pool/image-analysis',
                     '/api/real-pool/image-analysis-validate', '/api/real-pool/flow', '/api/real-pool/flow-validate'):
             return 'workbench'
@@ -98,8 +100,9 @@ def handler_for(store, upstream_port=18920, flow_port=18888):
             target_port = upstream_port if route == 'workbench' else flow_port
             headers = {'Host': f'127.0.0.1:{target_port}', 'Accept': self.headers.get('Accept', '*/*')}
             if self.command == 'POST':
+                request_header = 'X-Console-Request' if route == 'flow' else 'X-Workbench-Request'
                 headers.update({'Content-Type': ctype, 'Content-Length': str(size),
-                                'Origin': f'http://127.0.0.1:{target_port}', 'X-Workbench-Request': '1'})
+                                'Origin': f'http://127.0.0.1:{target_port}', request_header: '1'})
                 request_id = self.headers.get('Idempotency-Key')
                 if request_id:
                     headers['Idempotency-Key'] = request_id

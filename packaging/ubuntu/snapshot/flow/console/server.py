@@ -23,7 +23,7 @@ from account_pacing import account_status, resume_after_review
 from adapter import AccountWindowBusy, PreSubmissionTransient, PreSubmissionFailure
 from api_keys import APIKeys
 from account_insights import Insights
-from console_store import RETRY_KINDS, Store
+from console_store import MAX_GENERATION_RETRIES, RETRY_KINDS, Store
 from dispatch_limit import DispatchLimit
 from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
 from web_auth import WebAuth
@@ -866,6 +866,8 @@ def create_app(root, adapter, test=False):
     async def submit(request):
         try:
             body = await payload(request)
+            if body.keys() & {'retry_of', 'retry_task_id', 'original_task_id', 'task_id', 'root_id', 'expected_ordinal'}:
+                raise ValueError('重试请使用 /api/tasks/{原任务编号}/retry。')
             with_references = request.url.path == '/api/tasks/with-references'
             if with_references and body.get('kind') not in ('image', 'video'):
                 raise ValueError('参考图任务只支持图生图和 Omni 多参考视频。')
@@ -876,7 +878,10 @@ def create_app(root, adapter, test=False):
             if ('auto_retry' in body and type(automatic) is not bool) or (automatic and (args[2] not in RETRY_KINDS or args[3]['count'] != 1)):
                 raise ValueError('任务重试设置不正确。')
             row = c.store.create_task(*args, auto_retry=automatic)
-            return JSONResponse(c.public_task(row), status_code=202)
+            canonical, _ = public_task_lookup(row['id'])
+            if canonical is None:
+                return JSONResponse({'error': '原任务关联待核对。'}, status_code=409)
+            return JSONResponse(c.public_task(canonical), status_code=202)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             return JSONResponse({"error": safe_error(exc)}, status_code=400)
 
@@ -896,6 +901,30 @@ def create_app(root, adapter, test=False):
         retry = c.store.retry_detail(ident)
         root = retry['root_id'] if retry else ident
         return c.store.task(root), root
+
+    async def retry_task(request):
+        ident = request.path_params['ident']
+        try:
+            body = await payload(request)
+            ordinal = body.get('expected_ordinal')
+            if (set(body) != {'expected_ordinal', 'confirm_generation'} or body['confirm_generation'] is not True
+                    or type(ordinal) is not int or not 0 <= ordinal <= MAX_GENERATION_RETRIES):
+                raise ValueError('请填写已核对的尝试序号，并明确确认生成。')
+        except (ValueError, TypeError):
+            return JSONResponse({'error': '请填写已核对的尝试序号，并明确确认生成。'}, status_code=400)
+        row, root = public_task_lookup(ident)
+        if row is None:
+            return JSONResponse({'error': '任务不存在。'}, status_code=404)
+        detail = c.store.retry_detail(root)
+        target = next((a for a in (detail or {}).get('attempts', ()) if a['ordinal'] == ordinal), None)
+        if not target:
+            return JSONResponse({'error': '原任务没有可重试的尝试，请核对当前状态。'}, status_code=409)
+        try:
+            c.store.enqueue_same_account_image_retry(root, target['id'], target['project'], expected_ordinal=ordinal)
+        except ValueError as exc:
+            return JSONResponse({'error': safe_error(exc)}, status_code=409)
+        public, _ = c.task_view(row)
+        return JSONResponse({'task_id': root, 'status': public['status']}, status_code=202)
 
     async def task_status(request):
         ident = request.path_params['ident']
@@ -1386,6 +1415,7 @@ def create_app(root, adapter, test=False):
         Route("/api/tasks", submit, methods=["POST"]),
         Route("/api/tasks/with-references", submit, methods=["POST"]),
         Route("/api/tasks/{ident}", task_status, methods=["GET"]),
+        Route("/api/tasks/{ident}/retry", retry_task, methods=["POST"]),
         Route("/api/tasks/{ident}/cancel", cancel, methods=["POST"]),
         Route("/api/tasks/{ident}/files/{index:int}", download),
         Mount("/static", StaticFiles(directory=HERE / "static"), name="static"),

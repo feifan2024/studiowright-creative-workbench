@@ -37,5 +37,5 @@ class APIKeys:
     @staticmethod
     def permits(key, method, path):
         if method in ("GET", "HEAD"):
-            return path == "/api/state" or path.startswith("/api/library") and not path.startswith("/api/library/config") or path.startswith("/api/material-library/assets") or path == "/api/material-library/facets" or bool(re.fullmatch(r"/api/tasks/[^/]+/files/\d+", path))
-        return key["scope"] == "generate" and method == "POST" and (path == "/api/tasks" or bool(re.fullmatch(r"/api/tasks/[^/]+/cancel", path)))
+            return path == "/api/state" or path.startswith("/api/library") and not path.startswith("/api/library/config") or path.startswith("/api/material-library/assets") or path == "/api/material-library/facets" or bool(re.fullmatch(r"/api/tasks/[^/]+(?:/files/\d+)?", path))
+        return key["scope"] == "generate" and method == "POST" and (path == "/api/tasks" or bool(re.fullmatch(r"/api/tasks/[^/]+/(?:cancel|retry)", path)))

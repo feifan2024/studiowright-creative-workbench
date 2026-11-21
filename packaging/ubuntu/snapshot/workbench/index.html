@@ -416,6 +416,8 @@ print(call(&quot;/api/library?&quot; + query))</code></pre>
               <div class="api-endpoint"><b>GET</b><code>/api/real-pool/requests/{请求编号}</code><span>查询文字或识图。status 为 completed 时，response 是回复；处理中继续查，失败或未知时读 note。</span></div>
               <div class="api-endpoint"><b>GET</b><code>/api/real-pool/flow-requests/{请求编号}</code><span>查询提交记录。task_id 始终是原任务号，task 是最新执行结果。</span></div>
               <div class="api-endpoint"><b>GET</b><code>/api/tasks/{原任务编号}</code><span>直接查询最新状态和下载路径，换号重试后仍用原任务号。</span></div>
+              <div class="api-endpoint"><b>POST</b><code>/api/tasks/{原任务编号}/retry</code><span>确认单图失败后，沿用该次的账号、项目和参数，继续使用原任务号。请求体为 <code>{"expected_ordinal":0,"confirm_generation":true}</code>。</span></div>
+              <p><code>expected_ordinal</code> 填原任务里最近一次已核对尝试的 <code>ordinal</code>，首次为 <code>0</code>。同一个尝试序号重复提交只补跑一次。收到 <code>202</code> 后继续查原任务号。任务结果待核对或已变化时，接口返回 <code>409</code>。</p>
               <div class="api-endpoint"><b>GET</b><code>/api/tasks/{任务编号}/files/{序号}</code><span>下载生成文件。使用任务的 downloads[].path，带同一密钥，返回文件字节。</span></div>
               <div class="api-code-head"><span>复制查询与下载</span><button type="button" data-copy-code="api-code-result">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-result"># rid 为发送时保存的编号。查文字或识图：
 # print(call("/api/real-pool/requests/" + rid))
