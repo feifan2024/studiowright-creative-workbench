@@ -11,6 +11,38 @@ function load(name, context) {
   vm.runInContext(match[0], context);
 }
 
+test('overview renders one shared quota card with both time windows', () => {
+  const target = {
+    querySelector: selector => selector === 'details[open]' ? null : {addEventListener() {}},
+    querySelectorAll: () => [],
+    contains: () => false,
+    setAttribute() {}
+  };
+  const context = vm.createContext({
+    $: () => target,
+    document: {},
+    state: {},
+    officialQuotaReadFailed: false,
+    officialQuotaRequest: null,
+    officialQuotaData: {
+      advanced_pool: {
+        known_accounts: 2,
+        total_accounts: 3,
+        windows: {
+          five_hour: {total_remaining_percent: 175, average_remaining_percent: 87.5},
+          weekly: {total_remaining_percent: 120, average_remaining_percent: 60}
+        }
+      }
+    }
+  });
+  for (const name of ['esc', 'savedQuotaSummary', 'renderOfficialQuota']) load(name, context);
+  vm.runInContext('renderOfficialQuota()', context);
+  assert.equal((target.innerHTML.match(/class="quota-shared-card"/g) || []).length, 1);
+  assert.match(target.innerHTML, /Hydrogen \/ Neon 共用 · 2 \/ 3 个账号已读/);
+  assert.match(target.innerHTML, /5 小时总账池额度<\/span><strong>175%/);
+  assert.match(target.innerHTML, /每周总账池额度<\/span><strong>120%/);
+});
+
 test('account avatars mark only enabled advanced Gemini model choices', () => {
   const context = vm.createContext({});
   load('esc', context);

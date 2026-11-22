@@ -177,7 +177,7 @@
   "workbench/server.py": "908914bcb2485dd3a93b79d5cfc47dc289ab0b728c16f7fc60ad1d4c95537e71",
   "workbench/shared_session_controller.py": "d05a60862c8d0eb02fd920eaad189c3aa4a4f93c80abfc4b7deae5735fb69c01",
   "workbench/simulated_conversations.py": "5de688317438f9cc8c1d6827c7504008c70edc598775f5c2a677501ce1dde478",
-  "workbench/style.css": "1dd0a94d61a92f75eb44cf6f2604cdd02860bfea19f5cf2bb15855cb6729d78d",
+  "workbench/style.css": "f33be0688b485134400826f990d01bce4f50e550ba5bd803cf865e2e88cb138a",
   "workbench/task_coordinator.py": "ba78e66de5320bc818684f31c09f0dbf9b96c84eab313d806af0b6212c75dca7",
   "workbench/task_feed.py": "08df5c04adbf4e950459894e88b71a476a9fc4b6a9f74e08b9199eea2162dbb0",
   "workbench/task_window_registry.py": "da0b73db6a0160d6f3a8fa20d523cda71551eb38115ce4acceab2b7d69de5f08",

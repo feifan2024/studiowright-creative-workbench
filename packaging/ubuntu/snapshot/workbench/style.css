@@ -634,8 +634,8 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .quota-refresh { flex: none; border: 0; padding: 6px 0; background: none; color: #367057; font-size: 12px; font-weight: 600; }
 .quota-details,.dashboard-runtime-details { border-top: 1px solid #e8eee9; font-size: 12px; }
 .dashboard-runtime-details { order: 3; }
-.quota-shared-card { min-width: 0; padding: 14px; border: 1px solid #e3ebe5; border-radius: 10px; background: #f8fbf9; }
-.quota-shared-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: #385b45; }
+.quota-shared-card { grid-column: span 2; min-width: 0; padding: 14px; border: 1px solid #e3ebe5; border-radius: 10px; background: #f8fbf9; }
+.quota-shared-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; color: #385b45; }
 .quota-shared-heading strong { font-size: 14px; }
 .quota-shared-heading span { color: #748477; font-size: 11px; white-space: nowrap; }
 .quota-shared-windows { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 12px; }
