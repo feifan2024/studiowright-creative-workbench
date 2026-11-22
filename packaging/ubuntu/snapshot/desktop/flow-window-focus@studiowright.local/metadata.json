@@ -1,0 +1,9 @@
+{
+  "uuid": "flow-window-focus@studiowright.local",
+  "name": "StudioWright Flow window focus",
+  "description": "Read geometry and focus an existing Flow account window; never arrange or keep browser pages resident.",
+  "shell-version": [
+    "46"
+  ],
+  "version": 2
+}

@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 from pathlib import Path
 import shutil
 import tarfile
+import tempfile
 
 BASE = Path(__file__).resolve().parent
-STAGE = BASE / 'server-payload'
 DIST = BASE / 'dist'
 OLD_ID = 'kbnibljeinmjmmpholicjkaiehmilbbk'
 
@@ -23,9 +22,7 @@ def replace_exact(path, before, after, count, already=()):
     path.write_text(text.replace(before, after), encoding='utf-8')
 
 
-def main():
-    if STAGE.exists():
-        raise SystemExit('服务端封装目录已存在，已停止以避免覆盖。')
+def build(STAGE, archive, output):
     extension = json.loads((BASE / 'client-extension.json').read_text(encoding='utf-8'))['id']
     if len(extension) != 32 or any(c not in 'abcdefghijklmnop' for c in extension):
         raise RuntimeError('插件身份格式不正确。')
@@ -33,7 +30,9 @@ def main():
     shutil.copyfile(BASE / 'server/installer.py', STAGE / 'installer.py')
     shutil.copyfile(BASE / 'server/discovery.py', STAGE / 'discovery.py')
     shutil.copyfile(BASE / 'server/discovery_install.py', STAGE / 'discovery_install.py')
-    shutil.copytree(BASE / 'snapshot', STAGE / 'snapshot')
+    shutil.copytree(BASE / 'snapshot', STAGE / 'snapshot',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.log',
+                                                  '*.sqlite*', '*.db', '*.db-*', '.env*'))
     shutil.copytree(BASE / 'wheelhouse-linux', STAGE / 'wheels')
     server = STAGE / 'snapshot/flow/console/server.py'
     app = STAGE / 'snapshot/flow/console/static/app.js'
@@ -77,22 +76,24 @@ def main():
     for changed in ('flow/console/server.py', 'flow/console/static/app.js'):
         captured[changed] = hashlib.sha256((STAGE / 'snapshot' / changed).read_bytes()).hexdigest()
     original_manifest.write_text(json.dumps(captured, indent=2, sort_keys=True), encoding='utf-8')
-    notice = ('创作工作台 Ubuntu 服务端安装包\n\n'
+    notice = ('StudioWright 算力中心 Ubuntu 服务端安装包\n\n'
+              'Ubuntu 24.04 桌面版（x86-64、GNOME 46）\n'
+              '安装系统依赖：bash 安装包.run --mode system-deps\n'
               '复用现有服务：bash 安装包.run --mode reuse\n'
               '复用并开启局域网发现：bash 安装包.run --mode reuse --enable-discovery\n'
-              '全新安装：bash 安装包.run --mode new\n'
+              '全新安装并保持接电时常开：bash 安装包.run --mode new --keep-awake-on-ac\n'
+              '保留系统原有电源策略：bash 安装包.run --mode new\n'
               '仅查看状态：bash 安装包.run --mode inspect\n\n'
               '复用模式不修改现有服务或数据；启用发现会新增独立的局域网发现服务。全新安装发现已有程序、数据、服务或端口时会停止。\n'
-              '支持 Ubuntu x86-64、Python 3.12，需 Chrome/Chromium、Xvfb、xauth、dpkg-deb 及用户级 systemd。\n'
-              '程序依赖已随包提供；账号、密钥、素材和历史记录不在安装包中。\n')
+              '含开机恢复、GNOME 窗口定位及桌面输入助手。安装后需重新登录桌面并授权输入。\n'
+              'Python 依赖离线提供，系统依赖从 Ubuntu 仓库安装，Chrome 须事先安装。\n'
+              '账号、密钥、素材和历史记录不在安装包中。\n')
     (STAGE / '使用说明.txt').write_text(notice, encoding='utf-8')
     manifest = {}
     for path in sorted(STAGE.rglob('*')):
         if path.is_file() and not path.is_symlink() and path.name != 'manifest.json':
             manifest[path.relative_to(STAGE).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     (STAGE / 'manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8')
-    DIST.mkdir(exist_ok=True)
-    archive = BASE / 'server-payload.tar.gz'
     with tarfile.open(archive, 'w:gz', compresslevel=1) as tar:
         for path in sorted(STAGE.rglob('*')):
             if path.is_file() and not path.is_symlink():
@@ -113,12 +114,22 @@ def main():
         '"$runner" -B "$scratch/installer.py" "$@"',
         'exit $?']
     header = ('\n'.join(lines).replace('PAYLOAD_LINE', str(len(lines) + 1)) + '\n').encode('utf-8')
-    output = DIST / 'StudioWright-Ubuntu-LAN-Setup.run'
     with output.open('xb') as stream, archive.open('rb') as payload:
         stream.write(header)
         shutil.copyfileobj(payload, stream, 1024 * 1024)
     print(json.dumps({'server_installer': str(output), 'files': len(manifest),
                       'bytes': output.stat().st_size, 'extension_id': extension}))
+
+
+def main():
+    DIST.mkdir(exist_ok=True)
+    version = (BASE.parents[1] / 'VERSION').read_text(encoding='utf-8').strip()
+    output = DIST / f'StudioWright-Ubuntu-24.04-Setup-{version}.run'
+    if output.exists():
+        raise SystemExit(f'安装包已存在，未覆盖：{output}')
+    with tempfile.TemporaryDirectory(prefix='studiowright-build-', dir=DIST) as directory:
+        temp = Path(directory)
+        build(temp / 'payload', temp / 'payload.tar.gz', output)
 
 
 if __name__ == '__main__':

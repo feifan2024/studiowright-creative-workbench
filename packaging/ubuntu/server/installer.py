@@ -7,6 +7,7 @@ unit and listening port before writing anything.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -26,6 +27,10 @@ PACKAGE = Path(__file__).resolve().parent
 UNITS = ('studiowright-console.service', 'creative-unified-workbench.service',
          'creative-unified-api.service')
 PORTS = (18888, 18920, 18922)
+DESKTOP_UNITS = ('studiowright-flow-browser-recovery.service', 'studiowright-boot-readiness.service')
+FOCUS_EXTENSION = 'flow-window-focus@studiowright.local'
+SYSTEM_PACKAGES = ('python3.12-venv', 'python3-gi', 'xvfb', 'xauth', 'xclip', 'wl-clipboard',
+                   'libglib2.0-bin', 'xdg-desktop-portal-gnome', 'openssh-server')
 
 
 def command(*args, check=True, timeout=30, env=None):
@@ -111,15 +116,19 @@ def paths(home):
             'gemini': share / 'gemini-hanaoka-trial',
             'workbench': share / 'creative-unified-workbench',
             'state': home / '.local/state/creative-unified-workbench',
+            'extension': share / 'gnome-shell/extensions' / FOCUS_EXTENSION,
             'units': units}
 
 
 def preflight_new(home):
     if sys.platform != 'linux' or platform.machine().lower() not in ('x86_64', 'amd64'):
         raise RuntimeError('此安装包目前支持 Ubuntu x86-64。')
+    release = platform.freedesktop_os_release()
+    if release.get('ID') != 'ubuntu' or release.get('VERSION_ID') != '24.04' or os.geteuid() == 0:
+        raise RuntimeError('请以普通桌面用户在 Ubuntu 24.04 上安装。')
     if sys.version_info[:2] != (3, 12):
         raise RuntimeError('当前安装包需要 Python 3.12 和 python3.12-venv。')
-    needed = ('systemctl', 'dpkg-deb', 'Xvfb', 'xauth')
+    needed = ('systemctl', 'dpkg-deb', 'Xvfb', 'xauth', 'gsettings', 'gdbus', 'gnome-shell', 'wl-copy')
     missing = [name for name in needed if not shutil.which(name)]
     if missing:
         raise RuntimeError('缺少系统组件：' + '、'.join(missing))
@@ -132,12 +141,14 @@ def preflight_new(home):
     except ImportError:
         raise RuntimeError('缺少 Python 虚拟环境组件，请安装 python3.12-venv。') from None
     roots = paths(home)
-    conflict = [str(roots[k]) for k in ('flow', 'gemini', 'workbench', 'state')
+    if not command('gnome-shell', '--version').stdout.strip().split()[-1].startswith('46.'):
+        raise RuntimeError('此安装包的桌面组件适用于 Ubuntu 24.04 的 GNOME 46。')
+    conflict = [str(roots[k]) for k in ('flow', 'gemini', 'workbench', 'state', 'extension')
                 if roots[k].exists() or roots[k].is_symlink()]
-    conflict += [str(roots['units'] / u) for u in UNITS
+    conflict += [str(roots['units'] / u) for u in (*UNITS, *DESKTOP_UNITS)
                  if (roots['units'] / u).exists() or (roots['units'] / u).is_symlink()]
     conflict += ['端口 ' + str(p) for p in PORTS if occupied(p)]
-    for u in UNITS:
+    for u in (*UNITS, *DESKTOP_UNITS):
         if command('systemctl', '--user', 'cat', u, check=False).returncode == 0:
             conflict.append('服务 ' + u)
     if conflict:
@@ -159,16 +170,21 @@ def unit_quote(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def write_unit(unit_dir, name, program, workdir, environment=(), after='network.target'):
+def write_unit(unit_dir, name, program, workdir, environment=(), after='network.target',
+               target='default.target', oneshot=False):
     directory = str(workdir)
     if not Path(directory).is_absolute() or any(c in directory for c in ('\r', '\n')):
         raise ValueError('invalid systemd working directory')
-    parts = ['[Unit]', 'Description=StudioWright ' + name, 'After=' + after,
-             '', '[Service]', 'Type=simple', 'WorkingDirectory=' + directory.replace('%', '%%')]
+    parts = ['[Unit]', 'Description=StudioWright ' + name, 'After=' + after]
+    if target == 'graphical-session.target':
+        parts.append('PartOf=graphical-session.target')
+    parts.extend(['', '[Service]', 'Type=oneshot' if oneshot else 'Type=simple',
+                  'WorkingDirectory=' + directory.replace('%', '%%')])
     parts.extend('Environment=' + unit_quote(k + '=' + str(v)) for k, v in environment)
-    parts += ['ExecStart=' + ' '.join(unit_quote(v) for v in program),
-              'Restart=on-failure', 'RestartSec=3', 'NoNewPrivileges=yes',
-              'UMask=0077', '', '[Install]', 'WantedBy=default.target', '']
+    parts.append('ExecStart=' + ' '.join(unit_quote(v).replace('%', '%%') for v in program))
+    parts.extend(['RemainAfterExit=yes', 'TimeoutStartSec=1500'] if oneshot else
+                 ['Restart=on-failure', 'RestartSec=3'])
+    parts.extend(['NoNewPrivileges=yes', 'UMask=0077', '', '[Install]', 'WantedBy=' + target, ''])
     with (unit_dir / name).open('x', encoding='utf-8') as stream:
         stream.write('\n'.join(parts))
 
@@ -181,7 +197,28 @@ def make_venv(python, target, requirements, wheels):
     return interp
 
 
-def new_install(home):
+def install_desktop(roots, keep_awake):
+    state = roots['state']
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for device in ('keyboard', 'pointer'):
+        runtime = state / ('desktop-' + device)
+        runtime.mkdir(mode=0o700)
+        shutil.copyfile(PACKAGE / 'snapshot/workbench-helpers' / (device + '_helper.py'),
+                        runtime / 'helper.py')
+    copy_new(PACKAGE / 'snapshot/desktop' / FOCUS_EXTENSION, roots['extension'])
+    schema = 'org.gnome.shell'
+    raw = command('gsettings', 'get', schema, 'enabled-extensions').stdout.strip()
+    extensions = ast.literal_eval(raw.removeprefix('@as '))
+    if FOCUS_EXTENSION not in extensions:
+        command('gsettings', 'set', schema, 'enabled-extensions',
+                json.dumps(extensions + [FOCUS_EXTENSION]))
+    if keep_awake:
+        command('gsettings', 'set', 'org.gnome.desktop.session', 'idle-delay', '0')
+        command('gsettings', 'set', 'org.gnome.settings-daemon.plugins.power',
+                'sleep-inactive-ac-type', 'nothing')
+
+
+def new_install(home, keep_awake=False):
     roots = preflight_new(home)
     verify_payload()
     flow, work, units = (roots[k] for k in ('flow', 'workbench', 'units'))
@@ -203,7 +240,7 @@ def new_install(home):
     copy_new(PACKAGE / 'snapshot/workbench', work)
     units.mkdir(parents=True, exist_ok=True)
     pythonpath = flow / 'source/src'
-    common = [('PYTHONPATH', pythonpath), ('SW_ROOT', flow),
+    common = [('PYTHONPATH', os.pathsep.join(map(str, (pythonpath, work, flow / 'console')))), ('SW_ROOT', flow),
               ('PATH', str(flow / 'bin') + ':' + os.environ.get('PATH', '/usr/bin:/bin'))]
     write_unit(units, UNITS[0], [flow_python, flow / 'console/server.py'], flow / 'console', common)
     write_unit(units, UNITS[1], [flow_python, '-B', work / 'server.py', '--port', '18920',
@@ -211,13 +248,23 @@ def new_install(home):
                work, common, 'network.target studiowright-console.service')
     write_unit(units, UNITS[2], [flow_python, '-B', work / 'unified_api.py'], work, common,
                'network.target creative-unified-workbench.service')
+    install_desktop(roots, keep_awake)
+    write_unit(units, DESKTOP_UNITS[0], [flow_python, '-B', work / 'flow_browser_recovery.py'],
+               work, common, target='graphical-session.target')
+    write_unit(units, DESKTOP_UNITS[1], [flow_python, '-B', work / 'boot_flow_readiness.py'],
+               work, common, 'creative-unified-workbench.service ' + DESKTOP_UNITS[0],
+               target='graphical-session.target', oneshot=True)
     command('systemctl', '--user', 'daemon-reload')
     for unit in UNITS:
         command('systemctl', '--user', 'enable', '--now', unit, timeout=45)
+    command('systemctl', '--user', 'enable', *DESKTOP_UNITS)
+    if unit_state('graphical-session.target') == 'active':
+        command('systemctl', '--user', 'start', '--no-block', *DESKTOP_UNITS)
     for _ in range(30):
         info = status()
         if all(info[n] for n in ('flow', 'workbench', 'api')):
-            print('安装完成，服务已启动。账号、素材和历史记录均为空；Gemini 需配置官方 Antigravity CLI 并单独授权。')
+            print('服务已启动。请重新登录 GNOME 以加载桌面扩展，并按 Ubuntu 提示授权桌面输入。')
+            print('请接入账号；Gemini 需配置官方 Antigravity CLI 并单独授权。')
             return
         time.sleep(1)
     raise RuntimeError('程序已安装，但服务尚未全部就绪，请检查服务状态；安装数据已保留。')
@@ -225,7 +272,9 @@ def new_install(home):
 
 def main():
     parser = argparse.ArgumentParser(description='创作工作台 Ubuntu 服务端安装')
-    parser.add_argument('--mode', choices=('reuse', 'new', 'inspect'))
+    parser.add_argument('--mode', choices=('reuse', 'new', 'inspect', 'system-deps'))
+    parser.add_argument('--keep-awake-on-ac', action='store_true',
+                        help='全新安装时关闭桌面空闲计时和接通电源时的自动休眠')
     parser.add_argument('--enable-discovery', action='store_true', help='为现有服务启用局域网发现')
     parser.add_argument('--discovery-ssh-port', type=int, help='局域网发现使用的 SSH 端口')
     args = parser.parse_args()
@@ -240,7 +289,15 @@ def main():
         if not args.mode:
             raise SystemExit('未执行安装。')
     verify_payload()
-    if args.mode == 'inspect':
+    if args.keep_awake_on_ac and args.mode != 'new':
+        parser.error('--keep-awake-on-ac 仅用于 --mode new')
+    if args.mode == 'system-deps':
+        release = platform.freedesktop_os_release()
+        if release.get('ID') != 'ubuntu' or release.get('VERSION_ID') != '24.04':
+            raise RuntimeError('系统依赖模式适用于 Ubuntu 24.04。')
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['sudo', 'apt-get', 'install', *SYSTEM_PACKAGES], check=True)
+    elif args.mode == 'inspect':
         print(json.dumps(status(), ensure_ascii=False))
     elif args.mode == 'reuse':
         if not check_reuse():
@@ -248,7 +305,7 @@ def main():
         if args.enable_discovery:
             enable_discovery(args.discovery_ssh_port)
     else:
-        new_install(Path.home())
+        new_install(Path.home(), keep_awake=args.keep_awake_on_ac)
         enable_discovery(args.discovery_ssh_port)
 
 
