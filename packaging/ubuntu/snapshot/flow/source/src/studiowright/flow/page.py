@@ -469,6 +469,7 @@ class FlowPage:
             raise FlowError('desktop_focus_unconfirmed')
         if page.url.split('?')[0].split('#')[0].rstrip('/') != url:
             raise FlowError('task_window_project_unconfirmed')
+        record('flow_page_activated')
         await require_empty_editor(page)
         flow = cls(page, project_id, session)
         flow._foreground_lease, flow._foreground_driver, flow._foreground_target = lease, driver, target

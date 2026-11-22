@@ -866,7 +866,7 @@ function renderProjects() {
 
 function taskFailureMarkup(item) {
   const labels = {task_window_binding_created:'建立账号、网页与桌面窗口的唯一绑定',task_window_binding_reused:'重新核对并复用固定窗口绑定',task_window_binding_repaired:'恢复变化后的窗口绑定',task_preparation_started:'开始准备',fixed_window_reused:'复用账号固定窗口',fixed_window_created:'建立账号固定窗口',
-    preparation_recovery:'尝试恢复页面',preparation_recovered:'页面恢复成功',project_page_reload:'重新加载原项目页面',desktop_overview_dismissed:'收起桌面总览，恢复浏览器前台',
+    preparation_recovery:'尝试恢复页面',preparation_recovered:'页面恢复成功',project_page_reload:'重新加载原项目页面',flow_page_activated:'已激活 Flow 项目页',desktop_overview_dismissed:'收起桌面总览，恢复浏览器前台',
     input_preparation_recovery:'恢复窗口焦点与输入准备',paste_started:'开始单次粘贴',input_preparation_stopped:'输入准备停止，未重复粘贴',
     original_image_result_lookup:'查询原图片结果',original_video_address_lookup:'补取原视频地址',
     original_video_grid_download:'从项目列表下载原片',original_download_retry:'重新下载原文件',original_download_recovered:'原文件下载恢复成功',refresh_original_download_address:'刷新原作品下载地址',window_retained:'保留固定窗口'};
@@ -4259,6 +4259,7 @@ $("flowSend").addEventListener("click", async () => {
   const id = crypto.randomUUID();
   const payload = {method: "flow.generate", kind, params, confirm: true};
   if (project_key && project_key !== "auto") payload.project_key = project_key;
+  if (params.count === 1) payload.auto_retry = $("flowAutoRetry").checked;
   $("flowAutoRetry").disabled = true;
   sessionStorage.setItem("flowRequest", id);
   state.flowBusy = true;

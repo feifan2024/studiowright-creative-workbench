@@ -1508,11 +1508,10 @@ class RealPool:
             aliases = {"omni-flash-1.1": "omni-flash", "omni-flash-1.2": "omni-flash-2"}
             if params["model"] in aliases:
                 params = dict(params, model=aliases[params["model"]])
-        # 2026-11-07: switching on confirmed rejections is enforced server-side.
-        # The field is rejected outright so callers notice instead of relying on
-        # a silently ignored flag; retry behavior follows kind and count only.
-        retry_omitted = True
-        auto_retry = params.get('count') == 1
+        retry_omitted = 'auto_retry' not in data
+        auto_retry = data.get('auto_retry', params.get('count') == 1)
+        if type(auto_retry) is not bool:
+            raise ValueError('auto_retry 必须是布尔值。')
         if auto_retry and params.get('count') != 1:
             raise ValueError('换号重试只支持每次生成一张图片或一段视频。')
         required = {'prompt', 'model', 'aspect', 'count', 'resolution', 'duration'}

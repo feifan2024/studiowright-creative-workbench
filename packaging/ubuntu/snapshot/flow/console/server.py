@@ -270,18 +270,22 @@ class Console:
         if self.test:
             return True
         try:
-            from portal_keyboard_client import PortalKeyboard
-            return PortalKeyboard(None).ready()
+            from input_backend import open_keyboard
+            return open_keyboard(None).ready()
         except ImportError:
+            return False
+        except Exception:
+            # A missing /dev/uinput or a failed helper must only make the queue
+            # wait; it must never escape the scheduler loop and stop dispatch.
             return False
 
     async def prepare_desktop_keyboard(self):
         # A single shared permission request, outside account/dispatch slots.
         try:
             from flow_browser_state import gui_env
-            from portal_keyboard_client import PortalKeyboard
+            from input_backend import open_keyboard
             env = await asyncio.to_thread(gui_env)
-            await PortalKeyboard(None, gui_environment=env).ensure_ready(timeout=45)
+            await open_keyboard(None, gui_environment=env).ensure_ready(timeout=45)
         except (ImportError, OSError, RuntimeError, subprocess.SubprocessError, ValueError):
             pass  # The queue remains intact; continue observing the existing session.
 

@@ -103,6 +103,30 @@ class RetryIdentity(unittest.TestCase):
         self.assertEqual(self.retry(ident).status_code, 409)
         self.assertIsNone(self.store.claim(set()))
 
+    def test_explicit_single_attempt_never_enters_the_switch_queue(self):
+        for evidence in ('transient_before_submit', 'provider_rejected_unusual', None):
+            with self.subTest(evidence=evidence):
+                key = 'single-attempt-' + str(uuid.uuid4())
+                response = self.submit(key, auto_retry=False)
+                self.assertEqual(response.status_code, 202, response.text)
+                ident = response.json()['id']
+                self.assertIs(response.json()['retry']['auto_retry'], False)
+                self.assertEqual(self.submit(key, auto_retry=False).json()['id'], ident)
+                self.assertEqual(self.submit(key, auto_retry=True).status_code, 400)
+                self.assertEqual(self.store.claim(set())['id'], ident)
+                self.store.finish(ident, error='fixture failure', retry_evidence=evidence)
+                job = self.client.get('/api/tasks/' + ident, headers=self.headers()).json()
+                self.assertIn(job['status'], ('failed', 'interrupted'))
+                self.assertIs(job['retry']['auto_retry'], False)
+                self.assertEqual([attempt['ordinal'] for attempt in job['retry']['attempts']], [0])
+                self.assertEqual(self.store.pending_retry_roots(), [])
+                self.assertIsNone(self.store.claim(set()))
+
+    def test_omitted_retry_setting_preserves_the_default(self):
+        ident = self.fail_original(evidence='provider_rejected_unusual')
+        self.assertIs(self.store.retry_detail(ident)['auto_retry'], True)
+        self.assertEqual([item['root_id'] for item in self.store.pending_retry_roots()], [ident])
+
     def test_older_separate_attempt_resolves_to_its_linked_root(self):
         ident = self.fail_original()
         alias = self.submit('fixture-older-attempt').json()['id']

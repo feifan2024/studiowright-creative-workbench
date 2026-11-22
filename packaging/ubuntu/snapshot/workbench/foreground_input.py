@@ -66,13 +66,73 @@ async def _pacing_wait(record, account_key):
 async def _pointer_drift(driver, target):
     """Small real pointer movements while the window keeps focus."""
     try:
-        from portal_pointer_client import PortalPointer
-        pointer = PortalPointer(target, gui_environment=getattr(driver, 'env', None))
+        from input_backend import open_pointer
+        pointer = open_pointer(target, gui_environment=getattr(driver, 'env', None))
         for _ in range(random.randint(3, 6)):
             await pointer.move(random.randint(-70, 70), random.randint(-24, 24))
             await asyncio.sleep(random.uniform(.08, .22))
     except Exception:
         pass
+
+
+async def _hid_keyboard(driver, target):
+    """Return a ready HID keyboard, or ``None`` when the portal backend is chosen."""
+    from input_backend import open_keyboard
+    keyboard = open_keyboard(target, gui_environment=getattr(driver, 'env', None))
+    try:
+        await keyboard.ensure_ready()
+    except Exception:
+        # A fixed hid policy must fail closed instead of silently typing through
+        # the browser; an auto policy may fall back to the portal.
+        if getattr(keyboard, 'allow_fallback', True) is False:
+            raise
+        return None
+    if getattr(keyboard, 'backend', 'hid') != 'hid':
+        return None
+    return keyboard
+
+
+async def _type_prompt_on_device(driver, page, composer, target, keyboard, prompt, record):
+    """Type ASCII on the device with focus checks; paste the rest via clipboard."""
+    from uinput_hid import can_type
+    # A literal control key such as Enter can trigger the editor's submit action.
+    typed = not any(ord(char) < 32 or ord(char) == 127 for char in prompt) and can_type(prompt)
+    record('typed_text_started' if typed else 'clipboard_paste_started', characters=len(prompt))
+    if not typed:
+        await driver.copy_prompt_and_paste(page, composer, target, prompt)
+        return False
+
+    async def guard():
+        return bool(await driver.confirm_focus(target, page, composer))
+
+    try:
+        await keyboard.type(prompt, guard=guard)
+    except Exception as exc:
+        if str(exc) != 'window_focus_lost':
+            raise
+        # Never continue typing into whatever window now owns the keyboard.
+        try:
+            if await driver.confirm_focus(target, page, composer):
+                await driver.clear_composer(page, composer)
+        except Exception:
+            pass
+        raise InputNotSubmitted('window_focus_lost_during_typing') from exc
+    return True
+
+
+async def _verify_prompt(driver, page, composer, target, prompt, seconds=2.0):
+    """Poll until the editor holds exactly ``prompt``; never retype."""
+    deadline = time.monotonic() + seconds
+    observed = await read_flow_prompt(composer)
+    while observed != prompt:
+        if time.monotonic() >= deadline:
+            raise InputNotSubmitted('pasted_text_mismatch')
+        if not await driver.confirm_focus(target, page, composer):
+            raise InputNotSubmitted('window_focus_lost')
+        await asyncio.sleep(.05)
+        observed = await read_flow_prompt(composer)
+    if not await driver.confirm_focus(target, page, composer):
+        raise InputNotSubmitted('window_focus_lost')
 
 
 async def enter_hybrid_prompt(driver, page, composer, target, prompt):
@@ -169,10 +229,22 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
             if hybrid:
                 try:
                     record('hybrid_input_timeout_budget', seconds=hybrid_input_timeout(prompt), characters=len(prompt))
-                    await asyncio.wait_for(
-                        enter_hybrid_prompt(driver, page, composer, target, prompt),
-                        timeout=hybrid_input_timeout(prompt),
-                    )
+                    # The Flow entry starts here; hardware text must win so the
+                    # browser insert_text route is not the only path in practice.
+                    keyboard = await _hid_keyboard(driver, target)
+                    record('hybrid_input_route', route='hid' if keyboard else 'browser')
+                    if keyboard is not None:
+                        await asyncio.wait_for(
+                            _type_prompt_on_device(driver, page, composer, target,
+                                                   keyboard, prompt, record),
+                            timeout=hybrid_input_timeout(prompt),
+                        )
+                        await _verify_prompt(driver, page, composer, target, prompt)
+                    else:
+                        await asyncio.wait_for(
+                            enter_hybrid_prompt(driver, page, composer, target, prompt),
+                            timeout=hybrid_input_timeout(prompt),
+                        )
                     record('hybrid_input_verified', characters=len(prompt))
                 except asyncio.TimeoutError as exc:
                     raise InputNotSubmitted('prompt_input_timeout') from exc
@@ -181,28 +253,33 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
                 # a single newline through innerText; they contain no draft text.
                 if await driver.composer_text(page, composer) not in ('', '\n'):
                     raise InputNotSubmitted('composer_not_empty')
-                from portal_keyboard_client import PortalKeyboard
-                keyboard = PortalKeyboard(target, gui_environment=getattr(driver, 'env', None))
-                # Short, single-line ASCII may use the portal keyboard; everything
-                # else types per character over CDP, falling back to a single
-                # chunked paste if the CDP path fails.
-                typing = keyboard.ready() and mode == 'type'
-                record('typing_started' if typing else (mode + '_started'), characters=len(prompt))
-                if typing:
-                    if not await driver.confirm_focus(target, page, composer):
-                        raise InputNotSubmitted('window_focus_lost')
-                    await keyboard.type(prompt)
-                elif mode == 'cdp_type':
-                    try:
-                        await driver.type_prompt_chars(page, prompt)
-                    except Exception as exc:
-                        record('cdp_typing_fallback', error=type(exc).__name__)
+                keyboard = await _hid_keyboard(driver, target)
+                # A hardware backend must stay hardware end to end: text that the
+                # HID keymap can reproduce is typed on the device, anything else
+                # (CJK and the like) goes through the clipboard with a real Ctrl+V.
+                # Only the portal path may still fall back to CDP typing.
+                hid_backend = keyboard is not None
+                if hid_backend:
+                    typed_on_device = await _type_prompt_on_device(
+                        driver, page, composer, target, keyboard, prompt, record)
+                else:
+                    typed_on_device = False
+                    mode = mode if mode == 'type' else 'cdp_type'
+                    record(('typing_started' if mode == 'type' else mode + '_started'),
+                           characters=len(prompt))
+                    if mode == 'type':
                         if not await driver.confirm_focus(target, page, composer):
                             raise InputNotSubmitted('window_focus_lost')
-                        await driver.clear_composer(page, composer)
-                        await driver.copy_prompt_and_paste(page, composer, target, prompt)
-                else:
-                    await driver.copy_prompt_and_paste(page, composer, target, prompt)
+                        await driver.type_prompt_chars(page, prompt)
+                    else:
+                        try:
+                            await driver.type_prompt_chars(page, prompt)
+                        except Exception as exc:
+                            record('cdp_typing_fallback', error=type(exc).__name__)
+                            if not await driver.confirm_focus(target, page, composer):
+                                raise InputNotSubmitted('window_focus_lost')
+                            await driver.clear_composer(page, composer)
+                            await driver.copy_prompt_and_paste(page, composer, target, prompt)
                 # Only poll; never repeat a partially entered prompt.
                 deadline = time.monotonic() + 2
                 while (await driver.composer_text(page, composer)).replace('\r\n', '\n') != prompt:
@@ -214,7 +291,10 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
                 if not await driver.confirm_focus(target, page, composer):
                     raise InputNotSubmitted('window_focus_lost')
                 from pointer_sequence import record_input_action
-                record_input_action(target, 'typed_text_verified' if typing else ('cdp_typed_verified' if mode == 'cdp_type' else 'pasted_text_verified'), characters=len(prompt))
+                record_input_action(target, 'typed_text_verified' if typed_on_device else
+                                   ('hid_clipboard_paste_verified' if hid_backend else
+                                    ('cdp_typed_verified' if mode == 'cdp_type' else 'pasted_text_verified')),
+                                   characters=len(prompt))
                 # A human looks the text over before sending; the real pointer drifts meanwhile.
                 await asyncio.sleep(random.uniform(1.5, 4.0))
                 await _pointer_drift(driver, target)

@@ -118,9 +118,9 @@ class WaylandDesktopDriver:
         if len(matched)!=1 or matched[0].get('id')!=target.window_id:return False
         await page.bring_to_front()
         if not await self._os_focus_confirmed(target): return False
-        from portal_pointer_client import PortalPointer
+        from input_backend import open_pointer
         from pointer_sequence import prepare_pointer
-        pointer=PortalPointer(target,gui_environment=self.env)
+        pointer=open_pointer(target,gui_environment=self.env)
         await pointer.ensure_ready()
         # Portal permission prompts can take focus while they are shown.
         if not await self.activate_and_confirm(target): return False
@@ -138,9 +138,9 @@ class WaylandDesktopDriver:
         await page.bring_to_front()
         if not await self._os_focus_confirmed(target): return False
         try:
-            from portal_pointer_client import PortalPointer
+            from input_backend import open_pointer
             from pointer_sequence import prepare_pointer
-            pointer=PortalPointer(target,gui_environment=self.env)
+            pointer=open_pointer(target,gui_environment=self.env)
             await pointer.ensure_ready(timeout=10)
             await prepare_pointer(page=page, composer=composer, target=target,
                                   driver=self, pointer=pointer)
@@ -164,8 +164,8 @@ class WaylandDesktopDriver:
 
     async def copy_prompt_and_paste(self, page, composer, target, prompt):
         if not await self.confirm_focus(target,page,composer): raise ValueError('focus_lost')
-        from portal_keyboard_client import PortalKeyboard
-        keyboard = PortalKeyboard(target, gui_environment=self.env)
+        from input_backend import open_keyboard
+        keyboard = open_keyboard(target, gui_environment=self.env)
         if not keyboard.ready():
             from foreground_input import InputNotSubmitted
             raise InputNotSubmitted('desktop_keyboard_not_ready')
@@ -177,8 +177,8 @@ class WaylandDesktopDriver:
         """Real Ctrl+V per chunk; text arrives in several events, never one blob."""
         import random
         if not await self.confirm_focus(target, page, composer): raise ValueError('focus_lost')
-        from portal_keyboard_client import PortalKeyboard
-        keyboard = PortalKeyboard(target, gui_environment=self.env)
+        from input_backend import open_keyboard
+        keyboard = open_keyboard(target, gui_environment=self.env)
         if not keyboard.ready():
             from foreground_input import InputNotSubmitted
             raise InputNotSubmitted('desktop_keyboard_not_ready')

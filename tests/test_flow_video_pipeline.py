@@ -31,6 +31,72 @@ def flow_modules():
 
 
 class FlowVideoPipeline(unittest.IsolatedAsyncioTestCase):
+    async def test_flow_submit_uses_guarded_input_before_the_submit_checkpoint(self):
+        with flow_modules(), tempfile.TemporaryDirectory() as home:
+            from foreground_input import InputNotSubmitted, Target
+            from input_backend import _FallbackInput
+            from provider_paste_hooks import flow_submit
+            from uinput_hid import HidKeyboardClient
+
+            for scenario, prompt in (('text', 'A small blue mug on a wooden desk.'),
+                                     ('focus_lost', 'A small blue mug on a wooden desk.'),
+                                     ('multiline', 'A blue mug\nOn a wooden desk')):
+                with self.subTest(scenario=scenario):
+                    editor = ''
+                    sent = []
+                    device = HidKeyboardClient()
+                    device.ensure_ready = AsyncMock()
+
+                    async def send(action, **data):
+                        nonlocal editor
+                        self.assertEqual(action, 'type')
+                        editor += data['text']
+                        sent.append(data['text'])
+
+                    async def paste(*_):
+                        nonlocal editor
+                        editor = prompt
+
+                    device._send = AsyncMock(side_effect=send)
+                    keyboard = _FallbackInput(device, None, False, 'keyboard')
+                    composer = SimpleNamespace(evaluate=AsyncMock(side_effect=lambda _: editor))
+                    driver = SimpleNamespace(
+                        activate_and_confirm=AsyncMock(return_value=True),
+                        composer_ready_cdp=AsyncMock(return_value=True),
+                        composer_text=AsyncMock(side_effect=lambda *_: editor),
+                        confirm_focus=AsyncMock(side_effect=lambda *_: scenario != 'focus_lost' or not sent),
+                        clear_composer=AsyncMock(),
+                        copy_prompt_and_paste=AsyncMock(side_effect=paste),
+                    )
+                    actions = []
+                    button = SimpleNamespace(
+                        is_disabled=AsyncMock(return_value=False),
+                        bounding_box=AsyncMock(return_value=None),
+                        click=AsyncMock(side_effect=lambda: actions.append('submit')),
+                    )
+                    kwargs = dict(page=object(), composer=composer, submit_button=button,
+                                  credits_warning=object(), target=Target('fixture', 42, 8, 0),
+                                  prompt=prompt, queue=None, driver=driver, reserved=True,
+                                  on_submit=lambda: actions.append('checkpoint'))
+                    with patch('input_backend.open_keyboard', return_value=keyboard), \
+                            patch('foreground_input.Path.home', return_value=Path(home)), \
+                            patch('foreground_input._pacing_wait', AsyncMock()), \
+                            patch('pointer_sequence.record_input_action'):
+                        if scenario == 'focus_lost':
+                            with self.assertRaisesRegex(InputNotSubmitted, 'window_focus_lost_during_typing'):
+                                await flow_submit(**kwargs)
+                            self.assertEqual(len(sent), 1)
+                            self.assertEqual(actions, [])
+                        else:
+                            await flow_submit(**kwargs)
+                            self.assertEqual(editor, prompt)
+                            self.assertEqual(actions, ['checkpoint', 'submit'])
+                            if scenario == 'multiline':
+                                self.assertEqual(sent, [])
+                                driver.copy_prompt_and_paste.assert_awaited_once()
+                            else:
+                                self.assertEqual(''.join(sent), prompt)
+
     async def test_foreground_preparation_refreshes_before_activation_and_preserves_drafts(self):
         with flow_modules():
             from studiowright.flow import page as flow_page
