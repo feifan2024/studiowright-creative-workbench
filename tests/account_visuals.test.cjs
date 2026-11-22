@@ -277,6 +277,8 @@ test('Flow cooldown shows the failed attempt even after the task succeeds on ano
   assert.match(missing, /任务 original.*异常活动.*本次未保存截图/);
   const captured = vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'original'})", context);
   assert.match(captured, /123456789abc\.png/);
+  assert.match(captured, /任务 original.*异常活动/);
+  assert.doesNotMatch(captured, /本次未保存截图/);
   const unrelated = vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'other'})", context);
   assert.doesNotMatch(unrelated, /123456789abc\.png/);
 });

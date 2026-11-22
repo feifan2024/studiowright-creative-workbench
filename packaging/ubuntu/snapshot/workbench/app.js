@@ -271,12 +271,13 @@ function flowAccountReason(account, snapshot, row, pageState) {
 
 function flowAccountNoticeMarkup(reason, screenshot) {
   const id = screenshot?.id;
+  const notice = reason?.label ? `<strong>${esc(reason.label)}：</strong>${esc(reason.text)}` : '';
   if (/^[a-f0-9]{12}$/.test(id) && (!reason?.taskId || screenshot.task_id === reason.taskId)) {
     const path = '/api/flow-warning-screenshots/' + id + '.png';
-    return `<a class="account-flow-warning" href="${path}" target="_blank" rel="noopener" title="查看 Flow 警告原图"><img src="${path}" width="192" loading="lazy" alt="查看 Flow 警告截图"></a>`;
+    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<a class="account-flow-warning" href="${path}" target="_blank" rel="noopener" title="查看 Flow 警告原图"><img src="${path}" width="192" loading="lazy" alt="查看 Flow 警告截图"></a>`;
   }
-  if (!reason?.label) return '';
-  return `<p class="account-flow-reason"><strong>${esc(reason.label)}：</strong>${esc(reason.text)}${reason.taskId ? ' 本次未保存截图。' : ''}</p>`;
+  if (!notice) return '';
+  return `<p class="account-flow-reason">${notice}${reason.taskId ? ' 本次未保存截图。' : ''}</p>`;
 }
 
 function flowTaskStatusBadge(item) {
