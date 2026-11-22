@@ -45,16 +45,6 @@
             <header class="dashboard-heading"><div><span class="section-kicker">OPERATIONS DASHBOARD</span><h2 id="dashboardHeading">运行仪表盘</h2></div><button class="insight-account-link" type="button" data-view="accounts">管理账号 →</button></header>
             <div id="overviewInsights" class="dashboard-summary"><p class="dashboard-loading">正在读取账号运行记录…</p></div>
             <section id="geminiQuotaOverview" class="dashboard-quotas" aria-label="Flow 任务与 Gemini 额度"><p>正在读取统计…</p></section>
-<section id="governanceDialog" class="governance-dialog governance-inline" hidden aria-labelledby="governanceTitle">
-  <header><div><span class="section-kicker">账号与运行状态</span><h2 id="governanceTitle">账号派发检查</h2></div><button type="button" class="button button-light" data-govern-close>收起</button></header>
-  <div class="governance-controls">
-    <div role="group" aria-label="选择服务"><button type="button" class="button button-light" data-govern-service="flow">Flow</button><button type="button" class="button button-light" data-govern-service="gemini">Gemini</button></div>
-    <button id="governanceCheck" class="button button-light" type="button">重新检查</button>
-  </div>
-  <p id="governanceStatus" role="status"></p>
-  <div id="governanceItems"></div>
-  <footer><button type="button" class="text-link" data-govern-destination="accounts">管理账号 →</button><button id="governanceRecords" type="button" class="text-link">查看记录 →</button></footer>
-</section>
             <div id="dashboardRuntime"></div>
             <div class="host-power"><div class="host-power-info"><strong>主机维护</strong><span>关闭 Ubuntu 主机：所有服务、账号浏览器和进行中的任务都会停止，面板随之下线。</span></div><span id="hostShutdownStatus" class="subtle" role="status"></span><button id="hostShutdown" class="button button-light host-shutdown" type="button">关闭主机</button></div>
           </section>

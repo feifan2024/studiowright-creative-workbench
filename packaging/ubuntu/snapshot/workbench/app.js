@@ -1321,8 +1321,7 @@ function renderAccountInsights(snapshot, target) {
     const known=ready!=null && total>0;
     const rest=known ? total-ready : null;
     const label=override ?? (rest==null ? '状态待核对' : rest>0 ? `${amount(rest)} 个未就绪` : '');
-    const buttonLabel='一键就绪';
-    return `<button type="button" class="dashboard-ring-item governance-entry" data-governance="${service.toLowerCase()}" aria-controls="governanceDialog" aria-label="${service} ${buttonLabel}，${known ? `就绪 ${amount(ready)} / ${total}` : '状态待核对'}"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${total || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-entry-label">${buttonLabel} →</span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></button>`;
+    return `<div class="dashboard-ring-item" aria-label="${service}，${known ? `就绪 ${amount(ready)} / ${total}` : '状态待核对'}"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${total || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></div>`;
   };
   // 音乐账号池圆环：就绪（令牌未过期）账号数 / 池内账号数，只修复未就绪账号。
   const musicAccounts = musicServiceStatus?.accounts || [];
@@ -1333,25 +1332,13 @@ function renderAccountInsights(snapshot, target) {
     : musicTotal === 0 ? '账号池为空' : musicReady < musicTotal ? `${musicTotal - musicReady} 个未就绪` : '';
   const musicRingMarkup = `<button type="button" class="dashboard-ring-item governance-entry" data-music-readiness aria-label="音乐一键就绪，${musicKnown ? `就绪 ${amount(musicReady)} / ${musicTotal}` : '状态待读取'}"><span>MUSIC</span><span class="insight-ring insight-ring--music ${musicKnown ? '' : 'is-unknown'}" data-dashboard-ring="MUSIC"><span class="governance-ring-center"><strong>${musicKnown ? amount(musicReady) : '—'}<small> / ${musicTotal || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-entry-label">一键就绪 →</span><span class="governance-alert" data-govern-alert="music" ${musicLabel ? '' : 'hidden'}>${esc(musicLabel)}</span></button>`;
   target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验` : (geminiPending || geminiBlocked ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ') : null))}${musicRingMarkup}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${accounts.length} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
-  <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-runtime-activate="flow">检查授权与额度</button><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话轮询分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
+  <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话轮询分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
   $('dashboardRuntime').replaceChildren(scope.querySelector('[data-dashboard-running]'));
   scope.querySelector('[data-dashboard-ring="FLOW"]').style.setProperty('--fill',`${health ?? 0}%`);
   scope.querySelector('[data-dashboard-ring="GEMINI"]').style.setProperty('--fill',`${eligible!=null && accounts.length ? eligible/accounts.length*100 : 0}%`);
   scope.querySelector('[data-dashboard-ring="MUSIC"]').style.setProperty('--fill',`${musicKnown && musicTotal ? musicReady/musicTotal*100 : 0}%`);
   scope.querySelector('[data-insight-accounts]').addEventListener('click',()=>setView('accounts'));
-  if (!$('dashboardGovernanceNext')) {
-    const guidance=document.createElement('section');
-    guidance.id='dashboardGovernanceNext';
-    guidance.className='dashboard-send-status';
-    guidance.style.order='1';
-    guidance.hidden=true;
-    guidance.setAttribute('aria-label','账号恢复指引');
-    guidance.setAttribute('aria-live','polite');
-    guidance.addEventListener('click',handleGovernanceClick);
-    target.after(guidance);
-  }
   scope.querySelector('[data-insight-conversations]').addEventListener('click',()=>setView('conversations'));
-  scope.querySelectorAll('[data-governance]').forEach(button=>button.addEventListener('click',()=>openGovernance(button.dataset.governance)));
   scope.querySelectorAll('[data-runtime-activate]').forEach(button=>button.addEventListener('click',()=>openGovernance(button.dataset.runtimeActivate)));
   scope.querySelector('[data-music-readiness]')?.addEventListener('click', startMusicReadiness);
   renderMusicReadiness();
@@ -1680,8 +1667,10 @@ async function startGovernanceAudit(service, repair = true) {
 function openGovernance(service) {
   governanceService = service;
   governanceError = '';
-  governanceDialog.hidden=false;
-  governanceDialog.scrollIntoView({block:'nearest'});
+  if (governanceDialog) {
+    governanceDialog.hidden=false;
+    governanceDialog.scrollIntoView({block:'nearest'});
+  }
   renderGovernance();
   const pending=governanceAudits[service];
   if (service==='flow' && pending?.running && !pending.repair) pending.repairNext=true;
@@ -1754,7 +1743,7 @@ function renderGovernance() {
   const isGemini = service === 'gemini';
   const audit=governanceAudits[service];
   renderGovernanceGuidance(service,audit);
-  if (governanceDialog.hidden) return;
+  if (!governanceDialog || governanceDialog.hidden) return;
   $('governanceTitle').textContent = isGemini ? 'Gemini 一键就绪' : 'Flow 一键就绪';
   for (const button of governanceDialog.querySelectorAll('[data-govern-service]')) {
     button.setAttribute('aria-pressed',String(button.dataset.governService === service));
@@ -1836,7 +1825,7 @@ async function handleGovernanceClick(event) {
     finally { button.disabled = false; }
     openGovernance(governanceService);
   } else if (button.hasAttribute('data-govern-close')) {
-    governanceDialog.hidden=true;
+    if (governanceDialog) governanceDialog.hidden=true;
     document.querySelector(`[data-governance="${governanceService}"]`)?.focus({preventScroll:true});
   } else if (button.dataset.governReauth) {
     const rid = button.dataset.governReauth;
@@ -1857,7 +1846,7 @@ async function handleGovernanceClick(event) {
   } else if (button.dataset.governDestination || button.dataset.governChat || button.id === 'governanceRecords') {
     const chat = button.dataset.governChat;
     const destination = button.dataset.governDestination || (chat || governanceService === 'gemini' ? 'conversations' : 'records');
-    governanceDialog.hidden=true;
+    if (governanceDialog) governanceDialog.hidden=true;
     if (chat) activeConversation = chat;
     setView(destination);
     if (chat) showConversation(chat).catch(()=>{$('chatMessage').textContent='原对话暂不可读取。';});
@@ -1883,7 +1872,7 @@ async function handleGovernanceClick(event) {
     }
   }
 }
-governanceDialog.addEventListener('click', handleGovernanceClick);
+governanceDialog?.addEventListener('click', handleGovernanceClick);
 
 function accountUsageBar(label, value, stale) {
   const known = typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
