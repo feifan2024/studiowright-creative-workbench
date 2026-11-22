@@ -1016,11 +1016,11 @@ class Sources:
         result = subprocess.run([str(python),'-B',str(helper)], input=json.dumps(payload).encode(),
                                 capture_output=True, check=True, timeout=10)
         checks = json.loads(result.stdout)
-        allowed = {'ok','busy','binding','unique','project','login','draft','overlay','editor','unconfirmed'}
+        allowed = {'ok','busy','binding','unique','project','login','load_failed','draft','overlay','editor','unconfirmed'}
         if not isinstance(checks,dict) or any(v not in allowed for v in checks.values()):
             raise ValueError('invalid_readiness_result')
         for profile, item in repairs.items():
-            if checks.get(profile) in ('binding','project','editor','unconfirmed') and item.get('page') in ('draft','login','overlay'):
+            if checks.get(profile) in ('binding','project','editor','load_failed','unconfirmed') and item.get('page') in ('draft','login','overlay'):
                 checks[profile] = item['page']
         if any(checks.get(profile) == 'ok' and 'reload' in item.get('actions', ())
                for profile, item in repairs.items()):

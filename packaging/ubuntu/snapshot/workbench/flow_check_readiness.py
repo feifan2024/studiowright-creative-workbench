@@ -19,7 +19,15 @@ def composer_expression(email):
       const boxes=[...document.querySelectorAll("flow-prompt-box [contenteditable='true']")];
       const visible=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility==='visible';
       const account=emails.length===1 && emails[0]===EXPECTED && !!(w.SNlM0e&&w.FdrFJe);
-      return {origin:true,path:location.pathname,account,
+      const login=!account && [...document.querySelectorAll('a,button')].some(e=>visible(e) &&
+        (/^(sign in|log in|登录|登入|继续登录|使用 Google 登录|sign in with google)$/i.test(e.innerText.trim()) ||
+          (e.tagName==='A' && e.href.startsWith('https://accounts.google.com/') && /sign\s*in|log\s*in|登录|登入/i.test(e.innerText))));
+      const status=performance.getEntriesByType('navigation')[0]?.responseStatus;
+      const bodyText=(document.body?.innerText||'').trim();
+      const loadFailed=status>=400 || (!account && !window.WIZ_global_data && boxes.length===0 &&
+        document.readyState==='complete' &&
+        (!bodyText || /^(failed to load (?:the )?project|项目加载失败)[.!。]?$/i.test(bodyText)));
+      return {origin:true,path:location.pathname,account,login,loadFailed,
         busy:[...document.querySelectorAll('[role=progressbar],[aria-busy=true]')].some(visible),
         overlay:[...document.querySelectorAll('[role=dialog],[aria-modal=true],flow-change-log-modal')].some(visible),
         draft:boxes.some(e=>(e.innerText||'').trim()) ||
@@ -28,6 +36,22 @@ def composer_expression(email):
         editor:boxes.filter(e=>visible(e) && e.getAttribute('aria-disabled')!=='true').length===1 &&
           [...document.querySelectorAll('flow-prompt-box button mat-icon')].some(i=>i.textContent.trim()==='arrow_forward'&&visible(i))};
     })()""".replace('EXPECTED', json.dumps(email.lower()))
+
+
+def page_verdict(state):
+    if state.get('busy'):
+        return 'busy'
+    if state.get('draft'):
+        return 'draft'
+    if state.get('login'):
+        return 'login'
+    if state.get('loadFailed'):
+        return 'load_failed'
+    if not state.get('account'):
+        return 'unconfirmed'
+    if state.get('overlay'):
+        return 'overlay'
+    return 'ok' if state.get('editor') else 'editor'
 
 
 async def inspect_page(account, binding):
@@ -68,15 +92,7 @@ async def inspect_page(account, binding):
         state = json.loads(await ws.recv()).get('result', {}).get('result', {}).get('value', {})
     if not state.get('origin') or 'https://flow.google.com' + state.get('path', '').rstrip('/') != project:
         return 'project'
-    if not state.get('account'):
-        return 'login'
-    if state.get('busy'):
-        return 'busy'
-    if state.get('draft'):
-        return 'draft'
-    if state.get('overlay'):
-        return 'overlay'
-    return 'ok' if state.get('editor') else 'editor'
+    return page_verdict(state)
 
 
 async def probe(data):

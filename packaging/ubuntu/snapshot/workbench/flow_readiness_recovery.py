@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from flow_browser_state import _pages, focus_call
-from flow_check_readiness import composer_expression, inspect_page
+from flow_check_readiness import composer_expression, inspect_page, page_verdict
 from flow_task_window import registration
 from task_window_registry import TaskWindowRegistry, canonical_project_url, process_identity
 
@@ -318,6 +318,37 @@ def _rebuild_standard(account):
     return project
 
 
+async def reload_failed_project(ws, account, expected, project, actions):
+    await asyncio.to_thread(guard_live, account)
+    frame = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
+    state = await evaluate(ws, expected)
+    project_path = urlsplit(project).path
+    if (canonical_project_url(frame['url']) != project or not state.get('origin')
+            or state.get('path', '').rstrip('/') != project_path):
+        return {}
+    if state.get('overlay') or page_verdict(state) != 'load_failed':
+        return state
+    await asyncio.wait_for(command(ws, 'Page.reload', {'loaderId': frame['loaderId']}), timeout=3)
+    actions.append('reload')
+    for _ in range(20):
+        await asyncio.sleep(.4)
+        loaded = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
+        url = urlsplit(loaded['url'])
+        if (url.scheme == 'https' and url.netloc == 'accounts.google.com'
+                and re.search(r'/(?:signin|servicelogin)(?:/|$)', url.path, re.I)):
+            return {'login': True}
+        if canonical_project_url(loaded['url']) != project:
+            return {}
+        if loaded['loaderId'] == frame['loaderId']:
+            continue
+        state = await evaluate(ws, expected)
+        if not state.get('origin') or state.get('path', '').rstrip('/') != project_path:
+            return {}
+        if page_verdict(state) not in ('load_failed', 'unconfirmed', 'editor'):
+            return state
+    return state
+
+
 async def repair(account, initial, actions, safe_only=False):
     import websockets
     from flow_window_policy import Lifecycle
@@ -340,8 +371,20 @@ async def repair(account, initial, actions, safe_only=False):
         async with websockets.connect(endpoint,open_timeout=2,close_timeout=1,max_size=65536) as ws:
             current['chrome_window'] = (await command(ws,'Browser.getWindowForTarget',{'targetId':current['page_target']}))['windowId']
             before = await evaluate(ws,expected)
+            verdict = page_verdict(before)
+            if verdict == 'login':
+                return verdict,None
+            if verdict == 'load_failed':
+                if (not same or not old or old.get('binding_state') != 'verified'
+                        or old.get('project_url') != project or any(old.get(k)!=v for k,v in current.items())):
+                    return 'binding',None
+                before = await reload_failed_project(ws, account, expected, project, actions)
+                verdict = page_verdict(before)
+                if verdict != 'ok':
+                    return verdict,None
+                navigated_once = True
             if safe_only and (not before.get('origin') or not before.get('account') or before.get('busy')):
-                return ('draft' if before.get('draft') else 'busy' if before.get('busy') else 'login'),None
+                return page_verdict(before),None
             if before.get('draft'):
                 if account.get('operator_dispatch_paused'):
                     return 'draft',None
@@ -361,7 +404,7 @@ async def repair(account, initial, actions, safe_only=False):
                         break
                 before = await evaluate(ws,expected)
             if not before.get('origin') or not before.get('account'):
-                return 'login',None
+                return page_verdict(before),None
             # Refresh drafts only on the account's verified fixed task page.
             if initial == 'draft' and before.get('draft'):
                 if not same:
@@ -431,7 +474,7 @@ async def repair(account, initial, actions, safe_only=False):
                 if before.get('overlay') or before.get('busy'):
                     return ('overlay' if before.get('overlay') else 'busy'),None
             if initial != 'draft' and (not before.get('account') or before.get('draft')):
-                return ('draft' if before.get('draft') else 'login'),None
+                return page_verdict(before),None
             if initial != 'draft' and (not same or not before.get('editor')):
                 if same and (initial == 'after_restart' or 'reload' in actions):
                     return 'editor',None
@@ -590,10 +633,10 @@ async def recover(payload):
                 except (OSError,ValueError,TimeoutError):
                     before = 'binding'
                 old_draft = before == 'ok' and (Coordinator().window(p) or {}).get('state') == 'blocked_draft'
-                if payload.get('safe_only') and before not in {'binding','project','editor','overlay','draft'} and not old_draft:
+                if payload.get('safe_only') and before not in {'binding','project','editor','overlay','draft','load_failed'} and not old_draft:
                     out[p] = {'page':before,'actions':[]}
                     continue
-                if (before in {'binding','project','editor','overlay','draft'} or old_draft or
+                if (before in {'binding','project','editor','overlay','draft','load_failed'} or old_draft or
                         (before == 'ok' and lifecycle.get(p,{}).get('unique_ok') != 1)):
                     verdict,_ = await asyncio.wait_for(repair(account,before,actions,safe_only=payload.get('safe_only') is True),
                         timeout=min(45,max(1,deadline-asyncio.get_running_loop().time())))

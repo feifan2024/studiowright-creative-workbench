@@ -329,7 +329,7 @@ function accountIssues(account, snapshot = state.snapshot, geminiRow = null) {
   const activeFlow = (snapshot?.tasks || []).some(t => t.source_profile === account.profile &&
     ['image','video'].includes(t.kind) && ['queued','running'].includes(t.status));
   if (pageState && pageState !== 'ok' && !(pageState === 'busy' && activeFlow))
-    add('flow_page_state', '页面未就绪：' + ({overlay:'页面有弹窗待关闭', binding:'窗口绑定待核对', project:'页面停在非标准项目', unconfirmed:'页面状态待确认', busy:'页面忙', draft:'有草稿待核对', login:'需要登录核验'}[pageState] || pageState), '点一键就绪，算力中心会把页面带回标准项目并复查。', '使用一键就绪。');
+    add('flow_page_state', '页面未就绪：' + ({overlay:'页面有弹窗待关闭', binding:'窗口绑定待核对', project:'页面停在非标准项目', unconfirmed:'页面状态待确认', busy:'页面忙', draft:'有草稿待核对', login:'需要登录核验', load_failed:'固定任务页加载失败'}[pageState] || pageState), '点一键就绪，算力中心会把页面带回标准项目并复查。', '使用一键就绪。');
   const windowIssue = flowWindowIssue(account.profile, snapshot);
   if (windowIssue) issues.push(windowIssue);
   for (const issue of geminiRow?.issues || []) add('gemini_'+(issue.key || 'blocked'),issue.title,'Gemini 当前就绪检查。',issue.action);
@@ -1469,6 +1469,7 @@ function auditFlowAccounts(snapshot, dispatch, pageChecks, probeStartedAt) {
       unique:['发现多窗口或任务页数量不符','保留手工页面和草稿，核对哪一个是固定任务窗口。'],
       project:['任务窗口不在该账号的已登记项目','核对对应项目与固定窗口绑定。'],
       login:['任务页登录身份未通过','在原账号的 Ubuntu 浏览器核对登录。'],
+      load_failed:['固定任务页加载失败','点 Flow 一键就绪，刷新原任务页并复查。'],
       draft:repair?.actions?.includes('reload')
         ? ['刷新后仍检测到草稿或附件','算力中心暂不派发该账号。']
         : ['固定任务窗口有草稿或附件','点 Flow 一键就绪，算力中心会刷新固定任务页并复查。'],

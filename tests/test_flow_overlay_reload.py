@@ -35,3 +35,35 @@ class FlowOverlayReload(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await recovery.reload_overlay(None, {}, '', PROJECT, actions), state)
             c.assert_awaited_once()
             self.assertEqual(actions, [])
+
+    async def test_blank_page_reloads_once_and_waits_for_the_original_editor(self):
+        blank = dict(origin=True, account=False, loadFailed=True, path=STATE['path'])
+        loading = dict(blank, loadFailed=False)
+        ready = dict(origin=True, account=True, editor=True, path=STATE['path'])
+        old = {'frameTree': {'frame': {'url': PROJECT, 'loaderId': 'old'}}}
+        new = {'frameTree': {'frame': {'url': PROJECT, 'loaderId': 'new'}}}
+        actions = []
+        self.assertEqual(recovery.page_verdict(blank), 'load_failed')
+        self.assertEqual(recovery.page_verdict(loading), 'unconfirmed')
+        with patch.object(recovery, 'guard_live'), \
+                patch.object(recovery, 'command', AsyncMock(side_effect=[old, {}, old, new, new])) as c, \
+                patch.object(recovery, 'evaluate', AsyncMock(side_effect=[blank, loading, ready])), \
+                patch.object(recovery.asyncio, 'sleep', AsyncMock()):
+            self.assertEqual(await recovery.reload_failed_project(None, {}, '', PROJECT, actions), ready)
+        self.assertEqual(actions, ['reload'])
+        self.assertEqual([call.args[2] for call in c.await_args_list if call.args[1] == 'Page.reload'],
+                         [{'loaderId': 'old'}])
+
+    async def test_blank_page_recovery_leaves_sign_in_and_drafts_alone(self):
+        frame = {'frameTree': {'frame': {'url': PROJECT, 'loaderId': 'old'}}}
+        for flag, verdict in [('login', 'login'), ('busy', 'busy'), ('draft', 'draft')]:
+            with self.subTest(flag=flag):
+                state = dict(origin=True, account=False, loadFailed=True, path=STATE['path'], **{flag: True})
+                actions = []
+                self.assertEqual(recovery.page_verdict(state), verdict)
+                with patch.object(recovery, 'guard_live'), \
+                        patch.object(recovery, 'command', AsyncMock(return_value=frame)) as c, \
+                        patch.object(recovery, 'evaluate', AsyncMock(return_value=state)):
+                    self.assertEqual(await recovery.reload_failed_project(None, {}, '', PROJECT, actions), state)
+                c.assert_awaited_once()
+                self.assertEqual(actions, [])
