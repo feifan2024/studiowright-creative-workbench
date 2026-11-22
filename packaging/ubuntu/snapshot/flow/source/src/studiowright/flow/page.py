@@ -412,7 +412,8 @@ class FlowPage:
             sys.path.insert(0, shared)
         from desktop_layout import call, gui_env
         from wayland_desktop_driver import WaylandDesktopDriver
-        from window_binding import find_page_and_target
+        from flow_task_window import find_flow_page
+        from task_coordinator import recover_preparation, record
         url = f'{FLOW_ROOT}project/{project_id}'
         preferred_page = None
         if hasattr(session, '_task_pages'):
@@ -420,7 +421,6 @@ class FlowPage:
             if preferred_page not in session._task_pages:
                 raise FlowError('flow_task_page_unconfirmed')
             if preferred_page.url.split('?')[0].split('#')[0].rstrip('/') != url:
-                from task_coordinator import recover_preparation
                 async def navigate_project():
                     if hasattr(session,'_safe_editor'):
                         await session._safe_editor(preferred_page)
@@ -429,29 +429,49 @@ class FlowPage:
                     except PlaywrightTimeout as exc:
                         raise TimeoutError('project_page_not_ready') from exc
                 await recover_preparation(navigate_project,reason='project_navigation')
-        page, target = await find_page_and_target(context=session.context,
-            account_key=hashlib.sha256(profile.encode()).hexdigest(), hostname='flow.google.com',
-            desired_url=url, layout_call=call, preferred_page=preferred_page)
+        async def require_empty_editor(page):
+            if hasattr(session, '_safe_editor'):
+                await session._safe_editor(page)
+                return
+            boxes = page.locator(s.COMPOSER)
+            for index in range(await boxes.count()):
+                if (await boxes.nth(index).inner_text()).strip():
+                    raise FlowError('existing_flow_draft')
+            for selector in (s.BOUND_CHIP, s.MENTION_CHIP):
+                if await page.locator(selector).count():
+                    raise FlowError('existing_flow_attachments')
+
+        async def refresh_before_activation(page):
+            async def refresh():
+                await require_empty_editor(page)
+                if page.url.split('?')[0].split('#')[0].rstrip('/') != url:
+                    raise FlowError('task_window_project_unconfirmed')
+                try:
+                    response = await page.reload(wait_until='domcontentloaded', timeout=15000)
+                except PlaywrightTimeout as exc:
+                    raise TimeoutError('project_page_not_ready') from exc
+                if response is not None and not response.ok:
+                    raise FlowError('project_page_not_ready')
+                if page.url.split('?')[0].split('#')[0].rstrip('/') != url:
+                    raise FlowError('task_window_project_unconfirmed')
+                record('project_page_reload', reason='before_activation')
+            await recover_preparation(refresh, reason='refresh_before_activation', attempts=1)
+
+        page, target = await find_flow_page(context=session.context,
+            account_key=hashlib.sha256(profile.encode()).hexdigest(),
+            desired_url=url, layout_call=call, preferred_page=preferred_page,
+            before_activation=refresh_before_activation)
         driver = WaylandDesktopDriver(gui_env())
         if not await driver.activate_and_confirm(target):
             raise FlowError('desktop_focus_unconfirmed')
         await page.bring_to_front()
         if not await driver._os_focus_confirmed(target):
             raise FlowError('desktop_focus_unconfirmed')
-        # Never replace an unsent prompt or reference assets on the user's page.
-        for selector in (s.COMPOSER, s.BOUND_CHIP, s.MENTION_CHIP):
-            items = page.locator(selector)
-            if selector == s.COMPOSER:
-                for index in range(await items.count()):
-                    if (await items.nth(index).inner_text()).strip():
-                        raise FlowError('existing_flow_draft')
-            elif await items.count():
-                raise FlowError('existing_flow_attachments')
+        if page.url.split('?')[0].split('#')[0].rstrip('/') != url:
+            raise FlowError('task_window_project_unconfirmed')
+        await require_empty_editor(page)
         flow = cls(page, project_id, session)
         flow._foreground_lease, flow._foreground_driver, flow._foreground_target = lease, driver, target
-        if page.url.split('?')[0].split('#')[0].rstrip('/') != flow.url:
-            await page.goto(flow.url, wait_until='domcontentloaded', timeout=30000)
-        from task_coordinator import recover_preparation, record
         async def ready_once():
             try:
                 await flow.ready()
@@ -459,8 +479,7 @@ class FlowPage:
                 raise TimeoutError('project_page_not_ready') from exc
         async def restore_page():
             # Recheck the retained window; never erase a draft while repairing navigation.
-            if hasattr(session,'_safe_editor'):
-                await session._safe_editor(page)
+            await require_empty_editor(page)
             record('project_page_reload')
             await page.goto(flow.url,wait_until='domcontentloaded',timeout=30000)
         await recover_preparation(ready_once,reason='project_page_ready',repair=restore_page)

@@ -31,6 +31,82 @@ def flow_modules():
 
 
 class FlowVideoPipeline(unittest.IsolatedAsyncioTestCase):
+    async def test_foreground_preparation_refreshes_before_activation_and_preserves_drafts(self):
+        with flow_modules():
+            from studiowright.flow import page as flow_page
+
+            project = str(uuid.uuid4())
+            url = flow_page.FLOW_ROOT + 'project/' + project
+            registry = Mock()
+            registry.bind.return_value = 'reused'
+            registration = {'pid': 42, 'port': 9333, 'targets': {'task-target'}}
+            channel = SimpleNamespace(
+                send=AsyncMock(side_effect=lambda name, *_: (
+                    {'targetInfo': {'targetId': 'task-target'}} if name == 'Target.getTargetInfo'
+                    else {'windowId': 17}
+                )),
+                detach=AsyncMock(),
+            )
+            for outcome in ('ready', 'draft', 'timeout', 'redirect', 'http_error'):
+                with self.subTest(outcome=outcome), ExitStack() as cleanup:
+                    actions = []
+                    title = 'Flow project'
+                    page = SimpleNamespace(url=url)
+
+                    async def check_editor(_):
+                        actions.append('check editor')
+                        if outcome == 'draft':
+                            raise flow_page.FlowError('existing_flow_draft')
+
+                    async def reload_page(**_):
+                        actions.append('reload')
+                        if outcome == 'timeout':
+                            raise flow_page.PlaywrightTimeout('reload timeout')
+                        if outcome == 'redirect':
+                            page.url = 'https://flow.google.com/'
+                        return SimpleNamespace(ok=outcome != 'http_error')
+
+                    async def set_title(_, arg):
+                        nonlocal title
+                        previous = title
+                        title = arg if isinstance(arg, str) else arg['previous']
+                        return previous
+
+                    page.reload = AsyncMock(side_effect=reload_page)
+                    page.bring_to_front = AsyncMock(side_effect=lambda: actions.append('bring to front'))
+                    page.evaluate = AsyncMock(side_effect=set_title)
+                    context = SimpleNamespace(pages=[page], new_cdp_session=AsyncMock(return_value=channel))
+                    session = SimpleNamespace(context=context, _safe_editor=check_editor)
+                    driver = SimpleNamespace(
+                        activate_and_confirm=AsyncMock(side_effect=lambda _: actions.append('activate') or True),
+                        _os_focus_confirmed=AsyncMock(return_value=True),
+                    )
+                    layout = Mock(side_effect=lambda *_: [{'title': title, 'id': 8, 'workspace': 0}])
+                    cleanup.enter_context(patch('flow_task_window.registration', return_value=registration))
+                    cleanup.enter_context(patch('task_window_registry.TaskWindowRegistry', return_value=registry))
+                    cleanup.enter_context(patch('task_window_registry.process_identity', return_value=('fixture', '99')))
+                    cleanup.enter_context(patch('desktop_layout.call', layout))
+                    cleanup.enter_context(patch('desktop_layout.gui_env', return_value={}))
+                    cleanup.enter_context(patch('wayland_desktop_driver.WaylandDesktopDriver', return_value=driver))
+                    cleanup.enter_context(patch.object(flow_page.FlowPage, 'ready', AsyncMock(
+                        side_effect=lambda: actions.append('ready'))))
+                    if outcome == 'ready':
+                        flow = await flow_page.FlowPage.open_foreground(session, project, 'fixture', object())
+                        self.assertIs(flow.page, page)
+                        self.assertEqual(actions, ['check editor', 'reload', 'bring to front', 'activate',
+                                                   'bring to front', 'check editor', 'ready'])
+                    else:
+                        expected = {'draft': 'existing_flow_draft', 'timeout': 'project_page_not_ready',
+                                    'redirect': 'task_window_project_unconfirmed',
+                                    'http_error': 'project_page_not_ready'}
+                        error = TimeoutError if outcome == 'timeout' else flow_page.FlowError
+                        with self.assertRaisesRegex(error, expected[outcome]):
+                            await flow_page.FlowPage.open_foreground(session, project, 'fixture', object())
+                        page.bring_to_front.assert_not_awaited()
+                        driver.activate_and_confirm.assert_not_awaited()
+                        if outcome == 'draft':
+                            page.reload.assert_not_awaited()
+
     async def test_submitted_videos_give_slot_to_other_accounts_only(self):
         class ControlledAdapter:
             def __init__(self):

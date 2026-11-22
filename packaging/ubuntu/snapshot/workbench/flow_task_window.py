@@ -33,7 +33,8 @@ def _trusted(url):
         return False
 
 
-async def find_flow_page(*, context, account_key, desired_url, layout_call, preferred_page=None):
+async def find_flow_page(*, context, account_key, desired_url, layout_call, preferred_page=None,
+                         before_activation=None):
     from foreground_input import Target
     from task_window_registry import TaskWindowRegistry, canonical_project_url, process_identity
     from task_coordinator import record
@@ -59,6 +60,10 @@ async def find_flow_page(*, context, account_key, desired_url, layout_call, pref
             chrome_window = await channel.send('Browser.getWindowForTarget', {'targetId': target})
             if type(chrome_window.get('windowId')) is not int:
                 raise ValueError('flow_window_registration_stale')
+            if before_activation is not None:
+                await before_activation(page)
+                if not _trusted(page.url) or canonical_project_url(page.url) != desired_url:
+                    raise ValueError('task_window_project_unconfirmed')
             # A task target can be in an inactive tab and several windows can share
             # its ordinary title. A temporary title ticket maps this exact owned
             # CDP target to exactly one native window. No prompt/draft is edited.
