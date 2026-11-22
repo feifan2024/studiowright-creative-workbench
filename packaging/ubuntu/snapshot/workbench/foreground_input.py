@@ -92,11 +92,12 @@ async def _hid_keyboard(driver, target):
     return keyboard
 
 
-async def _type_prompt_on_device(driver, page, composer, target, keyboard, prompt, record):
+async def _type_prompt_on_device(driver, page, composer, target, keyboard, prompt, record, *, maximum=400):
     """Type ASCII on the device with focus checks; paste the rest via clipboard."""
     from uinput_hid import can_type
     # A literal control key such as Enter can trigger the editor's submit action.
-    typed = not any(ord(char) < 32 or ord(char) == 127 for char in prompt) and can_type(prompt)
+    typed = (keyboard is not None and can_type(prompt, maximum)
+             and all(32 <= ord(char) < 127 for char in prompt))
     record('typed_text_started' if typed else 'clipboard_paste_started', characters=len(prompt))
     if not typed:
         await driver.copy_prompt_and_paste(page, composer, target, prompt)
@@ -135,41 +136,18 @@ async def _verify_prompt(driver, page, composer, target, prompt, seconds=2.0):
         raise InputNotSubmitted('window_focus_lost')
 
 
-async def enter_hybrid_prompt(driver, page, composer, target, prompt):
-    from task_coordinator import record
+async def enter_hybrid_prompt(driver, page, composer, target, keyboard, prompt, record):
+    # Three keypresses fit even at the HID helper's maximum configured delays,
+    # leaving time for focus checks and verification inside the same deadline.
     if await driver.composer_text(page, composer) not in ('', '\n'):
         raise InputNotSubmitted('composer_not_empty')
     if not await driver.confirm_focus(target, page, composer):
         raise InputNotSubmitted('window_focus_lost')
-    prefix = prompt[:min(3, len(prompt))]
-    record('hybrid_input_phase', stage='typing_prefix', characters=len(prompt))
-    await driver.type_prompt_chars(page, prefix)
-    if len(prompt) > len(prefix):
-        if not await driver.confirm_focus(target, page, composer):
-            raise InputNotSubmitted('window_focus_lost')
-        # Use the browser's existing text-input route directly, once, instead of
-        # a desktop clipboard shortcut whose acknowledgement may insert nothing.
-        # Focus and exact-content verification still guard the submit boundary.
-        record('hybrid_input_phase', stage='insert_start', characters=len(prompt))
-        await page.keyboard.insert_text(prompt[len(prefix):])
-        record('hybrid_input_phase', stage='insert_finished', characters=len(prompt))
-    observed = await read_flow_prompt(composer)
-    if observed != prompt:
-        # Record lengths only; prompt and clipboard content never enter logs.
-        record('hybrid_input_verification_pending', expected_characters=len(prompt),
-               observed_characters=len(observed), prefix_matches=observed.startswith(prefix))
-    while observed != prompt:
-        if not await driver.confirm_focus(target, page, composer):
-            raise InputNotSubmitted('window_focus_lost')
-        await asyncio.sleep(.05)
-        observed = await read_flow_prompt(composer)
-    if not await driver.confirm_focus(target, page, composer):
-        raise InputNotSubmitted('window_focus_lost')
+    await _type_prompt_on_device(driver, page, composer, target, keyboard, prompt, record, maximum=3)
+    await _verify_prompt(driver, page, composer, target, prompt, seconds=FLOW_PROMPT_TIMEOUT)
 
 
-def hybrid_input_timeout(prompt):
-    """Allow desktop focus, paste and DOM reconciliation time for long prompts."""
-    return min(45.0, max(15.0, 10.0 + len(prompt) / 100.0))
+FLOW_PROMPT_TIMEOUT = 4.0
 
 
 @dataclass(frozen=True)
@@ -228,23 +206,13 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
                     await asyncio.sleep(.6)
             if hybrid:
                 try:
-                    record('hybrid_input_timeout_budget', seconds=hybrid_input_timeout(prompt), characters=len(prompt))
-                    # The Flow entry starts here; hardware text must win so the
-                    # browser insert_text route is not the only path in practice.
                     keyboard = await _hid_keyboard(driver, target)
-                    record('hybrid_input_route', route='hid' if keyboard else 'browser')
-                    if keyboard is not None:
-                        await asyncio.wait_for(
-                            _type_prompt_on_device(driver, page, composer, target,
-                                                   keyboard, prompt, record),
-                            timeout=hybrid_input_timeout(prompt),
-                        )
-                        await _verify_prompt(driver, page, composer, target, prompt)
-                    else:
-                        await asyncio.wait_for(
-                            enter_hybrid_prompt(driver, page, composer, target, prompt),
-                            timeout=hybrid_input_timeout(prompt),
-                        )
+                    record('hybrid_input_timeout_budget', seconds=FLOW_PROMPT_TIMEOUT, characters=len(prompt))
+                    record('hybrid_input_route', route='hid' if keyboard else 'clipboard')
+                    await asyncio.wait_for(
+                        enter_hybrid_prompt(driver, page, composer, target, keyboard, prompt, record),
+                        timeout=FLOW_PROMPT_TIMEOUT,
+                    )
                     record('hybrid_input_verified', characters=len(prompt))
                 except asyncio.TimeoutError as exc:
                     raise InputNotSubmitted('prompt_input_timeout') from exc

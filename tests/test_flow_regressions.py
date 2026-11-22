@@ -31,18 +31,19 @@ class FlowPromptVerification(unittest.IsolatedAsyncioTestCase):
         self.driver = SimpleNamespace(
             composer_text=AsyncMock(return_value=''), activate_and_confirm=AsyncMock(return_value=True),
             composer_ready_cdp=AsyncMock(return_value=True), confirm_focus=AsyncMock(return_value=True),
-            type_prompt_chars=AsyncMock(),
+            type_prompt_chars=AsyncMock(), copy_prompt_and_paste=AsyncMock(),
         )
         self.composer = SimpleNamespace(evaluate=AsyncMock())
         self.page = SimpleNamespace(keyboard=SimpleNamespace(insert_text=AsyncMock()))
         self.checkpoint = AsyncMock()
         self.send = AsyncMock()
 
-    async def submit(self):
+    async def submit(self, keyboard=None):
         with (
             fixture_directory() as directory,
             patch('foreground_input.Path.home', return_value=directory),
             patch('foreground_input._pacing_wait', new_callable=AsyncMock),
+            patch('foreground_input._hid_keyboard', AsyncMock(return_value=keyboard)),
             patch('pointer_sequence.record_input_action'),
         ):
             await paste_and_submit_reserved(
@@ -55,17 +56,37 @@ class FlowPromptVerification(unittest.IsolatedAsyncioTestCase):
         self.composer.evaluate.return_value = self.prompt
         await self.submit()
         self.composer.evaluate.assert_awaited_once_with(FLOW_PROMPT_TEXT)
-        self.page.keyboard.insert_text.assert_awaited_once_with(self.prompt[3:])
+        self.driver.copy_prompt_and_paste.assert_awaited_once()
+        self.page.keyboard.insert_text.assert_not_awaited()
         self.checkpoint.assert_awaited_once()
         self.send.assert_awaited_once()
 
     async def test_incorrect_text_keeps_a_flow_task_before_submission(self):
         self.composer.evaluate.return_value = self.prompt.replace('第二行', '改一行')
-        with patch('foreground_input.hybrid_input_timeout', return_value=.02):
+        with patch('foreground_input.FLOW_PROMPT_TIMEOUT', .02):
             with self.assertRaisesRegex(InputNotSubmitted, '^prompt_input_timeout$'):
                 await self.submit()
         self.checkpoint.assert_not_awaited()
         self.send.assert_not_awaited()
+
+    async def test_272_ascii_characters_use_clipboard_even_with_hid(self):
+        self.prompt = 'A' * 272
+        self.composer.evaluate.return_value = self.prompt
+        keyboard = SimpleNamespace(type=AsyncMock())
+        await self.submit(keyboard)
+        keyboard.type.assert_not_awaited()
+        self.driver.copy_prompt_and_paste.assert_awaited_once()
+        self.assertEqual(self.driver.copy_prompt_and_paste.await_args.args[-1], self.prompt)
+        self.send.assert_awaited_once()
+
+    async def test_short_ascii_can_still_be_typed(self):
+        self.prompt = 'cat'
+        self.composer.evaluate.return_value = self.prompt
+        keyboard = SimpleNamespace(type=AsyncMock())
+        await self.submit(keyboard)
+        self.assertEqual(keyboard.type.await_args.args, ('cat',))
+        self.driver.copy_prompt_and_paste.assert_not_awaited()
+        self.send.assert_awaited_once()
 
 
 class ImageCreditCompatibility(unittest.TestCase):
