@@ -634,6 +634,18 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .quota-refresh { flex: none; border: 0; padding: 6px 0; background: none; color: #367057; font-size: 12px; font-weight: 600; }
 .quota-details,.dashboard-runtime-details { border-top: 1px solid #e8eee9; font-size: 12px; }
 .dashboard-runtime-details { order: 3; }
+.quota-family-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; padding: 14px 26px 4px; }
+.quota-family-card { min-width: 0; padding: 14px; border: 1px solid #e3ebe5; border-radius: 10px; background: #f8fbf9; }
+.quota-family-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: #385b45; }
+.quota-family-heading strong { font-size: 14px; }
+.quota-family-heading span { color: #748477; font-size: 11px; white-space: nowrap; }
+.quota-family-windows { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 12px; }
+.quota-family-window { display: grid; gap: 4px; }
+.quota-family-window span { color: #687c6e; font-size: 11px; }
+.quota-family-window strong { color: #35684d; font-size: 20px; font-variant-numeric: tabular-nums; }
+.quota-family-window strong small { margin-left: 4px; color: #788c7b; font-size: 10px; font-weight: 400; }
+.quota-family-window em { color: #788c7b; font-size: 10px; font-style: normal; }
+.quota-family-card p { margin: 11px 0 0; color: #788c7b; font-size: 10px; line-height: 1.45; }
 .quota-details summary,.dashboard-runtime-details > summary { padding: 12px 26px; cursor: pointer; color: #496352; }
 .quota-details summary span,.dashboard-runtime-details > summary span { margin-left: 12px; font-size: 11px; color: #849187; }
 .quota-table-wrap { overflow-x: auto; padding: 0 26px 12px; }
@@ -691,6 +703,7 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
  .quota-details summary,.dashboard-runtime-details > summary { padding-inline: 20px; }
  .quota-details summary span,.dashboard-runtime-details > summary span { display: block; margin: 4px 0 0 15px; }
  .quota-table-wrap { padding-inline: 20px; }
+ .quota-family-grid { grid-template-columns: 1fr; padding-inline: 20px; }
  .dashboard-runtime-columns { padding-inline: 20px; }
 }
 

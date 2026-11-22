@@ -20,6 +20,7 @@ TTL = 300
 AUTO_REFRESH_SECONDS = 6 * 3600
 ADVANCED_REFRESH_SECONDS = 300
 QUOTA_WINDOWS = ('five_hour','weekly')
+ADVANCED_FAMILIES = {'gemini-4-neon': 'Gemini 4 Neon', 'gemini-4-hydrogen': 'Gemini 4 Hydrogen'}
 
 
 def verification_entry(text):
@@ -286,17 +287,36 @@ def recover_saved_authorization(runtime,key):
         return False
 
 
-def aggregate(accounts, now):
+def _aggregate_rows(accounts, now):
     known = [a for a in accounts.values() if a.get('status') == 'ok' and 0 <= now-a.get('checked_at',0) <= 600
              and all(type(a.get(w,{}).get('remaining_percent')) in (int,float)
                      and math.isfinite(a[w]['remaining_percent']) and 0 <= a[w]['remaining_percent'] <= 100
                      for w in ('five_hour','weekly'))]
     summary = {'known_accounts':len(known), 'total_accounts':len(accounts), 'windows':{}}
     for window in ('five_hour','weekly'):
+        values = [a[window]['remaining_percent'] for a in known]
         resets = [a[window]['reset_at'] for a in known if type(a[window].get('reset_at')) in (float,int) and a[window]['reset_at']>now]
-        summary['windows'][window] = {'average_remaining_percent':round(sum(a[window]['remaining_percent'] for a in known)/len(known),2) if known else None,
+        summary['windows'][window] = {'average_remaining_percent':round(sum(values)/len(values),2) if values else None,
+                                      'total_remaining_percent':round(sum(values),2) if values else None,
                                       'next_reset_at':min(resets) if resets else None}
     return summary
+
+
+def aggregate(accounts, now):
+    return _aggregate_rows(accounts, now)
+
+
+def aggregate_families(accounts, now):
+    """Split advanced quota totals by the model families enabled per account."""
+    result = {}
+    for family, label in ADVANCED_FAMILIES.items():
+        members = {
+            key: row for key, row in accounts.items()
+            if any(isinstance(model, str) and (model == family or model.startswith(family + '-'))
+                   for model in row.get('models', ()))
+        }
+        result[family] = {'family': family, 'label': label, **_aggregate_rows(members, now)}
+    return result
 
 
 class QuotaReader:
@@ -375,10 +395,12 @@ class QuotaReader:
             rows=copy.deepcopy(self.rows)
             advanced_rows={k:{**rows.get(k,{'status':'not_read'}),'models':sorted(models)}
                            for k,models in advanced.items() if k in rows}
+            advanced_summary = aggregate(advanced_rows, now)
+            advanced_summary['families'] = aggregate_families(advanced_rows, now)
             return {'schema_version':1,'source':'official_cli_usage','read_at':now,'attempted_at':self.attempted,
                     'auto_refresh_seconds':AUTO_REFRESH_SECONDS,
                     'advanced_pool':{'quota_scope':'gemini_models_shared','auto_refresh_seconds':ADVANCED_REFRESH_SECONDS,
-                                     'accounts':advanced_rows,**aggregate(advanced_rows,now)},
+                                     'accounts':advanced_rows,**advanced_summary},
                     'refreshing':self.running,'accounts':rows,**aggregate(rows,now)}
 
     def cached_accounts(self, keys):

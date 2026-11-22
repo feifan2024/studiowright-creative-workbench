@@ -32,6 +32,29 @@ def bare_reader(rows):
 
 
 class AutoRefreshTickTest(unittest.TestCase):
+    def test_advanced_quota_totals_are_split_by_model_family(self):
+        module = load_quota_module()
+        now = 1000
+        row = lambda models, five, weekly: {
+            'status': 'ok', 'checked_at': now - 30, 'models': models,
+            'five_hour': {'remaining_percent': five},
+            'weekly': {'remaining_percent': weekly},
+        }
+        rows = {
+            'hydrogen': row(['gemini-4-hydrogen-high'], 80, 60),
+            'neon': row(['gemini-4-neon-high'], 40, 20),
+            'both': row(['gemini-4-hydrogen-high', 'gemini-4-neon-high'], 70, 50),
+        }
+
+        families = module.aggregate_families(rows, now)
+
+        self.assertEqual(families['gemini-4-hydrogen']['total_accounts'], 2)
+        self.assertEqual(families['gemini-4-hydrogen']['known_accounts'], 2)
+        self.assertEqual(families['gemini-4-hydrogen']['windows']['five_hour']['total_remaining_percent'], 150)
+        self.assertEqual(families['gemini-4-hydrogen']['windows']['five_hour']['average_remaining_percent'], 75)
+        self.assertEqual(families['gemini-4-neon']['total_accounts'], 2)
+        self.assertEqual(families['gemini-4-neon']['windows']['weekly']['total_remaining_percent'], 70)
+
     def test_advanced_tick_only_refreshes_the_allowlisted_readable_accounts(self):
         reader = bare_reader({'a': {'status': 'ok'}, 'b': {'status': 'ok'}, 'c': {'status': 'verification_required'}})
         reader.runtime = types.SimpleNamespace(text_models=lambda:{'b':{'model'},'c':set()})
