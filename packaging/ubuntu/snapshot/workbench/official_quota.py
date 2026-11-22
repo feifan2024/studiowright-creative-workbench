@@ -20,7 +20,6 @@ TTL = 300
 AUTO_REFRESH_SECONDS = 6 * 3600
 ADVANCED_REFRESH_SECONDS = 300
 QUOTA_WINDOWS = ('five_hour','weekly')
-ADVANCED_FAMILIES = {'gemini-4-neon': 'Gemini 4 Neon', 'gemini-4-hydrogen': 'Gemini 4 Hydrogen'}
 
 
 def verification_entry(text):
@@ -306,19 +305,6 @@ def aggregate(accounts, now):
     return _aggregate_rows(accounts, now)
 
 
-def aggregate_families(accounts, now):
-    """Split advanced quota totals by the model families enabled per account."""
-    result = {}
-    for family, label in ADVANCED_FAMILIES.items():
-        members = {
-            key: row for key, row in accounts.items()
-            if any(isinstance(model, str) and (model == family or model.startswith(family + '-'))
-                   for model in row.get('models', ()))
-        }
-        result[family] = {'family': family, 'label': label, **_aggregate_rows(members, now)}
-    return result
-
-
 class QuotaReader:
     def __init__(self, runtime):
         self.runtime = runtime; self.lock = threading.Lock(); self.running = False; self.attempted = 0
@@ -396,7 +382,6 @@ class QuotaReader:
             advanced_rows={k:{**rows.get(k,{'status':'not_read'}),'models':sorted(models)}
                            for k,models in advanced.items() if k in rows}
             advanced_summary = aggregate(advanced_rows, now)
-            advanced_summary['families'] = aggregate_families(advanced_rows, now)
             return {'schema_version':1,'source':'official_cli_usage','read_at':now,'attempted_at':self.attempted,
                     'auto_refresh_seconds':AUTO_REFRESH_SECONDS,
                     'advanced_pool':{'quota_scope':'gemini_models_shared','auto_refresh_seconds':ADVANCED_REFRESH_SECONDS,

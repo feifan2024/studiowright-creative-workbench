@@ -119,7 +119,7 @@ print(submission["model"], submission["fallback"])
 # 后续用 call(f"/api/real-pool/requests/{rid}") 查询最终型号和回复。
 ```
 
-**账号与额度监控**可在工作台「总览 → Gemini 各账号额度」查看。工作台本机面板端口 `18920` 的 `GET /api/channel-status` 返回 `dispatch.advanced_pool`，`GET /api/official-quota` 返回各高级账号的 5 小时及每周剩余与恢复时间，并在 `advanced_pool.families` 中分别统计 Hydrogen 和 Neon。每个家族的 `windows.*.total_remaining_percent` 是该家族各账号剩余百分比的合计，`average_remaining_percent` 是账号平均剩余，不代表供应商公布的绝对积分。两个监控接口由面板提供，程序调用端口 `18922` 提供对话提交及结果查询。额度按账号共享，可读的高级账号每 5 分钟刷新。
+**账号与额度监控**可在工作台「总览 → Gemini 各账号额度」查看。工作台本机面板端口 `18920` 的 `GET /api/channel-status` 返回 `dispatch.advanced_pool`，`GET /api/official-quota` 返回各高级账号的 5 小时及每周剩余与恢复时间。`advanced_pool.quota_scope` 为 `gemini_models_shared`，表示 Hydrogen 与 Neon 共用同一个 Gemini Models 额度池。`advanced_pool.windows.*.total_remaining_percent` 是可读账号剩余百分比的合计，`average_remaining_percent` 是账号平均剩余，不代表供应商公布的绝对积分。两个监控接口由面板提供，程序调用端口 `18922` 提供对话提交及结果查询。额度按账号共享，可读的高级账号每 5 分钟刷新。
 
 接着问时沿用 `conversation_id`，为新消息生成新的请求编号。查回复用下方「结果与下载」中的 Gemini 查询接口。
 

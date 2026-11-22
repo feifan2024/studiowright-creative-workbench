@@ -4917,18 +4917,14 @@ function renderOfficialQuota() {
   const advanced = data?.advanced_pool;
   const advancedDispatch = state.channelStatus?.dispatch?.advanced_pool;
   const advancedRows = Object.entries(advanced?.accounts || {});
-  const familyPools = Object.entries(advanced?.families || {});
-  const familyTopMarkup = familyPools.map(([family,pool])=>{
-        const label = family.includes('hydrogen') ? 'Hydrogen' : family.includes('neon') ? 'Neon' : (pool.label || family);
-        const windowMarkup = ['five_hour','weekly'].map(window=>{
-          const item = pool.windows?.[window] || {};
-          const total = Number.isFinite(item.total_remaining_percent) ? item.total_remaining_percent : null;
-          const average = Number.isFinite(item.average_remaining_percent) ? item.average_remaining_percent : null;
-          const title = window === 'five_hour' ? '5 小时' : '每周';
-          return `<div class="quota-family-window"><span>${title}总账池额度</span><strong>${number(total)}<small>比例点合计</small></strong><em>账号平均 ${number(average)}</em></div>`;
-        }).join('');
-        return `<article class="quota-family-card"><div class="quota-family-heading"><strong>${esc(label)} 总账池额度</strong><span>${pool.known_accounts ?? 0} / ${pool.total_accounts ?? 0} 个账号已读</span></div><div class="quota-family-windows">${windowMarkup}</div><p>合计按该模型家族各账号的剩余百分比相加，不代表供应商公布的绝对积分。</p></article>`;
-      }).join('');
+  const sharedWindowMarkup = ['five_hour','weekly'].map(window=>{
+    const item = advanced?.windows?.[window] || {};
+    const total = Number.isFinite(item.total_remaining_percent) ? item.total_remaining_percent : null;
+    const average = Number.isFinite(item.average_remaining_percent) ? item.average_remaining_percent : null;
+    const title = window === 'five_hour' ? '5 小时' : '每周';
+    return `<div class="quota-shared-window"><span>${title}总账池额度</span><strong>${number(total)}<small>比例点合计</small></strong><em>账号平均 ${number(average)}</em></div>`;
+  }).join('');
+  const sharedTopMarkup = advanced ? `<article class="quota-shared-card"><div class="quota-shared-heading"><strong>Gemini 总账池额度</strong><span>Hydrogen / Neon 共用 · ${advanced.known_accounts ?? 0} / ${advanced.total_accounts ?? advancedRows.length} 个账号已读</span></div><div class="quota-shared-windows">${sharedWindowMarkup}</div><p>Hydrogen 与 Neon 共用同一 Gemini 模型额度池，合计按账号剩余百分比相加，不代表供应商公布的绝对积分。</p></article>` : '';
   const advancedQuotaMarkup = advancedRows.length ? `
     <div class="quota-table-wrap">
       <table aria-label="高级模型账号额度">
@@ -4947,7 +4943,7 @@ function renderOfficialQuota() {
     </div>` : '';
   const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已保存 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : '额度暂未获取';
   target.setAttribute('aria-busy',String(refreshing));
-  target.innerHTML = `<div class="quota-main">${flowMarkup}${familyTopMarkup}</div><div class="quota-footer"><div class="quota-source"><span>Hydrogen / Neon：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>上方显示两个模型家族的总账池额度，账号明细和普通 Gemini 额度请展开查看。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaRequest ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Hydrogen / Neon 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">账号与普通 Gemini 额度明细<span>查看账号剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || `<tr><td colspan="4">${refreshing ? '正在读取额度…' : '额度暂未获取'}</td></tr>`}</tbody></table></div></details>`;
+  target.innerHTML = `<div class="quota-main">${flowMarkup}${sharedTopMarkup}</div><div class="quota-footer"><div class="quota-source"><span>Gemini Models：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>上方显示 Hydrogen 与 Neon 共用的 Gemini 总账池额度，账号明细和普通 Gemini 额度请展开查看。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaRequest ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">账号与普通 Gemini 额度明细<span>查看账号剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || `<tr><td colspan="4">${refreshing ? '正在读取额度…' : '额度暂未获取'}</td></tr>`}</tbody></table></div></details>`;
   target.querySelectorAll('[data-quota-fill]').forEach(meter=>{meter.style.width=Number(meter.dataset.quotaFill)+'%';});
   target.querySelector('[data-quota-action="refresh"]').addEventListener('click',()=>refreshOfficialQuota(true));
   if (focused) target.querySelector(`[data-quota-action="${focused}"]`)?.focus({preventScroll:true});
