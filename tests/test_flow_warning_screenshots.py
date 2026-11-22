@@ -17,7 +17,8 @@ from flow_warning_archive import current_window_screenshots, purge_reviewed_scre
 from flow_warning_desktop import capture_name, sync_once
 
 try:
-    from studiowright.studio import Studio, FLOW_ROOT, PlaywrightTimeout, SubmissionRejectedUnusual
+    from studiowright.studio import ImageRequest, VideoRequest, Studio, FLOW_ROOT, PlaywrightTimeout, SubmissionRejectedUnusual
+    from studiowright.store import Store
 except ImportError:
     Studio = None  # The console backend dependencies are installed on Ubuntu.
 
@@ -30,12 +31,64 @@ JOB_ID = '123456789abc'
 
 @unittest.skipIf(Studio is None, 'Flow console runtime unavailable')
 class Capture(unittest.IsolatedAsyncioTestCase):
+    async def test_generation_saves_failure_before_cooldown_stops_chrome(self):
+        for request, screenshot_available in ((ImageRequest('test', project='project-a'), True),
+                                               (VideoRequest('test', project='project-a'), True),
+                                               (ImageRequest('test', project='project-a'), False)):
+            with self.subTest(request=type(request).__name__, screenshot=screenshot_available), \
+                 tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with patch.dict('os.environ', {'STUDIOWRIGHT_HOME': str(root)}):
+                    store = Store()
+                    studio = Studio('capture-test', store)
+                    studio.console_task_id = 'task-a'
+                    page = SimpleNamespace(url=FLOW_ROOT + 'project/project-a', is_closed=Mock(return_value=False))
+
+                    async def screenshot(**_):
+                        self.assertFalse(page.is_closed(), 'Chrome stopped before the screenshot')
+                        if not screenshot_available:
+                            raise OSError('capture unavailable')
+                        return PNG
+
+                    page.screenshot = AsyncMock(side_effect=screenshot)
+
+                    async def reject(*_, on_submit, **__):
+                        on_submit()
+                        raise SubmissionRejectedUnusual('PUBLIC_ERROR_UNUSUAL_ACTIVITY')
+
+                    flow = SimpleNamespace(page=page, reset=AsyncMock(), apply_image_options=AsyncMock(),
+                                           apply_video_options=AsyncMock(return_value=None),
+                                           generate_images=reject, generate_video=reject)
+                    studio._generation_page = AsyncMock(return_value=(None, flow))
+
+                    def stop_chrome(args, **_):
+                        self.assertEqual(args, ['systemctl', '--user', 'stop', 'studiowright-browser-capture-test.service'])
+                        page.is_closed.return_value = True
+                        with store.connect() as db:
+                            job = db.execute('SELECT * FROM jobs').fetchone()
+                        self.assertEqual(job['status'], 'failed')
+                        result = json.loads(job['result'])
+                        self.assertEqual(result['retry_evidence'], 'provider_rejected_unusual')
+                        if screenshot_available:
+                            self.assertEqual((root / 'incidents' / result['warning_screenshot']).read_bytes(), PNG)
+                        else:
+                            self.assertNotIn('warning_screenshot', result)
+
+                    generate = studio.image if isinstance(request, ImageRequest) else studio.video
+                    with patch('subprocess.run', side_effect=stop_chrome) as stop:
+                        with self.assertRaisesRegex(SubmissionRejectedUnusual, 'PUBLIC_ERROR_UNUSUAL_ACTIVITY'):
+                            await generate(request)
+                    page.screenshot.assert_awaited_once()
+                    stop.assert_called_once()
+                    self.assertEqual(studio.governor.status()['refusals'], 1)
+
     async def test_failure_uses_the_active_project_page_and_preserves_retry_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             job = {'project_id': 'project-a', 'params': '{"origin_console_task":"task-a","count":1}',
                    'result': '{"stage":"submitting","media_ids":[]}'}
             studio = Studio.__new__(Studio)
             studio.store = SimpleNamespace(job=Mock(return_value=job), update_job=Mock())
+            studio.governor = Mock()
             page = SimpleNamespace(url=FLOW_ROOT + 'project/project-a', screenshot=AsyncMock(return_value=PNG))
             error = SubmissionRejectedUnusual('PUBLIC_ERROR_UNUSUAL_ACTIVITY')
             with patch('studiowright.studio.paths.incidents_dir', return_value=Path(directory)):

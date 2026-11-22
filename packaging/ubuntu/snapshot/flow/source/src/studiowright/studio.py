@@ -490,47 +490,62 @@ class Studio:
         job = self.store.job(job_id)
         result = json.loads(job["result"]) if job and job["result"] else {}
         params = json.loads(job["params"]) if job and job["params"] else {}
-        shot = None
+        stage, media = result.get("stage"), result.get("media_ids", [])
+        try:
+            project_id = job["project_id"] if job else None
+            shot = await self._capture_failure_page(job_id, site, project_id, page)
+            detail = f"{type(exc).__name__}: {exc}"
+            if shot is not None:
+                detail += f" (screenshot: {shot})"
+                if site == FLOW_ROOT and params.get("origin_console_task"):
+                    result["warning_screenshot"] = shot.name
+                if isinstance(exc, FlowError | PlaywrightError):
+                    exc.args = (f"{exc.args[0] if exc.args else exc} (screenshot: {shot})",)
+            # Only narrow, positively identified cases are safe to retry. Any missing
+            # stage, accepted id, partial result, or failure after clicking is unknown.
+            if (stage == "submitting" and not media and params.get("count") == 1
+                    and isinstance(exc, SubmissionRejectedUnusual)):
+                result["retry_evidence"] = "provider_rejected_unusual"
+            elif (stage == "preparing" and not media
+                  and isinstance(exc, (PlaywrightTimeout, TimeoutError, ConnectionError))):
+                result["retry_evidence"] = "transient_before_submit"
+            else:
+                result["retry_evidence"] = "not_safe_to_repeat"
+            self.store.update_job(job_id, status="failed", result=result, error=detail, finished=time.time())
+        finally:
+            if site == FLOW_ROOT and stage in ("submitting", "submitted") and isinstance(exc, UnusualActivity):
+                # Cooldown stops the account's managed Chrome. Save the evidence first
+                # while the job still owns its project tab and account lock.
+                try:
+                    self.governor.report_unusual_activity()
+                except Exception:
+                    log.exception("Unable to record Flow cooldown for job %s", job_id)
+
+    async def _capture_failure_page(self, job_id: str, site: str, project_id: str | None, page) -> Path | None:
         try:
             if page is None:
                 page = self.session.find_page(site)
-            if page is not None:
-                candidate = paths.incidents_dir() / f"{job_id}.png"
-                if site == FLOW_ROOT:
-                    project = f"/project/{job['project_id']}" if job else None
-                    if project and self._incident_project(page.url, project):
-                        png = await self._incident_png(page, project)
-                        if png and self._incident_project(page.url, project):
-                            candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                            with os.fdopen(fd, "wb") as output:
-                                output.write(png)
-                            shot = candidate
-                else:
-                    candidate.parent.mkdir(parents=True, exist_ok=True)
-                    await page.screenshot(path=str(candidate))
-                    shot = candidate
+            if page is None:
+                return None
+            candidate = paths.incidents_dir() / f"{job_id}.png"
+            if site == FLOW_ROOT:
+                project = f"/project/{project_id}"
+                if not project_id or not self._incident_project(page.url, project):
+                    return None
+                png = await self._incident_png(page, project)
+                if not png or not self._incident_project(page.url, project):
+                    return None
+                candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as output:
+                    output.write(png)
+            else:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(candidate))
+            return candidate
         except Exception as error:
             log.warning("Unable to capture the failure page for job %s (%s)", job_id, type(error).__name__)
-        detail = f"{type(exc).__name__}: {exc}"
-        if shot is not None:
-            detail += f" (screenshot: {shot})"
-            if site == FLOW_ROOT and params.get("origin_console_task"):
-                result["warning_screenshot"] = shot.name
-            if isinstance(exc, FlowError | PlaywrightError):
-                exc.args = (f"{exc.args[0] if exc.args else exc} (screenshot: {shot})",)
-        stage, media = result.get("stage"), result.get("media_ids", [])
-        # Only narrow, positively identified cases are safe to retry. Any missing
-        # stage, accepted id, partial result, or failure after clicking is unknown.
-        if (stage == "submitting" and not media and params.get("count") == 1
-                and isinstance(exc, SubmissionRejectedUnusual)):
-            result["retry_evidence"] = "provider_rejected_unusual"
-        elif (stage == "preparing" and not media
-              and isinstance(exc, (PlaywrightTimeout, TimeoutError, ConnectionError))):
-            result["retry_evidence"] = "transient_before_submit"
-        else:
-            result["retry_evidence"] = "not_safe_to_repeat"
-        self.store.update_job(job_id, status="failed", result=result, error=detail, finished=time.time())
+            return None
 
     @staticmethod
     def _incident_project(url: str, project: str) -> bool:
@@ -671,11 +686,7 @@ class Studio:
     async def _submit_guarded(self, call: Any, *, paced: bool = False) -> Any:
         if not paced:
             await self.governor.wait_turn()
-        try:
-            result = await call()
-        except UnusualActivity:
-            self.governor.report_unusual_activity()
-            raise
+        result = await call()
         # A bookkeeping failure must never hide a successfully generated result.
         try:
             self.governor.report_success()
