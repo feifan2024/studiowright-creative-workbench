@@ -30,7 +30,7 @@ namespace StudioWrightDesktop
         {
             using (var stream = typeof(Program).Assembly.GetManifestResourceStream("StudioWright.AppIcon.ico"))
             {
-                if (stream == null) throw new InvalidOperationException("工作台图标资源缺失。");
+                if (stream == null) throw new InvalidOperationException("算力中心图标资源缺失。");
                 using (var icon = new Icon(stream, size, size)) return (Icon)icon.Clone();
             }
         }
@@ -268,15 +268,15 @@ namespace StudioWrightDesktop
         readonly TextBox user = new TextBox { Left=150, Top=146, Width=155 };
         readonly TextBox port = new TextBox { Left=375, Top=146, Width=50, Text="22" };
         readonly TextBox password = new TextBox { Left=150, Top=184, Width=275, UseSystemPasswordChar=true };
-        readonly Label state = new Label { Left=25, Top=309, Width=500, Height=65, Text="正在查找同一局域网内的 Ubuntu 工作台……" };
-        readonly Button connect = new Button { Left=25, Top=257, Width=142, Height=35, Text="连接工作台" };
+        readonly Label state = new Label { Left=25, Top=309, Width=500, Height=65, Text="正在查找同一局域网内的 Ubuntu 算力中心……" };
+        readonly Button connect = new Button { Left=25, Top=257, Width=142, Height=35, Text="连接算力中心" };
         readonly Button cancel = new Button { Left=180, Top=257, Width=100, Height=35, Text="取消" };
         bool connecting;
         public IConnectionTunnel NewTunnel;
 
         public ConnectDialog()
         {
-            Text="连接 Ubuntu 工作台"; Width=570; Height=420; StartPosition=FormStartPosition.CenterParent;
+            Text="连接 Ubuntu 算力中心"; Width=570; Height=420; StartPosition=FormStartPosition.CenterParent;
             AcceptButton=connect; CancelButton=cancel;
             Controls.Add(new Label { Left=25, Top=20, Width=500, Height=33, Text="自动发现只提供地址；首次连接需确认服务器身份。" });
             Controls.Add(new Label { Left=25, Top=69, Width=115, Text="发现的服务" });
@@ -305,7 +305,7 @@ namespace StudioWrightDesktop
 
         async void Find()
         {
-            scan.Enabled=false; state.Text="正在查找局域网中的工作台……";
+            scan.Enabled=false; state.Text="正在查找局域网中的算力中心……";
             try {
                 var found=await Task.Run(() => Discovery.Scan());
                 if (IsDisposed || connecting) return;
@@ -340,7 +340,7 @@ namespace StudioWrightDesktop
                 !Regex.IsMatch(u,@"^[A-Za-z_][A-Za-z0-9_-]{0,63}$") || !Int32.TryParse(port.Text.Trim(),out sshPort) || sshPort<1 || sshPort>65535)
             { state.Text="请填写有效的内网地址、Ubuntu 用户名和端口。"; return; }
             if (Connection.PortOpen(18920) || Connection.PortOpen(18888) || Connection.PortOpen(18922))
-            { state.Text="本机连接端口正在使用，请先确认现有工作台连接。"; return; }
+            { state.Text="本机连接端口正在使用，请先确认现有算力中心连接。"; return; }
             h=address.ToString();
             string secret=password.Text;
             password.Clear();
@@ -349,7 +349,7 @@ namespace StudioWrightDesktop
             connecting=true;
             connect.Enabled=scan.Enabled=false;
             servers.Enabled=host.Enabled=user.Enabled=port.Enabled=password.Enabled=false;
-            state.Text="正在连接 Ubuntu 并检查工作台……";
+            state.Text="正在连接 Ubuntu 并检查算力中心……";
             string forwards=" -L 127.0.0.1:18920:127.0.0.1:18920 -L 127.0.0.1:18888:127.0.0.1:18888 -L 127.0.0.1:18922:127.0.0.1:18922";
             try {
                 var ready=await Task.Run(() => {
@@ -374,7 +374,7 @@ namespace StudioWrightDesktop
                             Thread.Sleep(400);
                         }
                         throw new InvalidDataException(passwordLogin ?
-                            "已尝试连接，但工作台服务未通过检查。请核对 Ubuntu 服务状态。" :
+                            "已尝试连接，但算力中心服务未通过检查。请核对 Ubuntu 服务状态。" :
                             "密钥连接未完成。请核对已信任的服务器和 SSH 密钥，或在面板中填写密码。");
                     } finally { secret=null; if(candidate!=null) candidate.Dispose(); }
                 });
@@ -399,7 +399,7 @@ namespace StudioWrightDesktop
     sealed class DesktopWindow : Form
     {
         readonly WebView2 web = new WebView2 { Dock=DockStyle.Fill };
-        readonly Label message = new Label { Dock=DockStyle.Fill, TextAlign=ContentAlignment.MiddleCenter, Text="正在连接创作工作台……" };
+        readonly Label message = new Label { Dock=DockStyle.Fill, TextAlign=ContentAlignment.MiddleCenter, Text="正在连接算力中心……" };
         readonly NotifyIcon tray;
         readonly ToolStripStatusLabel status = new ToolStripStatusLabel("正在连接…");
         IConnectionTunnel tunnel;
@@ -410,16 +410,16 @@ namespace StudioWrightDesktop
 
         public DesktopWindow()
         {
-            Text="创作工作台"; Width=1380; Height=920; MinimumSize=new Size(800,560); StartPosition=FormStartPosition.CenterScreen;
+            Text="算力中心"; Width=1380; Height=920; MinimumSize=new Size(800,560); StartPosition=FormStartPosition.CenterScreen;
             Icon=Program.BrandIcon(32);
             var bar=new StatusStrip(); var reconnect=new ToolStripDropDownButton("连接");
             reconnect.DropDownItems.Add("重新连接 Ubuntu",null,delegate { OpenConnection(); });
             reconnect.DropDownItems.Add("刷新页面",null,delegate { if (web.CoreWebView2!=null) web.Reload(); });
             bar.Items.Add(reconnect);bar.Items.Add(status);
             Controls.Add(message);Controls.Add(bar);
-            var menu=new ContextMenuStrip(); menu.Items.Add("打开工作台",null,delegate { RestoreWindow(); });
+            var menu=new ContextMenuStrip(); menu.Items.Add("打开算力中心",null,delegate { RestoreWindow(); });
             menu.Items.Add("退出",null,delegate { exiting=true; Close(); });
-            tray=new NotifyIcon { Icon=Program.BrandIcon(16), Text="创作工作台", Visible=true, ContextMenuStrip=menu };
+            tray=new NotifyIcon { Icon=Program.BrandIcon(16), Text="算力中心", Visible=true, ContextMenuStrip=menu };
             tray.DoubleClick+=delegate { RestoreWindow(); };
             Resize+=delegate { if (WindowState==FormWindowState.Minimized) Hide(); };
             FormClosing+=delegate(object sender, FormClosingEventArgs e) {
@@ -467,7 +467,7 @@ namespace StudioWrightDesktop
                 if (healthy) {
                     bool recovered=wasDisconnected;
                     wasDisconnected=false; reconnectFailures=0; nextReconnect=DateTime.MinValue;
-                    status.Text="已连接 Ubuntu 工作台 · 断线后自动重连";
+                    status.Text="已连接 Ubuntu 算力中心 · 断线后自动重连";
                     if (recovered) {
                         if (web.CoreWebView2==null || navigationFailed) ShowWorkbench();
                         else await web.CoreWebView2.ExecuteScriptAsync("window.dispatchEvent(new CustomEvent('studiowright-connection',{detail:{connected:true}}));");
@@ -525,7 +525,7 @@ namespace StudioWrightDesktop
                     };
                 }
                 if (!Controls.Contains(web)) { Controls.Add(web);web.BringToFront(); }
-                web.Source=new Uri(Program.Workbench); status.Text="已连接 Ubuntu 工作台 · 最小化后收纳到系统托盘";
+                web.Source=new Uri(Program.Workbench); status.Text="已连接 Ubuntu 算力中心 · 最小化后收纳到系统托盘";
             } catch { status.Text="桌面窗口启动失败";message.Text="无法启动桌面显示组件，请检查 WebView2 运行环境。"; }
         }
     }
@@ -534,7 +534,7 @@ namespace StudioWrightDesktop
     {
         public EmbeddedWindow(Uri uri, CoreWebView2Environment environment)
         {
-            Text="创作工作台 · 附加窗口";Width=1200;Height=800;StartPosition=FormStartPosition.CenterParent;
+            Text="算力中心 · 附加窗口";Width=1200;Height=800;StartPosition=FormStartPosition.CenterParent;
             Icon=Program.BrandIcon(32);
             var view=new WebView2 { Dock=DockStyle.Fill };Controls.Add(view);
             Shown+=async delegate {

@@ -52,7 +52,7 @@ def health():
             return True
     except (URLError, TimeoutError, OSError, ValueError, AttributeError):
         pass
-    raise RuntimeError(f"本机端口 {PORT} 被其他程序使用，或 Ubuntu 工作台暂时不可用。")
+    raise RuntimeError(f"本机端口 {PORT} 被其他程序使用，或 Ubuntu 算力中心暂时不可用。")
 
 
 def ensure_chrome_manager():
@@ -194,7 +194,7 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     if os.name == 'nt' and not ensure_chrome_manager():
-        print('本机 Chrome 账号管理暂时无法启动；工作台仍可继续使用。', file=sys.stderr)
+        print('本机 Chrome 账号管理暂时无法启动；算力中心仍可继续使用。', file=sys.stderr)
     process = None
     if not health():
         target = read_target(ROOT / "ubuntu-connection.json")
@@ -216,17 +216,17 @@ def main():
         if not ready:
             if process.poll() is None:
                 process.terminate()
-            raise RuntimeError("无法连接 Ubuntu 工作台，请检查 SSH 连接和 Ubuntu 服务。")
+            raise RuntimeError("无法连接 Ubuntu 算力中心，请检查 SSH 连接和 Ubuntu 服务。")
     try:
         if not ensure_flow_console():
-            print('Flow 后台入口暂不可用；工作台仍可继续使用。', file=sys.stderr)
+            print('Flow 后台入口暂不可用；算力中心仍可继续使用。', file=sys.stderr)
     except (OSError, RuntimeError, ValueError, KeyError):
-        print('Flow 后台入口暂不可用；工作台仍可继续使用。', file=sys.stderr)
+        print('Flow 后台入口暂不可用；算力中心仍可继续使用。', file=sys.stderr)
     try:
         if not ensure_unified_api():
-            print('统一 API 入口暂不可用；工作台仍可继续使用。', file=sys.stderr)
+            print('统一 API 入口暂不可用；算力中心仍可继续使用。', file=sys.stderr)
     except (OSError, RuntimeError, ValueError, KeyError):
-        print('统一 API 入口暂不可用；工作台仍可继续使用。', file=sys.stderr)
+        print('统一 API 入口暂不可用；算力中心仍可继续使用。', file=sys.stderr)
     if args.no_browser:
         if process is not None:
             print(f"STARTED_PID={process.pid}")

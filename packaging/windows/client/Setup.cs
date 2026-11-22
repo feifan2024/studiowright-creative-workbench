@@ -61,8 +61,8 @@ namespace StudioWrightClient
                     Directory.CreateDirectory(folder); Directory.CreateDirectory(app);
                     string exe = Path.Combine(app, "StudioWright.exe");
                     File.WriteAllText(exe, "isolated test target");
-                    string first = Path.Combine(folder, "创作工作台.lnk");
-                    string second = Path.Combine(folder, "创作工作台桌面版.lnk");
+                    string first = Path.Combine(folder, "算力中心.lnk");
+                    string second = Path.Combine(folder, "算力中心桌面版.lnk");
                     if (mode == "conflict") File.WriteAllText(first, "preserve existing file");
                     bool ready = ApplyDesktopOption(mode != "off", folder, exe);
                     if (mode == "on") ready = ready && ApplyDesktopOption(true, folder, exe) && File.Exists(first) && Directory.GetFiles(folder).Length == 1;
@@ -218,7 +218,7 @@ namespace StudioWrightClient
         {
             try
             {
-                string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "创作工作台桌面版.lnk");
+                string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "算力中心桌面版.lnk");
                 if (File.Exists(path)) return;
                 Type type = Type.GetTypeFromProgID("WScript.Shell");
                 object shell = Activator.CreateInstance(type);
@@ -239,7 +239,7 @@ namespace StudioWrightClient
                 if (!Directory.Exists(folder) || !Path.IsPathRooted(executable)) return false;
                 Type shellType = Type.GetTypeFromProgID("WScript.Shell");
                 object shell = Activator.CreateInstance(shellType);
-                foreach (string name in new[] { "创作工作台.lnk", "创作工作台桌面版.lnk" })
+                foreach (string name in new[] { "算力中心.lnk", "算力中心桌面版.lnk" })
                 {
                     string path = Path.Combine(folder, name);
                     if (Directory.Exists(path)) continue;
@@ -259,7 +259,7 @@ namespace StudioWrightClient
                         linkType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, link, new object[] { executable });
                         linkType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, link, new object[] { Path.GetDirectoryName(executable) });
                         linkType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, link, new object[] { executable + ",0" });
-                        linkType.InvokeMember("Description", BindingFlags.SetProperty, null, link, new object[] { "创作工作台桌面版" });
+                        linkType.InvokeMember("Description", BindingFlags.SetProperty, null, link, new object[] { "算力中心桌面版" });
                         linkType.InvokeMember("Save", BindingFlags.InvokeMethod, null, link, null);
                         try { File.Move(temp, path); }
                         catch (IOException) { if (File.Exists(path) || Directory.Exists(path)) continue; throw; }
@@ -278,11 +278,11 @@ namespace StudioWrightClient
     {
         public SetupForm()
         {
-            Text = "创作工作台 · 操作端安装"; Width = 540; Height = 310;
+            Text = "算力中心 · 操作端安装"; Width = 540; Height = 310;
             Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             StartPosition = FormStartPosition.CenterScreen;
             var info = new Label { Left = 24, Top = 20, Width = 470, Height = 115,
-                Text = "安装独立桌面工作台，自动发现并连接 Ubuntu。窗口最小化后收纳到系统托盘。\r\n\r\n安装包不包含账号、密钥、素材或对话记录，现有服务和浏览器资料不会被覆盖。" };
+                Text = "安装独立桌面算力中心，自动发现并连接 Ubuntu。窗口最小化后收纳到系统托盘。\r\n\r\n安装包不包含账号、密钥、素材或对话记录，现有服务和浏览器资料不会被覆盖。" };
             var desktopShortcut = new CheckBox { Left = 24, Top = 139, Width = 280, Height = 26, Text = "在桌面创建快捷方式", Checked = true };
             var install = new Button { Left = 24, Top = 182, Width = 155, Height = 36, Text = "安装到当前用户" };
             var cancel = new Button { Left = 190, Top = 182, Width = 100, Height = 36, Text = "取消" };
@@ -291,7 +291,7 @@ namespace StudioWrightClient
                 install.Enabled = false;
                 try {
                     bool shortcutReady = Program.Install(desktopShortcut.Checked);
-                    string message = shortcutReady ? "桌面版已安装。接下来将打开创作工作台。" :
+                    string message = shortcutReady ? "桌面版已安装。接下来将打开算力中心。" :
                         "桌面版已安装，但桌面快捷方式未能创建。可以从开始菜单打开。";
                     MessageBox.Show(message, "安装完成");
                     // Program.InstalledExe is an install-time constant path, not user input.

@@ -129,7 +129,7 @@ function officialSummary() {
 }
 function officialDetails(record) {
   const call = record.call;
-  return `<p>通道：官方 Antigravity CLI · ${state.channelStatus?.production_send_available ? '已接入工作台账号池' : '暂不可用'}。</p><p>登录授权：${record.data?.authorization === 'saved_verified_identity' ? '本地已保存且账号身份一致；不保证下一次官方请求一定通过' : '本地授权未就绪'}。</p><p>额外核验：${call?.verification === 'not_required_for_this_call' ? '该次调用未受拦截' : call?.verification === 'page_error_500' ? '记录中的官方核验页返回 500，不能据此认定账号失效' : call?.verification === 'required' ? '该次调用要求额外核验' : '未单独读取'}</p><p>最近真实调用：${esc(channelLabels[record.outcome] || '未实测')}${call ? ` · ${esc(dateTime(call.created))}` : ''}。${record.stale ? '记录超过 24 小时，仅作历史参考。' : '仅证明该次结果，不保证下次可用。'}</p><p>来源：已保存的官方实测请求${state.channelStatus?.read_at ? ` · 读取于 ${esc(dateTime(state.channelStatus.read_at))}` : '（暂未读取）'}。</p>`;
+  return `<p>通道：官方 Antigravity CLI · ${state.channelStatus?.production_send_available ? '已接入算力中心账号池' : '暂不可用'}。</p><p>登录授权：${record.data?.authorization === 'saved_verified_identity' ? '本地已保存且账号身份一致；不保证下一次官方请求一定通过' : '本地授权未就绪'}。</p><p>额外核验：${call?.verification === 'not_required_for_this_call' ? '该次调用未受拦截' : call?.verification === 'page_error_500' ? '记录中的官方核验页返回 500，不能据此认定账号失效' : call?.verification === 'required' ? '该次调用要求额外核验' : '未单独读取'}</p><p>最近真实调用：${esc(channelLabels[record.outcome] || '未实测')}${call ? ` · ${esc(dateTime(call.created))}` : ''}。${record.stale ? '记录超过 24 小时，仅作历史参考。' : '仅证明该次结果，不保证下次可用。'}</p><p>来源：已保存的官方实测请求${state.channelStatus?.read_at ? ` · 读取于 ${esc(dateTime(state.channelStatus.read_at))}` : '（暂未读取）'}。</p>`;
 }
 async function refreshChannelStatus() {
   if (channelRead) return channelRead;
@@ -182,7 +182,7 @@ function renderGeminiAttempts(attempts) {
     unexpected_tool_stopped:'检测到意外工具调用，已停止',
     worker_interrupted:'对话处理意外中断',
     persistence_or_worker_failure:'处理或保存结果时中断',
-    workbench_restarted:'工作台重启，结果需核对',
+    workbench_restarted:'算力中心重启，结果需核对',
     confirmed_bad_reply:'回复已结束，仅返回通用拒答',
     confirmed_incomplete_reply:'回复已结束，但内容为空或被截断',
     authorization_still_required:'恢复后仍需本人授权，本条已用完补发次数',
@@ -321,7 +321,7 @@ function accountIssues(account, snapshot = state.snapshot, geminiRow = null) {
   const activeFlow = (snapshot?.tasks || []).some(t => t.source_profile === account.profile &&
     ['image','video'].includes(t.kind) && ['queued','running'].includes(t.status));
   if (pageState && pageState !== 'ok' && !(pageState === 'busy' && activeFlow))
-    add('flow_page_state', '页面未就绪：' + ({overlay:'页面有弹窗待关闭', binding:'窗口绑定待核对', project:'页面停在非标准项目', unconfirmed:'页面状态待确认', busy:'页面忙', draft:'有草稿待核对', login:'需要登录核验'}[pageState] || pageState), '点一键就绪，工作台会把页面带回标准项目并复查。', '使用一键就绪。');
+    add('flow_page_state', '页面未就绪：' + ({overlay:'页面有弹窗待关闭', binding:'窗口绑定待核对', project:'页面停在非标准项目', unconfirmed:'页面状态待确认', busy:'页面忙', draft:'有草稿待核对', login:'需要登录核验'}[pageState] || pageState), '点一键就绪，算力中心会把页面带回标准项目并复查。', '使用一键就绪。');
   const windowIssue = flowWindowIssue(account.profile, snapshot);
   if (windowIssue) issues.push(windowIssue);
   for (const issue of geminiRow?.issues || []) add('gemini_'+(issue.key || 'blocked'),issue.title,'Gemini 当前就绪检查。',issue.action);
@@ -399,7 +399,7 @@ function setView(view) {
   const inWork = workViews.has(view);
   if (inWork) lastWorkView = view;
   $("workBar").hidden = !inWork;
-  $("breadcrumb").textContent = inWork ? "工作台 / " + ({tasks:"Flow",conversations:"自定义对话",music:"音乐生成"}[view]) : display[view];
+  $("breadcrumb").textContent = inWork ? "算力中心 / " + ({tasks:"Flow",conversations:"自定义对话",music:"音乐生成"}[view]) : display[view];
   $("workBar").querySelectorAll("[data-view]").forEach((link) => {
     if (link.dataset.view === view) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -839,9 +839,9 @@ function renderProjects() {
     $("projectTable").innerHTML = empty(query ? "没有找到符合条件的项目" : "还没有已登记项目", query ? "试试其他名称或编号。" : "请从原后台读取或登记项目。");
     return;
   }
-  const markup = `<table><thead><tr><th>项目名称</th><th>所属账号</th><th>最近工作台任务</th><th>素材入库记录</th><th>生命周期状态</th><th>操作</th></tr></thead><tbody>${projects.map((item) => {
+  const markup = `<table><thead><tr><th>项目名称</th><th>所属账号</th><th>最近算力中心任务</th><th>素材入库记录</th><th>生命周期状态</th><th>操作</th></tr></thead><tbody>${projects.map((item) => {
     const task = taskByProject.get(item.key);
-    const activity = task?.last ? dateTime(task.last) : '无工作台任务记录';
+    const activity = task?.last ? dateTime(task.last) : '无算力中心任务记录';
     const action = projectActions.get(item.key);
     const detail = action?.detail || {};
     const progress = action?.kind === 'transfer' && Number.isFinite(detail.total) ? `已识别 ${detail.total} · 新增 ${detail.added || 0} · 已有 ${detail.skipped || 0} · 失败 ${detail.failed || 0}${Number.isFinite(detail.tag_queued) ? ` · 标签排队 ${detail.tag_queued}` : ''}` : '';
@@ -1155,7 +1155,7 @@ function flowGovernance(snapshot, fresh = state.snapshotFresh, verifiedEmpty = n
   const c=snapshot?.flow_coordination;
   const known=fresh && snapshot?.flow_state?.available === true && snapshot?.real_accounts?.available === true;
   const shared=[];
-  if (!known) shared.push({title:'Flow 状态暂不可读取',action:'检查工作台连接，再重新读取。'});
+  if (!known) shared.push({title:'Flow 状态暂不可读取',action:'检查算力中心连接，再重新读取。'});
   else if (c?.desktop_keyboard_ready !== true) shared.push({title:'Ubuntu 桌面键盘未就绪',action:'在 Ubuntu 保持桌面登录，若出现远程交互授权，请开启「允许远程交互」并点击「分享」，然后重新读取状态。'});
   const windows=new Map((c?.windows || []).map(w=>[w.profile,w]));
   const bindings=new Map((c?.window_bindings || []).map(w=>[w.profile,w]));
@@ -1175,7 +1175,7 @@ function flowGovernance(snapshot, fresh = state.snapshotFresh, verifiedEmpty = n
     if (!window || !['idle','preparing','submitting','submitted','generated','downloading','blocked_draft','result_unknown','needs_verification'].includes(window.state))
       add('flow_binding','任务窗口运行状态待核对','打开调度中心核对固定窗口。');
     if (window?.state==='blocked_draft' && !(verifiedEmpty.has(account.profile) && window.updated <= probeStartedAt))
-      add('flow_draft','固定任务窗口有草稿或附件','点 Flow 一键就绪，工作台会刷新固定任务页并复查。');
+      add('flow_draft','固定任务窗口有草稿或附件','点 Flow 一键就绪，算力中心会刷新固定任务页并复查。');
     if (!issues.some(issue=>issue.key.startsWith('flow_window_') || issue.key==='flow_draft')) {
       const life=lifecycle.get(account.profile);
       if (c?.window_lifecycle_available!==true || life?.unique_ok!==1)
@@ -1467,8 +1467,8 @@ function auditFlowAccounts(snapshot, dispatch, pageChecks, probeStartedAt) {
       project:['任务窗口不在该账号的已登记项目','核对对应项目与固定窗口绑定。'],
       login:['任务页登录身份未通过','在原账号的 Ubuntu 浏览器核对登录。'],
       draft:repair?.actions?.includes('reload')
-        ? ['刷新后仍检测到草稿或附件','工作台暂不派发该账号。']
-        : ['固定任务窗口有草稿或附件','点 Flow 一键就绪，工作台会刷新固定任务页并复查。'],
+        ? ['刷新后仍检测到草稿或附件','算力中心暂不派发该账号。']
+        : ['固定任务窗口有草稿或附件','点 Flow 一键就绪，算力中心会刷新固定任务页并复查。'],
       overlay:['任务页有弹窗挡住输入','在原窗口核对提示；如需验证，请按官方提示完成。'],
       editor:['任务页未确认可用的输入框','核对页面是否加载完成或是否需要更新。']};
     if (pageIssues[page]) {
@@ -1505,8 +1505,8 @@ const geminiProbeReasons={
   confirmed_incomplete_reply:'云端已响应，但回复不完整',
   temporary_cli_launch_failure:'本机 Gemini 调用程序未能启动',
   provider_error:'Google 返回错误，未提供更具体原因',
-  worker_interrupted:'工作台执行中断，结果未确认',
-  workbench_restarted:'工作台重启，结果未确认',
+  worker_interrupted:'算力中心执行中断，结果未确认',
+  workbench_restarted:'算力中心重启，结果未确认',
 };
 
 function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
@@ -1728,7 +1728,7 @@ function renderGovernanceGuidance(service, audit) {
     const internal=blocked.length-actions.length;
     body=`<strong>Flow：${keyboard ? '需要一次 Ubuntu 桌面授权' : actions.length ? '账号授权与处理' : audit.error ? '本轮检查未完成，你暂时不用操作' : '本轮无需你操作'}</strong>`+
       (keyboard ? '<p>在 Ubuntu 的远程交互弹窗中，开启「允许远程交互」并点击「分享」。这是所有账号共用的一次授权。</p>' : '')+
-      actions.join('')+(!keyboard && internal ? `<p>另有 ${internal} 个账号需由工作台侧核对，你不用操作。</p>` : '')+
+      actions.join('')+(!keyboard && internal ? `<p>另有 ${internal} 个账号需由算力中心侧核对，你不用操作。</p>` : '')+
       (audit.error ? `<p>${esc(audit.error)}</p>` : '')+
       (governanceError ? `<p>${esc(governanceError)}</p>` : '')+
       (keyboard || actions.length || audit.error ? '<button type="button" class="insight-account-link" data-govern-recheck="flow">重新检查 →</button>' : '');
@@ -2324,7 +2324,7 @@ function renderAccounts() {
     const flowFailed = ownFlow.filter(t => t.status === 'failed').length;
     const ownGemini = state.snapshot?.gemini_stats?.accounts?.[item.key.slice('flow-account-'.length)];
     const flowPerformance = flowDone + flowFailed ? `任务 ${flowDone} 成功 / ${flowFailed} 失败 · 成功率 ${Math.round(flowDone * 100 / (flowDone + flowFailed))}%` : '暂无已结束生成任务';
-    const gemPerformance = ownGemini ? `对话 ${ownGemini.completed} 完成 · 平均首段 ${typeof ownGemini.avg_first_ms === 'number' ? (ownGemini.avg_first_ms / 1000).toFixed(1) + ' 秒' : '暂无实测'}` : '暂无工作台对话记录';
+    const gemPerformance = ownGemini ? `对话 ${ownGemini.completed} 完成 · 平均首段 ${typeof ownGemini.avg_first_ms === 'number' ? (ownGemini.avg_first_ms / 1000).toFixed(1) + ' 秒' : '暂无实测'}` : '暂无算力中心对话记录';
     const quotaView = accountOfficialQuotaMarkup(quotaKey);
     const flowNextCredit = item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : '';
     const flowBalanceTitle = `积分余额${hasBalance && !item.flow_balance_fresh ? '（上次读取）' : ''}${flowNextCredit ? ' · 下次积分到账 ' + flowNextCredit : ''}`;
@@ -2380,7 +2380,7 @@ async function refreshActivation() {
     activationSignature = signature;
   } catch (_) {
     $('activateAccounts').disabled = true;
-    $('activationProgress').textContent = '一键检查暂不可用，请检查工作台连接。';
+    $('activationProgress').textContent = '一键检查暂不可用，请检查算力中心连接。';
   } finally { activationUpdating = false; }
 }
 
@@ -2424,7 +2424,7 @@ async function refreshActivationSchedule(force = false) {
     renderActivationToggle();
     const warning = [data.held_accounts ? `${data.held_accounts} 个账号上次检查失败，需手动核对` : '', data.flow_hold ? 'Flow 积分刷新待人工核对' : ''].filter(Boolean).join('；');
     $('activationScheduleStatus').textContent = `${data.enabled ? '已开启' : '未开启'} · 下次：${scheduleDate(data.next_due)} · 上次：${scheduleDate(data.last_due)}${data.last_note ? '（' + data.last_note + '）' : ''}${warning ? ' · ' + warning : ''}`;
-  } catch (_) { $('activationScheduleStatus').textContent = '定时状态暂不可读取，请检查工作台连接。'; }
+  } catch (_) { $('activationScheduleStatus').textContent = '定时状态暂不可读取，请检查算力中心连接。'; }
 }
 $('activationScheduleToggle').addEventListener('click', () => {
   const opening = activationSchedulePanel.hidden;
@@ -2471,7 +2471,7 @@ async function refreshActivationPoll(force = false) {
     const name = account ? (account.email || account.label || '账号') : data.last_account ? '账号已不在列表' : '';
     const hold = data.held_accounts ? ` · ${data.held_accounts} 个账号需通过一键检查手动核对` : '';
     $('activationPollStatus').textContent = `${data.enabled ? '轮询已开启' : '轮询未开启'} · 下次：${scheduleDate(data.next_due)} · 上次：${scheduleDate(data.last_due)}${name ? ' · ' + name : ''}${data.last_note ? '（' + data.last_note + '）' : ''}${hold}`;
-  } catch (_) { $('activationPollStatus').textContent = '轮询状态暂不可读取，请检查工作台连接。'; }
+  } catch (_) { $('activationPollStatus').textContent = '轮询状态暂不可读取，请检查算力中心连接。'; }
 }
 activationPollForm.addEventListener('input', () => { activationPollDirty = true; });
 activationPollForm.addEventListener('submit', async event => {
@@ -2664,18 +2664,18 @@ async function refreshWorkflows() {
   try {
     const [health, result] = await Promise.all([getJson("/api/scheduler/health"), getJson("/api/scheduler/workflows")]);
     if (sequence !== workflowSequence) return;
-    $("workflowHealth").textContent = health.worker_running && !health.worker_error ? "工作台流程运行正常" : "流程组件需要检查";
-    $("workflowPolicy").textContent = health.real_execution === "locked" ? "工作台目前仅支持模拟流程，真实生成和素材分析尚未开启。" : "真实执行状态已变化，请先检查；素材分析尚未接入。";
+    $("workflowHealth").textContent = health.worker_running && !health.worker_error ? "算力中心流程运行正常" : "流程组件需要检查";
+    $("workflowPolicy").textContent = health.real_execution === "locked" ? "算力中心目前仅支持模拟流程，真实生成和素材分析尚未开启。" : "真实执行状态已变化，请先检查；素材分析尚未接入。";
     if (!Array.isArray(result.items)) throw new Error("invalid result");
     $("workflowRecords").innerHTML = result.items.length ? result.items.map((item) => `
       <article class="workflow-record"><div class="workflow-header"><strong>${esc(item.title)}</strong><span class="task-badge">${esc(workflowStatus[item.status] || "状态未知")}</span></div>
         <div class="workflow-meta">${item.mode === "simulation" ? "模拟流程" : "真实计划"} · ${esc(dateTime(item.created))}</div>
         <div class="workflow-steps">${(Array.isArray(item.steps) ? item.steps : []).map((step) => `<span class="workflow-step">${esc(workflowKind[step.kind] || "步骤")}：${esc(workflowStatus[step.status] || "状态未知")}${step.demo_source ? ` · ${esc(demoLabels[step.demo_source] || "模拟来源")}` : ""}${step.reason ? ` · ${esc(step.reason)}` : ""}${step.output?.simulation ? " · 模拟文本回复（未分析素材）" : ""}</span>`).join("")}</div>
-      </article>`).join("") : empty("暂无工作台流程", "现在可使用模拟流程检查步骤衔接。");
+      </article>`).join("") : empty("暂无算力中心流程", "现在可使用模拟流程检查步骤衔接。");
   } catch (_) {
     if (sequence !== workflowSequence) return;
     $("workflowHealth").textContent = "流程组件暂不可用";
-    $("workflowRecords").innerHTML = empty("流程记录暂不可读取", "工作台原后台任务列表仍可单独查看。");
+    $("workflowRecords").innerHTML = empty("流程记录暂不可读取", "算力中心原后台任务列表仍可单独查看。");
   }
 }
 
@@ -2703,7 +2703,7 @@ async function getJson(path, {timeoutMs = 0} = {}) {
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     const response = await fetch(path, {cache: "no-store", credentials: "same-origin", ...(controller ? {signal: controller.signal} : {})});
-    if (!response.ok) throw new Error("工作台连接不可用");
+    if (!response.ok) throw new Error("算力中心连接不可用");
     return await response.json();
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -2778,7 +2778,7 @@ async function refreshGeminiActivity({background = false} = {}) {
     if (data.source !== 'workbench' || !Array.isArray(data.items)) throw new Error('invalid activity');
     const names = new Map((state.snapshot?.real_accounts?.items || []).map((item) => [item.key.slice('flow-account-'.length), item.email || item.label || item.profile]));
     const statuses = {dispatching:'处理中', completed:'已完成', failed:'失败', unknown:'结果未确认'};
-    $('geminiActivity').innerHTML = data.items.length ? `<table><thead><tr><th>时间</th><th>账号</th><th>处理来源</th><th>状态</th><th>说明</th></tr></thead><tbody>${data.items.map((item) => `<tr><td>${esc(dateTime(item.created))}</td><td>${esc(names.get(item.account_key) || '账号已不在当前列表')}</td><td>${item.engine === 'official_antigravity_cli' ? '官方账号池' : /Antigravity CLI/.test(item.note || '') ? '官方 CLI · 独立实测' : item.engine === 'pooldesk' ? (item.engine_version === 'core-v2' ? 'PoolDesk 核心' : 'PoolDesk 适配版') : '原工作台'}</td><td>${esc(statuses[item.status] || '状态未知')}</td><td>${esc(safeRecordedNote(item.note) || (item.status === 'dispatching' ? '正在处理' : '—'))}</td></tr>`).join('')}</tbody></table>` : empty('暂无工作台 Gemini 请求记录');
+    $('geminiActivity').innerHTML = data.items.length ? `<table><thead><tr><th>时间</th><th>账号</th><th>处理来源</th><th>状态</th><th>说明</th></tr></thead><tbody>${data.items.map((item) => `<tr><td>${esc(dateTime(item.created))}</td><td>${esc(names.get(item.account_key) || '账号已不在当前列表')}</td><td>${item.engine === 'official_antigravity_cli' ? '官方账号池' : /Antigravity CLI/.test(item.note || '') ? '官方 CLI · 独立实测' : item.engine === 'pooldesk' ? (item.engine_version === 'core-v2' ? 'PoolDesk 核心' : 'PoolDesk 适配版') : '原算力中心'}</td><td>${esc(statuses[item.status] || '状态未知')}</td><td>${esc(safeRecordedNote(item.note) || (item.status === 'dispatching' ? '正在处理' : '—'))}</td></tr>`).join('')}</tbody></table>` : empty('暂无算力中心 Gemini 请求记录');
   } catch (_) {
     if (!background && sequence === geminiActivitySequence) $('geminiActivity').innerHTML = empty('请求记录暂不可读取');
   }
@@ -4331,7 +4331,7 @@ async function loadApiKeys({background = false} = {}) {
   } catch (_) {
     if (read !== apiKeyRead || (background && apiKeySignature !== null)) return;
     $('apiKeyList').replaceChildren();
-    status.textContent = '密钥管理暂不可用，请确认工作台已连接。';
+    status.textContent = '密钥管理暂不可用，请确认算力中心已连接。';
   }
 }
 
@@ -4402,8 +4402,8 @@ function completeApiDocument() {
   const root = $('apiView');
   const clean = (node) => (node?.textContent || '').replace(/\s+/g, ' ').trim();
   const fence = String.fromCharCode(96).repeat(3);
-  const out = ['# 创作工作台 API 调用说明', clean(root.querySelector('.api-intro p')),
-    '工作台地址：' + clean(root.querySelector('.api-base code'))];
+  const out = ['# 算力中心 API 调用说明', clean(root.querySelector('.api-intro p')),
+    '算力中心地址：' + clean(root.querySelector('.api-base code'))];
   for (const panel of root.querySelectorAll('.api-main > section.api-panel')) {
     for (const child of panel.children) {
       if (child.classList.contains('api-heading')) {

@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>创作工作台</title>
+  <title>算力中心</title>
   <link rel="stylesheet" href="/style.css">
   <script defer src="/app.js"></script>
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" aria-label="主导航">
-      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>创作工作台</strong><small>FLOW · GEMINI · MUSIC <span class="brand-version" aria-label="版本 0.3.4">v0.3.4</span></small></div></div>
-      <div class="nav-label">工作空间</div>
-      <nav class="navigation" aria-label="工作空间">
+      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>算力中心</strong><small>FLOW · GEMINI · MUSIC <span class="brand-version" aria-label="版本 0.3.4">v0.3.4</span></small></div></div>
+      <div class="nav-label">算力中心</div>
+      <nav class="navigation" aria-label="算力中心">
         <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>总览<span class="nav-arrow">›</span></button>
         <button class="nav-item" data-view="accounts"><span class="nav-icon" aria-hidden="true">◎</span>账号<span class="nav-arrow">›</span></button>
         <button class="nav-item" data-view="projects"><span class="nav-icon" aria-hidden="true">▤</span>项目<span class="nav-arrow">›</span></button>
-        <button class="nav-item" data-view="work" type="button"><span class="nav-icon" aria-hidden="true">☷</span>工作台<span class="nav-arrow">›</span></button>
+        <button class="nav-item" data-view="work" type="button"><span class="nav-icon" aria-hidden="true">☷</span>算力中心<span class="nav-arrow">›</span></button>
         <button class="nav-item" data-view="records" type="button"><span class="nav-icon" aria-hidden="true">≡</span>任务记录<span class="nav-arrow">›</span></button>
         <button class="nav-item" data-view="library"><span class="nav-icon" aria-hidden="true">▣</span>素材库<span class="nav-arrow">›</span></button>
       </nav>
@@ -26,20 +26,20 @@
       <nav class="navigation" aria-label="开发接入">
         <button class="nav-item" data-view="api" type="button"><span class="nav-icon" aria-hidden="true">⌘</span>API 文档<span class="nav-arrow">›</span></button>
       </nav>
-      <div class="sidebar-note"><span class="note-dot"></span><div><b>统一账号管理</b><p>Gemini 账号与请求请在工作台查看。</p></div></div>
+      <div class="sidebar-note"><span class="note-dot"></span><div><b>统一账号管理</b><p>Gemini 账号与请求请在算力中心查看。</p></div></div>
     </aside>
 
     <main class="main-content">
-      <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong id="breadcrumb">总览</strong></div><div class="top-actions"><span id="frontendUpdateStatus" class="updated" role="status" hidden>新版已到达 · 处理完草稿并返回总览后自动更新</span><span id="lastUpdated" class="updated">正在读取…</span><button id="refresh" class="button button-light" type="button"><span aria-hidden="true">↻</span> 重载界面</button></div></header>
+      <header class="topbar"><div class="breadcrumb">算力中心 <span>/</span> <strong id="breadcrumb">总览</strong></div><div class="top-actions"><span id="frontendUpdateStatus" class="updated" role="status" hidden>新版已到达 · 处理完草稿并返回总览后自动更新</span><span id="lastUpdated" class="updated">正在读取…</span><button id="refresh" class="button button-light" type="button"><span aria-hidden="true">↻</span> 重载界面</button></div></header>
 
       <div class="content">
-        <nav id="workBar" class="work-bar" aria-label="工作台" hidden>
+        <nav id="workBar" class="work-bar" aria-label="算力中心" hidden>
           <a href="#tasks" data-view="tasks">Flow</a>
           <a href="#conversations" data-view="conversations">自定义对话</a>
           <a href="#music" data-view="music">音乐生成</a>
         </nav>
         <section id="overviewView" class="view" aria-labelledby="overviewHeading">
-          <div class="page-heading"><div><div class="eyebrow"><span></span> WORKSPACE OVERVIEW</div><h1 id="overviewHeading">创作工作台</h1><p>项目、任务与服务状态，在这里一目了然。</p></div><a class="button button-primary" href="#api" data-view="api">查看 API 文档 <span aria-hidden="true">→</span></a></div>
+          <div class="page-heading"><div><div class="eyebrow"><span></span> COMPUTE CENTER OVERVIEW</div><h1 id="overviewHeading">算力中心</h1><p>项目、任务与服务状态，在这里一目了然。</p></div><a class="button button-primary" href="#api" data-view="api">查看 API 文档 <span aria-hidden="true">→</span></a></div>
 
           <section id="operationsDashboard" class="operations-dashboard" aria-labelledby="dashboardHeading">
             <header class="dashboard-heading"><div><span class="section-kicker">OPERATIONS DASHBOARD</span><h2 id="dashboardHeading">运行仪表盘</h2></div><button class="insight-account-link" type="button" data-view="accounts">管理账号 →</button></header>
@@ -89,14 +89,14 @@
 
         <section id="accountsView" class="view" aria-labelledby="accountsHeading" hidden>
           <div class="page-heading account-page-heading"><div><div class="eyebrow"><span></span> ACCOUNTS</div><h1 id="accountsHeading">统一账号池</h1><p>一处管理账号，分别查看 Flow 与 Gemini 的使用状态。拖动卡片可调整 Gemini 轮询顺序。</p></div><div class="account-heading-actions"><a class="button button-light" href="#api" data-view="api">API 文档 →</a><a class="button button-primary" href="http://127.0.0.1:18890/" target="_blank" rel="noopener noreferrer">＋ 添加本机账号</a></div></div>
-          <div class="notice" role="note"><span class="notice-symbol" aria-hidden="true">i</span><span>Flow 与 Gemini 分别判断。官方实测成功仅证明该次调用；登录授权、额外核验和工作台接入状态请查看账号详情。</span></div>
+          <div class="notice" role="note"><span class="notice-symbol" aria-hidden="true">i</span><span>Flow 与 Gemini 分别判断。官方实测成功仅证明该次调用；登录授权、额外核验和算力中心接入状态请查看账号详情。</span></div>
           <section class="panel list-panel" aria-labelledby="realAccountsHeading">
             <div class="panel-heading"><div><h2 id="realAccountsHeading">统一账号池</h2><p id="realAccountsSummary" class="panel-caption">正在读取现有账号…</p></div><div class="account-heading-actions"><button id="activationScheduleToggle" class="button button-light" type="button" aria-expanded="false" aria-controls="activationSchedulePanel">通道与设置</button><button id="activateAccounts" hidden class="button button-primary" type="button" disabled>检查账号状态</button></div></div>
             <div id="activationSchedulePanel" class="activation-schedule" hidden><h3>官方调用 · 账号池</h3><p>新对话按轮询分配，多轮固定账号；Gemini CLI 默认总并发 20，与 Flow 独立。网页登录和网页保活不参与官方调用，暂停限制继续保留。</p><p id="retainedSettings">正在只读核对已保存的设置…</p><div hidden>
               <form id="activationScheduleForm">
               <div class="activation-schedule-fields"><label><input id="activationScheduleEnabled" type="checkbox"> 启用每天定时检查</label><label>北京时间 <input id="activationScheduleTime" type="time" value="08:00" required></label><button class="button button-primary" type="submit">保存设置</button></div>
               <p id="activationScheduleStatus" class="panel-caption" role="status" aria-live="polite">正在读取定时设置…</p>
-              <p class="panel-caption">工作台运行时按时检查，近期已核对的账号不会重复检查。暂停、风控及结果待核查的账号会跳过；检查失败不会自动重试。</p>
+              <p class="panel-caption">算力中心运行时按时检查，近期已核对的账号不会重复检查。暂停、风控及结果待核查的账号会跳过；检查失败不会自动重试。</p>
               </form>
               <form id="activationPollForm" class="activation-poll">
                 <div class="activation-schedule-fields"><label><input id="activationPollEnabled" type="checkbox"> 启用轮询检查</label><label>基础间隔 <input id="activationPollMinutes" type="number" min="1" max="1440" step="1" value="30" required> 分钟</label><button class="button button-primary" type="submit">保存轮询</button></div>
@@ -165,7 +165,7 @@
               <div id="chatList" class="compact-list" tabindex="0" aria-label="对话列表"></div>
             </section>
             <section class="panel conversation-detail-panel" aria-labelledby="chatTitle">
-              <div class="panel-heading conversation-detail-heading"><div><h2 id="chatTitle">请选择或新建对话</h2><p class="panel-caption">问答、实际账号和耗时保存在本工作台。</p></div><div class="conversation-detail-actions"><button id="chatRename" class="button button-light" type="button" disabled>重命名</button><button id="chatHide" class="button button-light" type="button" disabled>隐藏</button></div></div>
+              <div class="panel-heading conversation-detail-heading"><div><h2 id="chatTitle">请选择或新建对话</h2><p class="panel-caption">问答、实际账号和耗时保存在本算力中心。</p></div><div class="conversation-detail-actions"><button id="chatRename" class="button button-light" type="button" disabled>重命名</button><button id="chatHide" class="button button-light" type="button" disabled>隐藏</button></div></div>
               <div id="chatHistory" class="workflow-demo conversation-history" tabindex="0" aria-label="对话内容" aria-live="polite"></div>
               <div class="workflow-demo conversation-composer">
                 <div class="conversation-settings">
@@ -205,7 +205,7 @@
         </section>
 
         <section id="tasksView" class="view" aria-labelledby="tasksHeading" hidden>
-          <div class="page-heading"><div><div class="eyebrow"><span></span> TASKS</div><h1 id="tasksHeading">Flow 任务</h1><p>在工作台查看流程进度和原后台任务。</p></div><a class="button button-light" href="#api" data-view="api">查看 API 文档 →</a></div>
+          <div class="page-heading"><div><div class="eyebrow"><span></span> TASKS</div><h1 id="tasksHeading">Flow 任务</h1><p>在算力中心查看流程进度和原后台任务。</p></div><a class="button button-light" href="#api" data-view="api">查看 API 文档 →</a></div>
           <div class="notice" role="note"><span class="notice-symbol" aria-hidden="true">i</span><span>Flow 任务由原后台执行，系统自动安排账号和项目。</span></div>
           <details class="panel task-tools original-tasks" aria-labelledby="flowCreateHeading">
             <summary><strong id="flowCreateHeading">创建 Flow 任务</strong></summary><p class="panel-caption">无需填写项目，系统自动安排账号和项目；任务会真实生成并可能消耗积分。</p>
@@ -264,13 +264,13 @@
         </section>
         <section id="apiView" class="view api-view" aria-labelledby="apiHeading" hidden>
           <div class="page-heading api-page-heading"><div><div class="eyebrow"><span></span> API / INTEGRATION</div><h1 id="apiHeading">API 文档</h1><p>查看请求地址、参数和返回结果。</p></div><div class="api-page-actions"><button id="apiCopyAll" class="button button-primary" type="button">一键复制完整文档</button><span id="apiCopyAllStatus" role="status" aria-live="polite"></span></div></div>
-          <div class="api-intro"><div><span class="api-intro-label">创作工作台 · 统一接口</span><h2>请求与返回</h2><p>工作台按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow；音乐生成走音乐服务。不会根据正文改派通道。以上功能使用同一把工作台密钥，无需 Google API 密钥。</p></div><div class="api-base"><span>统一 API 地址</span><code>http://127.0.0.1:18922</code><small>当前电脑或已建立转发的客户端</small></div></div>
+          <div class="api-intro"><div><span class="api-intro-label">算力中心 · 统一接口</span><h2>请求与返回</h2><p>算力中心按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow；音乐生成走音乐服务。不会根据正文改派通道。以上功能使用同一把算力中心密钥，无需 Google API 密钥。</p></div><div class="api-base"><span>统一 API 地址</span><code>http://127.0.0.1:18922</code><small>当前电脑或已建立转发的客户端</small></div></div>
           <section class="api-key-manager" aria-labelledby="api-key-heading"><div class="api-key-heading"><div><span class="api-intro-label">API KEYS</span><h2 id="api-key-heading">密钥管理</h2><p>同一把密钥可调用本页所有需要鉴权的接口。</p></div></div><form id="apiKeyForm" class="api-key-form"><label for="apiKeyName">密钥名称</label><input id="apiKeyName" maxlength="48" required placeholder="例如：视频制作项目" autocomplete="off"><button id="apiKeyCreate" class="button button-primary" type="submit">创建密钥</button></form><p id="apiKeyStatus" class="api-key-status" role="status" aria-live="polite">正在读取密钥…</p><div id="apiKeyList" class="api-key-list"></div></section>
           <nav class="api-jump" aria-label="API 文档目录"><button type="button" data-api-target="api-start">请求准备</button><button type="button" data-api-target="api-reasoning">对话与推理</button><button type="button" data-api-target="api-gemini-vision">上传图片并识别</button><button type="button" data-api-target="api-aigc">生成图片或视频</button><button type="button" data-api-target="api-music">音乐生成与音频</button><button type="button" data-api-target="api-reference">结果与下载</button></nav>
           <div class="api-main">
             <section class="api-panel" aria-labelledby="api-start">
               <div class="api-heading"><span>01</span><div><h2 id="api-start" tabindex="-1">请求准备</h2></div></div>
-              <p>调用地址是 <code>http://127.0.0.1:18922</code>。远程连接时需保持工作台的端口转发。请求带 <code>Authorization: Bearer &lt;工作台密钥&gt;</code>；JSON 用 <code>application/json</code>，文件原始字节用 <code>application/octet-stream</code>。</p>
+              <p>调用地址是 <code>http://127.0.0.1:18922</code>。远程连接时需保持算力中心的端口转发。请求带 <code>Authorization: Bearer &lt;算力中心密钥&gt;</code>；JSON 用 <code>application/json</code>，文件原始字节用 <code>application/octet-stream</code>。</p>
               <p>提交对话、识图或生成前，用 <code>Idempotency-Key</code> 传入并保存一个 UUID。超时或返回 <code>unknown</code> 时用原编号查询。</p>
               <div class="api-endpoint"><b>GET</b><code>/api/snapshot</code><span>用 flow_models 取模型 ID，用 tasks 查任务状态和下载路径。</span></div>
               <div class="api-code-head"><span>Python 公共准备 · 先设置 STUDIOWRIGHT_API_KEY</span><button type="button" data-copy-code="api-code-base">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-base">import json, os
@@ -339,8 +339,8 @@ print(call("/api/real-pool/image-analysis-validate", payload, rid))
             <section class="api-panel" aria-labelledby="api-aigc">
               <div class="api-heading"><span>04</span><div><h2 id="api-aigc" tabindex="-1">Flow · 生成图片或视频</h2></div></div>
               <div class="api-endpoint"><b>POST</b><code>/api/real-pool/flow</code><span>传 kind、confirm: true 和 params。返回 request_id、status、task_id；submitted 表示已排队。</span></div>
-              <p>Flow 确认接收视频后释放派发名额，其他账号可以继续上传和提交。同账号依次处理自己的任务，已提交视频由工作台跟进并下载。提交后保留原 <code>task_id</code>，可继续提交新请求并轮询前一条的结果。</p>
-              <p>在 <code>params</code> 里填写 <code>prompt</code>、<code>model</code>、<code>aspect</code>、<code>count</code>、<code>resolution</code>、<code>duration</code>。模型 ID 从快照取。时长按模型区分：Omni 1.1 Flash 为 4/6/8/10 秒，Omni 1.2 Flash 为 3～15 秒连续可调；画面比例 16:9 或 9:16。账号和项目由工作台安排；积分按 Flow 实际报价计费，平台不设单笔上限。非约定参数（如 <code>max_credits</code>、<code>auto_retry</code>）携带了也会被忽略，不产生效果。</p>
+              <p>Flow 确认接收视频后释放派发名额，其他账号可以继续上传和提交。同账号依次处理自己的任务，已提交视频由算力中心跟进并下载。提交后保留原 <code>task_id</code>，可继续提交新请求并轮询前一条的结果。</p>
+              <p>在 <code>params</code> 里填写 <code>prompt</code>、<code>model</code>、<code>aspect</code>、<code>count</code>、<code>resolution</code>、<code>duration</code>。模型 ID 从快照取。时长按模型区分：Omni 1.1 Flash 为 4/6/8/10 秒，Omni 1.2 Flash 为 3～15 秒连续可调；画面比例 16:9 或 9:16。账号和项目由算力中心安排；积分按 Flow 实际报价计费，平台不设单笔上限。非约定参数（如 <code>max_credits</code>、<code>auto_retry</code>）携带了也会被忽略，不产生效果。</p>
               <div class="api-code-head"><span>复制纯文字生成请求 · 实际提交</span><button type="button" data-copy-code="api-code-generate">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-generate">rid = str(uuid4())
 print("请求编号:", rid, flush=True)
 payload = {
@@ -370,7 +370,7 @@ payload = {
 print(call("/api/real-pool/flow-validate", payload, rid))
 # 正式提交：将 confirm 改成 True，再调用 /api/real-pool/flow。</code></pre>
             </section>
-            <section class="api-panel" aria-labelledby="api-music"><div class="api-heading"><span>05</span><div><h2 id="api-music" tabindex="-1">音乐生成与音频</h2><p>在 18922 端口提交音乐生成任务、查询进度，并从素材库筛选和下载音频。沿用工作台密钥。</p></div></div>
+            <section class="api-panel" aria-labelledby="api-music"><div class="api-heading"><span>05</span><div><h2 id="api-music" tabindex="-1">音乐生成与音频</h2><p>在 18922 端口提交音乐生成任务、查询进度，并从素材库筛选和下载音频。沿用算力中心密钥。</p></div></div>
               <div class="api-endpoint"><b>POST</b><code>/api/music/jobs</code><span>返回202和job。request_id 必填 UUID，保存后用于查询；Idempotency-Key 如传入必须一致。</span></div>
               <div class="api-endpoint"><b>GET</b><code>/api/music/jobs/{request_id}</code><span>只查询原任务，不重新生成；不存在返回404。</span></div>
               <p>prompt：1～2000字。model：lyria-fast（默认，Lyria 3.5 Fast）、lyria（Lyria 3.5）、lyria-pro（Lyria 3 Pro）、lyria-pro-fast（Lyria 3 Pro Fast）。时长写进提示词，不保证精确时长。</p>
@@ -440,7 +440,7 @@ if record.get("task_id"):
           <p id="apiCopyStatus" class="sr-only" role="status" aria-live="polite"></p>
           <dialog id="apiCopyDialog" class="api-copy-dialog" aria-labelledby="apiCopyDialogHeading"><h2 id="apiCopyDialogHeading">复制完整文档</h2><p>当前浏览器未允许自动复制。内容已选中，请按 Ctrl+C 复制。</p><textarea id="apiCopyFallback" readonly aria-label="完整 API 文档"></textarea><button id="apiCopyClose" class="button button-light" type="button">关闭</button></dialog>
         </section>
-        <footer class="footer"><span>创作工作台 <b>·</b> 统一查看，保留原有服务</span><span>Flow 和 Gemini 独立运行</span></footer>
+        <footer class="footer"><span>算力中心 <b>·</b> 统一查看，保留原有服务</span><span>Flow 和 Gemini 独立运行</span></footer>
       </div>
     </main>
   </div>
