@@ -359,6 +359,13 @@ def task_rows(state, projects):
                             'references_unavailable':'原参考素材不可用，停止重试。','no_account':'等待超时，没有符合条件的其他账号。'}.get(retry['state'])
         if not note and not retry and row.get('kind') in ('image', 'video') and row.get('status') == 'failed':
             note = '这条任务未启用自动换号重试，没有重试记录。'
+        attempts = retry['attempts'] if retry and retry['root_id'] == ident else []
+        latest = max(attempts, key=lambda attempt: attempt['ordinal'], default=None)
+        params = row.get('params')
+        manual_retry_ordinal = (latest['ordinal'] if latest and row.get('kind') == 'image'
+            and row.get('status') == 'failed' and isinstance(params, dict) and params.get('count') == 1
+            and retry['state'] in ('manual_failed', 'no_account') and latest['status'] == 'failed'
+            and latest['finished'] and latest['ordinal'] < 3 else None)
         rows.append({
             "key": "flow-task-" + hashlib.sha256(ident.encode("utf-8")).hexdigest(),
             "source": "Flow",
@@ -380,6 +387,7 @@ def task_rows(state, projects):
             "note": note,
             "failure_reason": task_failure_reason(row),
             "recoverable": recoverable,
+            "manual_retry_ordinal": manual_retry_ordinal,
             "retry": retry,
         })
     return rows
@@ -757,6 +765,29 @@ class Sources:
         except (OSError, ValueError):
             pass
         return 503, {'error':'任务状态暂不可读取。'}
+
+    def flow_retry(self, ident, ordinal):
+        if not re.fullmatch(r'[a-f0-9]{16}', ident) or type(ordinal) is not int or not 0 <= ordinal < 3:
+            raise ValueError('任务编号或尝试序号不正确。')
+        origin = f"http://127.0.0.1:{self.ports['flow']}"
+        request = Request(f'{origin}/api/tasks/{ident}/retry', method='POST',
+                          data=json.dumps({'expected_ordinal': ordinal, 'confirm_generation': True}).encode(),
+                          headers={'Content-Type':'application/json', 'X-Console-Request':'1', 'Origin':origin})
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                result = json.loads(response.read(8193))
+                if response.status == 202 and isinstance(result, dict) and result.get('task_id') == ident:
+                    return 202, result
+        except HTTPError as exc:
+            if exc.code in (400, 404, 409):
+                try:
+                    error = clean_text(json.loads(exc.read(8193)).get('error'), 180)
+                except (ValueError, AttributeError, OSError):
+                    error = ''
+                return exc.code, {'error': error or '原任务目前无法重试。'}
+        except (OSError, ValueError):
+            pass
+        return 503, {'error':'重试结果待核对，请刷新原任务记录。'}
 
     def flow_risk_resume(self, profile):
         if not isinstance(profile, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', profile):
@@ -2138,6 +2169,25 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(400, {"error": str(exc)})
                 except Exception:
                     return self.json_response(500, {"error": "附件未上传完成，本次没有发送给 Gemini。"})
+            retry_route = re.fullmatch(r'/api/flow/tasks/([a-f0-9]{16})/retry', self.path)
+            if retry_route:
+                if deployment != 'ubuntu' or not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从算力中心发起重试。'})
+                length = self.headers.get_all('Content-Length', [])
+                try:
+                    if (self.headers.get('Transfer-Encoding') or len(length) != 1
+                            or not re.fullmatch(r'[1-9][0-9]?', length[0])):
+                        raise ValueError()
+                    self.connection.settimeout(4)
+                    body = json.loads(self.rfile.read(int(length[0])))
+                    if not isinstance(body, dict) or set(body) != {'expected_ordinal','confirm_generation'} or body['confirm_generation'] is not True:
+                        raise ValueError()
+                    status, result = sources.flow_retry(retry_route.group(1), body['expected_ordinal'])
+                except (ValueError, OSError):
+                    return self.json_response(400, {'error':'请核对原任务并确认重试。'})
+                finally:
+                    self.connection.settimeout(None)
+                return self.json_response(status, result)
             if re.fullmatch(r"/api/real-pool/recoveries/[A-Za-z0-9_-]{1,128}", self.path):
                 if not real_pool or not self.valid(mutation=True):
                     return self.json_response(403, {"error": "请从工作台发起操作。"})

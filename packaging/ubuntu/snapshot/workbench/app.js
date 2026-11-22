@@ -1065,7 +1065,7 @@ function renderTasks() {
   const accounts = new Map((snapshot.real_accounts?.items || []).map(a => [a.profile, a]));
   const reasons = new Map(tasks.map(item => [item.source_id, flowQueueReason(item, snapshot, accounts.get(item.source_profile))]));
   const taskMarkup = `<table><thead><tr><th>任务类型</th><th>项目 / 账号</th><th>状态</th><th>提交时间</th><th>任务编号</th><th>结果</th><th>来源</th></tr></thead><tbody>${tasks.map((item) => `
-    <tr class="task-kind-${["image", "video", "quote", "sync", "session_import", "check"].includes(item.kind) ? item.kind : "other"}"><td><strong>${esc(kindLabel(item.kind))}</strong>${typeof item.style_id === "string" ? `<br><span class="subtle">画风 ID：<code style="white-space:pre-wrap">${esc(item.style_id)}</code></span>` : ""}${item.retry ? `<br><span class="subtle">${item.retry.attempts?.length > 1 ? `已重试 ${item.retry.attempts.length - 1} 次` : "原任务"}</span>` : ''}</td><td class="table-title">${esc(item.project_title)}<br><span class="subtle">${esc(byProfile.get(item.source_profile) || item.source_profile)}</span></td><td>${flowTaskStatusBadge(item)}${reasons.get(item.source_id) ? '<br><span class="subtle">' + esc(reasons.get(item.source_id)) + '</span>' : ''}${item.note ? `<br><span class="subtle">${esc(item.note.replace('换号重试已完成','重试已完成'))}</span>` : ""}</td><td>${esc(dateTime(item.created))}</td><td><code title="${esc(item.source_id)}">${esc(shortId(item.source_id))}</code>${item.retry && item.retry.ordinal ? `<br><span class="subtle" title="${esc(item.retry.root_id)}">原任务 ${esc(shortId(item.retry.root_id))}</span>` : ''}</td><td>${taskFailureMarkup(item)}${retryAttemptsMarkup(item, byProfile)}${(item.downloads || []).map((file, index) => `<a class="text-link" href="http://127.0.0.1:18888${esc(file.path)}" target="_blank" rel="noopener noreferrer">下载${index + 1}</a>`).join(" ")}${item.recovered_path ? `<a class="text-link" href="${esc(item.recovered_path)}" target="_blank" rel="noopener noreferrer">打开已找回图片</a>` : ""}${item.recoverable ? `<button class="text-link" type="button" data-recover-flow="${esc(item.source_id)}">找回已生成图片</button>` : ""}${item.status !== "failed" && !(item.downloads || []).length && !item.recovered_path && !item.recoverable ? "—" : ""}</td><td><span class="source-chip">Flow</span></td></tr>`).join("")}</tbody></table>`;
+    <tr class="task-kind-${["image", "video", "quote", "sync", "session_import", "check"].includes(item.kind) ? item.kind : "other"}"><td><strong>${esc(kindLabel(item.kind))}</strong>${typeof item.style_id === "string" ? `<br><span class="subtle">画风 ID：<code style="white-space:pre-wrap">${esc(item.style_id)}</code></span>` : ""}${item.retry ? `<br><span class="subtle">${item.retry.attempts?.length > 1 ? `已重试 ${item.retry.attempts.length - 1} 次` : "原任务"}</span>` : ''}</td><td class="table-title">${esc(item.project_title)}<br><span class="subtle">${esc(byProfile.get(item.source_profile) || item.source_profile)}</span></td><td>${flowTaskStatusBadge(item)}${reasons.get(item.source_id) ? '<br><span class="subtle">' + esc(reasons.get(item.source_id)) + '</span>' : ''}${item.note ? `<br><span class="subtle">${esc(item.note.replace('换号重试已完成','重试已完成'))}</span>` : ""}</td><td>${esc(dateTime(item.created))}</td><td><code title="${esc(item.source_id)}">${esc(shortId(item.source_id))}</code>${item.retry && item.retry.ordinal ? `<br><span class="subtle" title="${esc(item.retry.root_id)}">原任务 ${esc(shortId(item.retry.root_id))}</span>` : ''}</td><td>${taskFailureMarkup(item)}${retryAttemptsMarkup(item, byProfile)}${Number.isInteger(item.manual_retry_ordinal) ? `<button class="text-link" type="button" data-retry-flow="${esc(item.source_id)}" data-retry-ordinal="${item.manual_retry_ordinal}">原任务重试</button>` : ""}${(item.downloads || []).map((file, index) => `<a class="text-link" href="http://127.0.0.1:18888${esc(file.path)}" target="_blank" rel="noopener noreferrer">下载${index + 1}</a>`).join(" ")}${item.recovered_path ? `<a class="text-link" href="${esc(item.recovered_path)}" target="_blank" rel="noopener noreferrer">打开已找回图片</a>` : ""}${item.recoverable ? `<button class="text-link" type="button" data-recover-flow="${esc(item.source_id)}">找回已生成图片</button>` : ""}${item.status !== "failed" && !(item.downloads || []).length && !item.recovered_path && !item.recoverable ? "—" : ""}</td><td><span class="source-chip">Flow</span></td></tr>`).join("")}</tbody></table>`;
   // Keep opened task details and keyboard focus during an unchanged refresh.
   const table = $("taskTable");
   if (lastTaskMarkup !== taskMarkup || !table.querySelector('table')) {
@@ -1079,7 +1079,30 @@ function renderTasks() {
   }
 }
 
+const flowRetriesInFlight = new Set();
 $("taskTable").addEventListener("click", async (event) => {
+  const retry = event.target.closest('[data-retry-flow]');
+  if (retry) {
+    const ident = retry.dataset.retryFlow;
+    if (flowRetriesInFlight.has(ident) ||
+        !window.confirm(`使用原账号和项目重试任务 ${ident}？任务编号保留，生成可能消耗积分。`)) return;
+    flowRetriesInFlight.add(ident);
+    retry.disabled = true;
+    retry.textContent = '正在安排重试…';
+    try {
+      const result = await postJson(`/api/flow/tasks/${encodeURIComponent(ident)}/retry`,
+        {expected_ordinal:Number(retry.dataset.retryOrdinal),confirm_generation:true});
+      if (result.task_id !== ident) throw new Error('重试结果待核对，请刷新原任务记录。');
+      retry.textContent = '已安排重试';
+      await refresh();
+    } catch (error) {
+      retry.textContent = error.message || '重试未受理，请核对原任务。';
+      retry.disabled = false;
+    } finally {
+      flowRetriesInFlight.delete(ident);
+    }
+    return;
+  }
   const button = event.target.closest("[data-recover-flow]");
   if (!button) return;
   button.disabled = true;

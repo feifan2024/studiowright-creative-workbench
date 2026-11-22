@@ -1,11 +1,13 @@
 """Verify that a manually queued retry uses the original task in receipts and downloads."""
 import gc
+import io
+import json
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from starlette.testclient import TestClient
 from test_flow_regressions import fixture_directory
@@ -18,6 +20,10 @@ from unified_api import allowed_route
 spec = spec_from_file_location('flow_retry_identity_console', SNAPSHOT / 'flow/console/server.py')
 console = module_from_spec(spec)
 spec.loader.exec_module(console)
+
+spec = spec_from_file_location('flow_retry_identity_workbench', SNAPSHOT / 'workbench/server.py')
+workbench = module_from_spec(spec)
+spec.loader.exec_module(workbench)
 
 
 class FixtureAdapter:
@@ -101,6 +107,29 @@ class RetryIdentity(unittest.TestCase):
     def test_unconfirmed_failure_does_not_queue_another_attempt(self):
         ident = self.fail_original(evidence=None)
         self.assertEqual(self.retry(ident).status_code, 409)
+        self.assertIsNone(self.store.claim(set()))
+
+    def test_workbench_retry_forwards_only_the_original_task_and_attempt(self):
+        ident = self.fail_original()
+        snapshot = {'tasks': [self.client.get('/api/tasks/' + ident, headers=self.headers()).json()]}
+        public = self.store.task(ident)
+        public['retry'] = snapshot['tasks'][0]['retry']
+        self.assertEqual(workbench.task_rows({'tasks': [public]}, [])[0]['manual_retry_ordinal'], 0)
+
+        def forward(request, timeout):
+            self.assertEqual(request.full_url, f'http://127.0.0.1:18888/api/tasks/{ident}/retry')
+            self.assertEqual(json.loads(request.data), {'expected_ordinal': 0, 'confirm_generation': True})
+            response = self.retry(ident)
+            stream = io.BytesIO(response.content)
+            stream.status = response.status_code
+            return stream
+
+        sources = workbench.Sources()
+        sources.opener = Mock(open=forward)
+        for _ in range(2):
+            self.assertEqual(sources.flow_retry(ident, 0), (202, {'task_id': ident, 'status': 'queued'}))
+        self.assertEqual([item['id'] for item in self.store.tasks()], [ident])
+        self.assertEqual(self.store.claim(set())['id'], ident)
         self.assertIsNone(self.store.claim(set()))
 
     def test_explicit_single_attempt_never_enters_the_switch_queue(self):
