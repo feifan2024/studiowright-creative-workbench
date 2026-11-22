@@ -4941,14 +4941,20 @@ function renderOfficialQuota() {
   const advanced = data?.advanced_pool;
   const advancedDispatch = state.channelStatus?.dispatch?.advanced_pool;
   const advancedRows = Object.entries(advanced?.accounts || {});
+  const advancedTotal = advanced?.total_accounts ?? advancedRows.length;
+  const now = Date.now()/1000;
   const sharedWindowMarkup = ['five_hour','weekly'].map(window=>{
-    const item = advanced?.windows?.[window] || {};
-    const total = Number.isFinite(item.total_remaining_percent) ? item.total_remaining_percent : null;
-    const average = Number.isFinite(item.average_remaining_percent) ? item.average_remaining_percent : null;
+    const values = advancedRows
+      .filter(([,row])=>now-row.checked_at >= 0 && now-row.checked_at <= 600)
+      .map(([,row])=>savedQuotaValue(row,window))
+      .filter(value=>value!==null);
+    const average = values.length ? Math.round(values.reduce((sum,value)=>sum+value,0)/values.length*100)/100 : null;
     const title = window === 'five_hour' ? '5 小时' : '每周';
-    return `<div class="quota-shared-window"><span>${title}总账池额度</span><strong>${number(total)}<small>比例点合计</small></strong><em>账号平均 ${number(average)}</em></div>`;
+    const meter = average === null ? `role="img" aria-label="${title}额度待读取"`
+      : `role="progressbar" aria-label="${title}平均剩余额度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${average}"`;
+    return `<div class="quota-shared-window"><span>${title}额度</span><strong>${average === null ? '待读取' : number(average)}${average === null ? '' : '<small>平均剩余</small>'}</strong><div class="quota-track${average === null ? ' is-unknown' : ''}" ${meter}><i data-quota-fill="${average ?? 0}"></i></div><em>${values.length} / ${advancedTotal} 个账号已读</em></div>`;
   }).join('');
-  const sharedTopMarkup = advanced ? `<article class="quota-shared-card"><div class="quota-shared-heading"><strong>Gemini 总账池额度</strong><span>Hydrogen / Neon 共用 · ${advanced.known_accounts ?? 0} / ${advanced.total_accounts ?? advancedRows.length} 个账号已读</span></div><div class="quota-shared-windows">${sharedWindowMarkup}</div><p>Hydrogen 与 Neon 共用同一 Gemini 模型额度池，合计按账号剩余百分比相加，不代表供应商公布的绝对积分。</p></article>` : '';
+  const sharedTopMarkup = advanced ? `<article class="quota-shared-card"><div class="quota-shared-heading"><strong>Gemini 总账池额度</strong><span>Hydrogen / Neon 共用</span></div><div class="quota-shared-windows">${sharedWindowMarkup}</div><p>每个时间窗口按已读账号的剩余比例取平均。</p></article>` : '';
   const advancedQuotaMarkup = advancedRows.length ? `
     <div class="quota-table-wrap">
       <table aria-label="高级模型账号额度">
