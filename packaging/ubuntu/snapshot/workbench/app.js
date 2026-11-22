@@ -240,6 +240,13 @@ function flowAccountReason(account, snapshot, row, pageState) {
     (t.source_profile === account.profile || (t.retry?.attempts || []).some(a => a.profile === account.profile)));
   const linked = window?.task_id && tasks.find(t => t.source_id === window.task_id || t.retry?.root_id === window.task_id ||
     (t.retry?.attempts || []).some(a => a.id === window.task_id));
+  if ((account.flow_cooling || account.flow_health === 'cooling') && window?.task_id && linked) {
+    const rejected = (linked.retry?.attempts || []).find(attempt => attempt.id === window.task_id &&
+      attempt.profile === account.profile && attempt.status === 'failed' &&
+      /PUBLIC_ERROR_UNUSUAL_ACTIVITY/.test(attempt.failure_reason || ''));
+    if (rejected) return {taskId:window.task_id,label:'Flow 冷却原因',
+      text:`任务 ${window.task_id} 的本账号提交被 Flow 以「异常活动」拒绝。`};
+  }
   const active = tasks.find(t => ['queued','running'].includes(t.status) && t.source_profile === account.profile);
   if (!active && row?.status === 'ready' && !row?.issues?.length && pageState !== 'busy') return null;
   const historical = window?.state === 'idle' && !account.flow_risk_paused && !account.flow_cooling;
@@ -268,8 +275,8 @@ function flowAccountNoticeMarkup(reason, screenshot) {
     const path = '/api/flow-warning-screenshots/' + id + '.png';
     return `<a class="account-flow-warning" href="${path}" target="_blank" rel="noopener" title="查看 Flow 警告原图"><img src="${path}" width="192" loading="lazy" alt="查看 Flow 警告截图"></a>`;
   }
-  if (!reason || reason.taskId) return '';
-  return `<p class="account-flow-reason"><strong>${esc(reason.label)}：</strong>${esc(reason.text)}</p>`;
+  if (!reason?.label) return '';
+  return `<p class="account-flow-reason"><strong>${esc(reason.label)}：</strong>${esc(reason.text)}${reason.taskId ? ' 本次未保存截图。' : ''}</p>`;
 }
 
 function flowTaskStatusBadge(item) {

@@ -257,6 +257,30 @@ test('the account card shows only the matching failure screenshot', () => {
   assert.equal(vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'other'})", context), '');
 });
 
+test('Flow cooldown shows the failed attempt even after the task succeeds on another account', () => {
+  const context = vm.createContext({});
+  load('esc', context);
+  load('flowAccountReason', context);
+  load('flowAccountNoticeMarkup', context);
+  context.account = {profile:'a', flow_cooling:true};
+  context.snapshot = {
+    flow_coordination:{windows:[{profile:'a', state:'idle', task_id:'original'}]},
+    tasks:[{source_id:'original', source_profile:'b', kind:'video', status:'succeeded', retry:{
+      state:'succeeded', attempts:[
+        {id:'original', profile:'a', status:'failed', failure_reason:'PUBLIC_ERROR_UNUSUAL_ACTIVITY'},
+        {id:'original', profile:'b', status:'succeeded'}
+      ]
+    }}]
+  };
+  context.reason = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'ok')", context);
+  const missing = vm.runInContext('flowAccountNoticeMarkup(reason,null)', context);
+  assert.match(missing, /任务 original.*异常活动.*本次未保存截图/);
+  const captured = vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'original'})", context);
+  assert.match(captured, /123456789abc\.png/);
+  const unrelated = vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'other'})", context);
+  assert.doesNotMatch(unrelated, /123456789abc\.png/);
+});
+
 test('unlinked busy state cannot be described as a confirmed failure', () => {
   const context = vm.createContext({});
   load('flowAccountReason', context);

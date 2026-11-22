@@ -17,7 +17,7 @@ from flow_warning_archive import current_window_screenshots, purge_reviewed_scre
 from flow_warning_desktop import capture_name, sync_once
 
 try:
-    from studiowright.studio import Studio, FLOW_ROOT, SubmissionRejectedUnusual
+    from studiowright.studio import Studio, FLOW_ROOT, PlaywrightTimeout, SubmissionRejectedUnusual
 except ImportError:
     Studio = None  # The console backend dependencies are installed on Ubuntu.
 
@@ -50,6 +50,26 @@ class Capture(unittest.IsolatedAsyncioTestCase):
             await studio._fail(JOB_ID, error, FLOW_ROOT, page=page)
             page.screenshot.assert_not_called()
             self.assertNotIn('warning_screenshot', studio.store.update_job.call_args.kwargs['result'])
+
+    async def test_screenshot_timeout_falls_back_to_the_same_tab(self):
+        studio = Studio.__new__(Studio)
+        capture = SimpleNamespace(
+            send=AsyncMock(return_value={'data': base64.b64encode(PNG).decode()}),
+            detach=AsyncMock(),
+        )
+        page = SimpleNamespace(url=FLOW_ROOT + 'project/project-a',
+                               screenshot=AsyncMock(side_effect=PlaywrightTimeout('capture timed out')),
+                               is_closed=Mock(return_value=False),
+                               context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=capture)))
+        self.assertEqual(await studio._incident_png(page, '/project/project-a'), PNG)
+        page.context.new_cdp_session.assert_awaited_once_with(page)
+        capture.detach.assert_awaited_once()
+
+        page.url = FLOW_ROOT + 'project/project-b'
+        page.context.new_cdp_session.reset_mock()
+        with self.assertRaises(PlaywrightTimeout):
+            await studio._incident_png(page, '/project/project-a')
+        page.context.new_cdp_session.assert_not_awaited()
 
 
 class Delivery(unittest.TestCase):

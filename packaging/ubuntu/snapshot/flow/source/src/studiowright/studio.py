@@ -8,6 +8,7 @@ assets and jobs in the local store.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -17,7 +18,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -498,8 +499,8 @@ class Studio:
                 if site == FLOW_ROOT:
                     project = f"/project/{job['project_id']}" if job else None
                     if project and self._incident_project(page.url, project):
-                        png = await page.screenshot(type="png", timeout=4000)
-                        if self._incident_project(page.url, project):
+                        png = await self._incident_png(page, project)
+                        if png and self._incident_project(page.url, project):
                             candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                             fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                             with os.fdopen(fd, "wb") as output:
@@ -509,8 +510,8 @@ class Studio:
                     candidate.parent.mkdir(parents=True, exist_ok=True)
                     await page.screenshot(path=str(candidate))
                     shot = candidate
-        except Exception:
-            log.warning("Unable to capture the failure page for job %s", job_id)
+        except Exception as error:
+            log.warning("Unable to capture the failure page for job %s (%s)", job_id, type(error).__name__)
         detail = f"{type(exc).__name__}: {exc}"
         if shot is not None:
             detail += f" (screenshot: {shot})"
@@ -536,6 +537,27 @@ class Studio:
         page = urlsplit(url)
         return (page.scheme == "https" and page.netloc == "flow.google.com"
                 and (page.path == project or page.path.startswith(project + "/")))
+
+    async def _incident_png(self, page, project: str) -> bytes | None:
+        try:
+            return await page.screenshot(type="png", timeout=4000)
+        except PlaywrightError:
+            if not self._incident_project(page.url, project) or page.is_closed():
+                raise
+        # Capture the same tab directly if the browser automation could not render a screenshot.
+        async with asyncio.timeout(3):
+            capture = await page.context.new_cdp_session(page)
+            try:
+                if not self._incident_project(page.url, project):
+                    return None
+                info = await capture.send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})
+                png = base64.b64decode(info["data"], validate=True)
+                if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise ValueError("Invalid failure screenshot")
+                return png
+            finally:
+                with suppress(PlaywrightError):
+                    await capture.detach()
 
     # --- generation -------------------------------------------------------------------
     def _progress(self, job_id: str, stage: str, media_ids: Sequence[str]) -> None:
