@@ -76,6 +76,16 @@ class AutoRefreshTickTest(unittest.TestCase):
         self.assertIsNone(module.quota_restriction(row,reset+10))
         self.assertEqual(module.quota_restriction({'status':'verification_required'},reset),'verification_required')
 
+    def test_quota_parsers_keep_the_reported_window_when_one_is_missing(self):
+        module = load_quota_module()
+        weekly = 'Gemini Models\tWeekly Limit Remaining\t100%\t2026-11-29T12:17:00Z'
+        five_hour = 'Gemini Models\tFive Hour Limit Remaining\t0%\t'
+        self.assertEqual(set(module.parse_headless_usage(weekly)), {'weekly'})
+        self.assertEqual(module.parse_headless_usage(five_hour),
+                         {'five_hour': {'remaining_percent': 0.0, 'reset_at': None}})
+        self.assertEqual(module.parse_usage('GEMINI MODELS\nWeekly Limit Remaining [===] 100% Quota available', 0),
+                         {'weekly': {'remaining_percent': 100.0, 'reset_at': None}})
+
     def test_tick_reads_only_readable_accounts_and_resets_running(self):
         reader = bare_reader({'a': {'status': 'ok'}, 'b': {'status': 'verification_required'},
                               'c': {'status': 'not_read'}, 'd': {'status': 'network_error'}})

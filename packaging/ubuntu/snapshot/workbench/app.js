@@ -1975,11 +1975,11 @@ function accountOfficialQuotaMarkup(key) {
   const now = Date.now()/1000;
   const age = row && typeof row.checked_at === 'number' ? now-row.checked_at : null;
   const fresh = row?.status === 'ok' && age !== null && Number.isFinite(age) && age >= 0 && age <= 600;
-  const complete = ['five_hour','weekly'].every(window=>savedQuotaValue(row,window)!==null);
+  const available = ['five_hour','weekly'].some(window=>savedQuotaValue(row,window)!==null);
   const windowMarkup = (window, label, title) => {
     const value = savedQuotaValue(row,window);
     const reset = row?.[window]?.reset_at;
-    const text = value === null ? '—' : value.toFixed(2).replace(/\.00$/, '')+'%';
+    const text = value === null ? '待读取' : value.toFixed(2).replace(/\.00$/, '')+'%';
     const hasFutureReset = row?.status === 'ok' && typeof reset === 'number' && Number.isFinite(reset) && reset > now;
     const recovery = value === null ? '' : hasFutureReset
       ? '恢复 ' + dateTime(reset) + (fresh ? '' : '（上次读取）')
@@ -1993,9 +1993,9 @@ function accountOfficialQuotaMarkup(key) {
     authorization_required:'Google 要求重新授权后读取额度',
   }[row?.status];
   let message = quotaReason || '';
-  if (!officialQuotaReadFailed && officialQuotaData?.refreshing && (!fresh || !complete))
+  if (!officialQuotaReadFailed && officialQuotaData?.refreshing && (!fresh || !available))
     message = '正在读取额度…';
-  else if (!message && !complete) message = '额度暂未获取';
+  else if (!message && !available) message = '额度暂未获取';
   else if (!message && !fresh) message = '上次读取 '+dateTime(row.checked_at)+'，仅供参考';
   const html = `<div class="account-quota-windows">${windowMarkup('five_hour','5 小时','5 小时额度')}${windowMarkup('weekly','每周','每周额度')}</div>`;
   return {html, message};

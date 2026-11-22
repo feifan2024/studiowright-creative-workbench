@@ -68,7 +68,7 @@ def parse_usage(text, checked_at):
     for name, label in [('weekly', 'Weekly'), ('five_hour', 'Five Hour')]:
         match = re.search(label + r' Limit Remaining\s*\[[^\]]*\]\s*(\d+(?:\.\d+)?)%\s*(Refreshes in [^\n]+|Quota available)', group)
         if not match:
-            return None
+            continue
         value = float(match[1])
         if not math.isfinite(value) or not 0 <= value <= 100:
             return None
@@ -78,7 +78,7 @@ def parse_usage(text, checked_at):
             if duration and any(duration.groups()):
                 reset = checked_at + sum(int(n or 0)*unit for n, unit in zip(duration.groups(), (86400,3600,60,1)))
         result[name] = {'remaining_percent': value, 'reset_at': reset}
-    return result
+    return result or None
 
 
 def parse_headless_usage(text):
@@ -101,7 +101,7 @@ def parse_headless_usage(text):
             except (ValueError,OverflowError,OSError):
                 pass
         windows[window]={'remaining_percent':percent,'reset_at':reset}
-    return windows if len(windows)==len(QUOTA_WINDOWS) else None
+    return windows or None
 
 
 def quota_restriction(row, now):
@@ -191,6 +191,7 @@ def read_account(runtime, key, *, save_renewal=False):
                 cwd=workspace, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
             os.close(slave); slave = None
             output = b''; trusted = False; sent = False; identity = False; started = time.monotonic()
+            partial = None
             while time.monotonic()-started < 25:
                 if select.select([master],[],[],.2)[0]:
                     try: output += os.read(master,65536)
@@ -217,10 +218,12 @@ def read_account(runtime, key, *, save_renewal=False):
                     os.write(master,b'/usage\r'); sent = True; output = b''
                 if sent:
                     parsed = parse_usage(output.decode('utf-8',errors='replace'),time.time())
-                    if parsed:
+                    if parsed and all(window in parsed for window in QUOTA_WINDOWS):
                         if save_renewal:
                             save_verified_token(original/token_name,cfg/token_name,original_token,account['email'])
                         return {'status':'ok', 'checked_at':time.time(),'phase':'usage','identity_matched':True, **parsed}
+                    if parsed and not save_renewal:
+                        partial = {'status':'ok', 'checked_at':time.time(),'phase':'usage','identity_matched':True, **parsed}
                 if process.poll() is not None and not select.select([master],[],[],0)[0]:break
             plain=output.decode('utf-8',errors='replace')
             failure=classify_failure(plain,sent=sent,identity=identity)
@@ -228,6 +231,8 @@ def read_account(runtime, key, *, save_renewal=False):
                 link=verification_entry(plain) if identity and sent else None
                 if link:failure['_verification_url']=link
                 else:failure['reason']='provider_validation_no_entry'
+            if partial and failure['status'] == 'unavailable':
+                return partial
             return failure
         finally:
             if slave is not None: os.close(slave)
