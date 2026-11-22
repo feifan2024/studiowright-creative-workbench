@@ -4924,8 +4924,8 @@ function renderOfficialQuota() {
   const advancedDispatch = state.channelStatus?.dispatch?.advanced_pool;
   const advancedRows = Object.entries(advanced?.accounts || {});
   const familyPools = Object.entries(advanced?.families || {});
-  const familyQuotaMarkup = familyPools.length ? `
-    <div class="quota-family-grid" aria-label="Hydrogen 和 Neon 总账池额度">
+  const familyTopMarkup = familyPools.length ? `
+    <div class="quota-family-top" aria-label="Hydrogen 和 Neon 总账池额度">
       ${familyPools.map(([family,pool])=>{
         const label = pool.label || (family.includes('hydrogen') ? 'Hydrogen' : family.includes('neon') ? 'Neon' : family);
         const windowMarkup = ['five_hour','weekly'].map(window=>{
@@ -4935,7 +4935,7 @@ function renderOfficialQuota() {
           const title = window === 'five_hour' ? '5 小时' : '每周';
           return `<div class="quota-family-window"><span>${title}总账池</span><strong>${number(total)}<small>比例点合计</small></strong><em>账号平均 ${number(average)}</em></div>`;
         }).join('');
-        return `<article class="quota-family-card"><div class="quota-family-heading"><strong>${esc(label)} 总账池</strong><span>${pool.known_accounts ?? 0} / ${pool.total_accounts ?? 0} 个账号已读</span></div><div class="quota-family-windows">${windowMarkup}</div><p>合计按该模型家族各账号的剩余百分比相加，不代表供应商公布的绝对积分。</p></article>`;
+        return `<article class="quota-family-card"><div class="quota-family-heading"><strong>${esc(label)} 总账池</strong><span>${pool.known_accounts ?? 0} / ${pool.total_accounts ?? 0} 个账号已读</span></div><div class="quota-family-windows">${windowMarkup}</div><p>按该模型家族各账号的剩余百分比相加，不代表供应商公布的绝对积分。</p></article>`;
       }).join('')}
     </div>` : '';
   const advancedQuotaMarkup = advancedRows.length ? `
@@ -4956,7 +4956,7 @@ function renderOfficialQuota() {
     </div>` : '';
   const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已保存 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : '额度暂未获取';
   target.setAttribute('aria-busy',String(refreshing));
-  target.innerHTML = `<div class="quota-main">${flowMarkup}${windowMarkup('five_hour','GEMINI · 5 小时额度')}${windowMarkup('weekly','GEMINI · 每周额度')}</div><div class="quota-footer"><div class="quota-source"><span>Gemini：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>Gemini 为账号平均剩余，各账号分别恢复。可读的高级模型账号每 5 分钟刷新，其余按原周期刷新。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaRequest ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">Gemini 各账号额度<span>查看剩余与恢复时间</span></summary>${familyQuotaMarkup}${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || `<tr><td colspan="4">${refreshing ? '正在读取额度…' : '额度暂未获取'}</td></tr>`}</tbody></table></div></details>`;
+  target.innerHTML = `<div class="quota-main">${flowMarkup}${windowMarkup('five_hour','GEMINI · 5 小时额度')}${windowMarkup('weekly','GEMINI · 每周额度')}${familyTopMarkup}</div><div class="quota-footer"><div class="quota-source"><span>Gemini：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>Gemini 为账号平均剩余，各账号分别恢复。可读的高级模型账号每 5 分钟刷新，其余按原周期刷新。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaRequest ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">Gemini 各账号额度<span>查看剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || `<tr><td colspan="4">${refreshing ? '正在读取额度…' : '额度暂未获取'}</td></tr>`}</tbody></table></div></details>`;
   target.querySelectorAll('[data-quota-fill]').forEach(meter=>{meter.style.width=Number(meter.dataset.quotaFill)+'%';});
   target.querySelector('[data-quota-action="refresh"]').addEventListener('click',()=>refreshOfficialQuota(true));
   if (focused) target.querySelector(`[data-quota-action="${focused}"]`)?.focus({preventScroll:true});

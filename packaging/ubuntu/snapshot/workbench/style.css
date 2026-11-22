@@ -634,7 +634,7 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .quota-refresh { flex: none; border: 0; padding: 6px 0; background: none; color: #367057; font-size: 12px; font-weight: 600; }
 .quota-details,.dashboard-runtime-details { border-top: 1px solid #e8eee9; font-size: 12px; }
 .dashboard-runtime-details { order: 3; }
-.quota-family-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; padding: 14px 26px 4px; }
+.quota-family-top { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 2px; }
 .quota-family-card { min-width: 0; padding: 14px; border: 1px solid #e3ebe5; border-radius: 10px; background: #f8fbf9; }
 .quota-family-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: #385b45; }
 .quota-family-heading strong { font-size: 14px; }
@@ -703,7 +703,7 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
  .quota-details summary,.dashboard-runtime-details > summary { padding-inline: 20px; }
  .quota-details summary span,.dashboard-runtime-details > summary span { display: block; margin: 4px 0 0 15px; }
  .quota-table-wrap { padding-inline: 20px; }
- .quota-family-grid { grid-template-columns: 1fr; padding-inline: 20px; }
+ .quota-family-top { grid-template-columns: 1fr; }
  .dashboard-runtime-columns { padding-inline: 20px; }
 }
 
