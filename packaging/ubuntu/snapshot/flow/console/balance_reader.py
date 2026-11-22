@@ -4,6 +4,8 @@ No login, navigation, project operations or generation. Uses the same per-accoun
 file lock as upstream tasks; refuses a different online identity.
 """
 import asyncio
+from contextlib import AsyncExitStack
+from pathlib import Path
 import hashlib
 import re
 
@@ -21,6 +23,60 @@ RESTORE_SCROLL = """top => {
     const views = document.querySelectorAll('.cdk-virtual-scrollable.page-container');
     if (views.length === 1 && views[0].scrollTop === 0) views[0].scrollTo({top,behavior:'instant'});
 }"""
+
+class BalanceReadDeferred(ValueError):
+    """Foreground input has priority; retain the previous balance observation."""
+
+
+async def open_account_panel(page, panel, close, email, checked_url, foreground, restoration=None):
+    from adapter import READ_STATE
+    from playwright.async_api import TimeoutError as BrowserTimeout
+    from foreground_queue import ForegroundQueue
+    scroll_top = None
+    restoration = {} if restoration is None else restoration
+    # Retry the exact registered tab once before reporting a missing entry.
+    for recovery in (False, True):
+        if recovery:
+            queue = ForegroundQueue(Path.home()/'.local/state/creative-unified-workbench/foreground-input')
+            if not await foreground.enter_async_context(queue.try_acquire_async()):
+                raise BalanceReadDeferred('前台正在执行任务，稍后再读余额。')
+            if page.url != checked_url:
+                raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
+            await page.bring_to_front()
+            try:
+                await page.wait_for_load_state('domcontentloaded', timeout=1500)
+            except BrowserTimeout:
+                pass
+        verified = False
+        count = 0
+        for attempt in range(10):
+            if page.url != checked_url:
+                raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
+            verified = verify_identity(await page.evaluate(READ_STATE), email)
+            if verified:
+                if await close.count() == 1:
+                    return restoration.get('opened', False), scroll_top
+                top = await page.evaluate(REVEAL_HEADER)
+                if top is not None:
+                    if scroll_top is None:
+                        scroll_top = top
+                        restoration['scroll_top'] = top
+                    await asyncio.sleep(.35)
+                count = await panel.count()
+                if count > 1:
+                    raise ValueError('Flow 页面有多个账号详情入口，未读取余额。')
+                if count == 1:
+                    restoration['opened'] = True
+                    try:
+                        await panel.click(timeout=1600)
+                    except BrowserTimeout:
+                        break
+                    return True, scroll_top
+            await asyncio.sleep(.2)
+        if not verified:
+            raise ValueError('Flow 登录信息尚未就绪，保留上次余额。')
+    raise ValueError('已切回登记的 Flow 页面并恢复页顶，仍未确认账号详情入口，保留上次余额。')
+
 
 def parse_balance(text, branded_only=False):
     patterns=(r'^([\d,\u00a0 ]+)\s*个?\s*Google\s*Flow\s*(?:点数|积分|點數|credits?|クレジット|ポイント)$',
@@ -108,6 +164,8 @@ async def read_balance(account, playwright, include_details=False):
     try:lock.acquire(timeout=0)
     except Timeout:raise ValueError('账号正在执行任务，余额稍后更新。') from None
     opened=False;page=None;checked_url=None;scroll_top=None
+    foreground=AsyncExitStack()
+    restoration={}
     try:
         # Do not call upstream attach/ensure_running: that could open a new window.
         browser=await playwright.chromium.connect_over_cdp('http://127.0.0.1:'+str(chrome.debug_port(account['profile'])),timeout=4000,no_defaults=True)
@@ -117,34 +175,8 @@ async def read_balance(account, playwright, include_details=False):
         panel=page.get_by_role('button',name=ACCOUNT_PANEL).filter(visible=True)
         close=page.get_by_role('button',name=CLOSE_PANEL).filter(visible=True)
         body=page.locator('body')
-        verified=False
-        count=0
-        for attempt in range(16):
-            if page.url!=checked_url:
-                raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
-            verified=verify_identity(await page.evaluate(READ_STATE),email)
-            if verified:
-                if await close.count()==1:
-                    break
-                if scroll_top is None:
-                    scroll_top=await page.evaluate(REVEAL_HEADER)
-                    if scroll_top is not None:
-                        await asyncio.sleep(.35)
-                count=await panel.count()
-                if count==1:
-                    try:
-                        await panel.click(timeout=1600)
-                    except BrowserTimeout:
-                        raise ValueError('Flow 账号详情按钮暂不可点，可能有弹窗遮挡，保留上次余额。') from None
-                    opened=True
-                    break
-            await asyncio.sleep(.2)
-        else:
-            if not verified:
-                raise ValueError('Flow 登录信息尚未就绪，保留上次余额。')
-            if count>1:
-                raise ValueError('Flow 页面有多个账号详情入口，未读取余额。')
-            raise ValueError('等待后仍未看到 Flow 账号详情按钮，保留上次余额。')
+        opened,scroll_top=await open_account_panel(
+            page,panel,close,email,checked_url,foreground,restoration)
         for _ in range(12):
             if page.url!=checked_url:
                 raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
@@ -168,6 +200,8 @@ async def read_balance(account, playwright, include_details=False):
             await asyncio.sleep(.25)
         raise ValueError('页面没有明确显示积分数，未估算余额。')
     finally:
+        opened = opened or restoration.get('opened', False)
+        scroll_top = restoration.get('scroll_top', scroll_top)
         try:
             if opened and page and not page.is_closed() and page.url==checked_url:
                 if await close.count()==1:await close.click(timeout=750)
@@ -178,4 +212,5 @@ async def read_balance(account, playwright, include_details=False):
                     await page.evaluate(RESTORE_SCROLL,scroll_top)
             except Exception:pass
             finally:
-                lock.release()
+                try:await foreground.aclose()
+                finally:lock.release()

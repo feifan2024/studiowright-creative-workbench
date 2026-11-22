@@ -1,14 +1,36 @@
 # 创作工作台 API
 
-工作台按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow；音乐生成走音乐服务。不会根据正文改派通道。以上功能使用同一把工作台密钥，无需 Google API 密钥。
+工作台按请求类型分流：对话、推理、识图走 Gemini；生图、生视频走 Flow；音乐生成走音乐服务。不会根据正文改派通道。以上功能使用同一把工作台密钥，无需 Google API 密钥。统一 API 当前按 v1 兼容，新增字段会保持已有字段可用。
 
 ## 请求准备
 
 调用地址是 `http://127.0.0.1:18922`。远程连接时需保持工作台的端口转发。请求带 `Authorization: Bearer <工作台密钥>`；JSON 用 `application/json`，文件原始字节用 `application/octet-stream`。
 
-提交对话、识图或 Flow 生成前，用 `Idempotency-Key` 传入并保存一个 UUID。音乐生成的 UUID 放在正文 `request_id` 中。超时或返回 `unknown` 时用原编号查询。
+提交对话、识图或 Flow 生成前，用 `Idempotency-Key` 传入并保存一个 UUID。音乐生成的 UUID 放在正文 `request_id` 中。超时或返回 `unknown` 时用原编号查询，不能换新编号重发。
 
-**`GET /api/snapshot`** · 用 flow_models 取模型 ID，用 tasks 查任务状态和下载路径。
+**健康检查与能力快照**
+
+- `GET /health`：统一 API 存活检查，不需要密钥；它只说明 18922 端口可访问。
+- `GET /api/health`：带密钥读取 API v1、部署信息和请求策略。
+- `GET /api/snapshot`：读取当前 `flow_models`、`tasks`、`real_accounts` 以及可用状态。模型列表和账号状态会变化，提交前应重新读取。
+
+健康检查和快照都不提交生成任务。
+
+**常见 HTTP 状态**
+
+| 状态 | 含义 | 处理方式 |
+| --- | --- | --- |
+| `200` | 查询成功或已复用同一请求记录 | 读取返回 JSON |
+| `201` | 新请求记录已创建 | 保存返回的请求编号 |
+| `202` | 已接收并排队 | 按原编号轮询，不重复提交 |
+| `400` | 参数、正文或文件格式不正确 | 修正请求后使用新编号 |
+| `401` | 密钥无效或已撤销 | 更新密钥后重试 |
+| `403` | 来源、主机或权限不符合要求 | 保持本机/端口转发并检查权限 |
+| `404` | 路径、任务或素材不存在 | 核对原编号和路径 |
+| `409` | 请求状态不允许继续操作 | 先查询原任务或请求记录 |
+| `502` / `503` | 上游或连接暂时不可用 | 保留原编号，稍后查询 |
+
+错误响应统一为 `{"error":"原因"}`。收到连接超时、`502`、`503` 或 `unknown` 时，不能根据结果不明重发生成。
 
 **Python 公共准备 · 先设置 STUDIOWRIGHT_API_KEY**
 
@@ -147,7 +169,7 @@ Flow 确认接收视频后释放派发名额，其他账号可以继续上传和
 
 单图或单视频（`count: 1`，含参考素材）由平台统一管理失败后的重试，最多增加 3 次尝试。仅在后台确认符合重试条件时继续，结果不明时暂停核对。查询和下载始终使用原 `task_id`；每次尝试的账号、状态和失败原因在 `retry.attempts` 中记录。调用方不要传 `auto_retry`；当前实现忽略该字段，不能通过它关闭重试。
 
-在 `params` 里填写 `prompt`、`model`、`aspect`、`count`、`resolution` 和 `duration`。模型 ID 从快照取；账号和项目由工作台安排。积分按 Flow 实际报价计费，平台不设单笔积分上限。`max_credits` 可省略；旧调用携带该字段仍可兼容，但不会形成有效上限。
+在 `params` 里填写 `prompt`、`model`、`aspect` 和 `count`。视频额外填写 `resolution` 与 `duration`，图片不需要这两个字段。模型 ID 从快照取；账号和项目由工作台安排。积分按 Flow 实际报价计费，平台不设单笔积分上限。`max_credits` 可省略；旧调用携带该字段仍可兼容，但不会形成有效上限。
 
 **复制纯文字生成请求 · 实际提交**
 
@@ -155,11 +177,10 @@ Flow 确认接收视频后释放派发名额，其他账号可以继续上传和
 rid = str(uuid4())
 print("请求编号:", rid, flush=True)
 payload = {
-    "kind": "image",  # 生视频时改为 video，并填写对应模型和时长
+    "kind": "image",  # 生视频时改为 video，并补上 resolution 和 duration
     "confirm": True,
     "params": {"prompt": "一张清晨海边的照片", "model": "填写快照中的模型 ID",
-               "aspect": "16:9", "count": 1, "resolution": "720p",
-               "duration": 8}
+               "aspect": "16:9", "count": 1}
 }
 print(call("/api/real-pool/flow", payload, rid))
 ```
@@ -260,7 +281,7 @@ if record.get("task_id"):
 
 已入库素材：`GET /api/library?page=1&limit=24` 查列表，`GET /api/library/{素材ID}` 查详情，`GET /api/library/{素材ID}/file` 下载原文件。
 
-错误通常返回 `{"error":"原因"}`。`401` 检查密钥，`400` 检查请求参数，`404` 核对路径或编号。`GET /health` 检查 API 是否可访问，无需密钥。
+错误通常返回 `{"error":"原因"}`。`401` 检查密钥，`400` 检查请求参数，`404` 核对路径或编号，`409` 先查询原任务。`GET /health` 检查 18922 API 是否可访问，无需密钥。
 
 ## 音乐生成与音频
 

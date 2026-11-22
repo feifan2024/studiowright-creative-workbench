@@ -621,7 +621,7 @@ async def recover(payload):
                     return
                 try:
                     await asyncio.to_thread(guard_live, account)
-                    balance = await asyncio.wait_for(read_balance(store.account(profile), pw, include_details=True), timeout=12)
+                    balance = await asyncio.wait_for(read_balance(store.account(profile), pw, include_details=True), timeout=20)
                     insights.record(profile, balance['balance'], next_credit_date=balance.get('next_credit_date'))
                 except (OSError, ValueError, TimeoutError, sqlite3.Error, subprocess.SubprocessError):
                     pass

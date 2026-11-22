@@ -1,0 +1,107 @@
+import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
+import sys
+from types import SimpleNamespace as S
+import unittest
+from unittest.mock import AsyncMock, patch
+
+ROOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot'
+sys.path[:0] = [str(ROOT/'flow/console'), str(ROOT/'workbench')]
+from balance_reader import open_account_panel, BalanceReadDeferred, REVEAL_HEADER
+
+
+class BalanceRecovery(unittest.IsolatedAsyncioTestCase):
+    def make_fixture(self, *, available=True, stays_missing=False, identity='a@example.test', duplicate=False):
+        page = S(url='https://flow.google.com/project/fixture', focused=False)
+        state = dict(lease_entries=0, lease_exits=0)
+        async def front(): page.focused=True
+        async def evaluate(expression):
+            if expression == 'identity': return {'signed_in':True,'emails':[identity]}
+            return 720 if not page.focused else None
+        page.bring_to_front=AsyncMock(side_effect=front)
+        page.wait_for_load_state=AsyncMock()
+        page.evaluate=AsyncMock(side_effect=evaluate)
+        count = lambda: 2 if duplicate else (1 if page.focused and not stays_missing else 0)
+        panel=S(count=AsyncMock(side_effect=count), click=AsyncMock())
+        close=S(count=AsyncMock(return_value=0))
+        @asynccontextmanager
+        async def acquire():
+            state['lease_entries']+=1
+            try: yield available
+            finally: state['lease_exits']+=1
+        queue=S(try_acquire_async=acquire)
+        return page,panel,close,state,queue
+
+    async def run_fixture(self, page,panel,close,queue,restoration):
+        with patch.dict(sys.modules, {'adapter':S(READ_STATE='identity'),
+                'foreground_queue':S(ForegroundQueue=lambda _:queue)}), \
+             patch('balance_reader.asyncio.sleep',new_callable=AsyncMock):
+            async with AsyncExitStack() as stack:
+                return await open_account_panel(page,panel,close,'a@example.test',
+                    'https://flow.google.com/project/fixture',stack,restoration)
+
+    async def test_missing_button_switches_exact_tab_then_rechecks(self):
+        page,panel,close,state,queue=self.make_fixture()
+        restoration={}
+        opened,top=await self.run_fixture(page,panel,close,queue,restoration)
+        self.assertTrue(opened)
+        self.assertEqual(top,720)
+        page.bring_to_front.assert_awaited_once()
+        panel.click.assert_awaited_once()
+        self.assertEqual(state,dict(lease_entries=1,lease_exits=1))
+        self.assertEqual(restoration['scroll_top'],720)
+
+    async def test_foreground_busy_defers_without_switching(self):
+        page,panel,close,state,queue=self.make_fixture(available=False)
+        with self.assertRaises(BalanceReadDeferred):
+            await self.run_fixture(page,panel,close,queue,{})
+        page.bring_to_front.assert_not_awaited()
+        panel.click.assert_not_awaited()
+        self.assertEqual(state,dict(lease_entries=1,lease_exits=1))
+
+    async def test_still_missing_reports_only_after_one_recovery(self):
+        page,panel,close,state,queue=self.make_fixture(stays_missing=True)
+        restoration={}
+        with self.assertRaisesRegex(ValueError,'已切回登记的 Flow 页面'):
+            await self.run_fixture(page,panel,close,queue,restoration)
+        page.bring_to_front.assert_awaited_once()
+        panel.click.assert_not_awaited()
+        self.assertEqual(restoration['scroll_top'],720)
+        self.assertEqual(state['lease_exits'],1)
+
+    async def test_other_account_never_clicked_or_focused(self):
+        page,panel,close,state,queue=self.make_fixture(identity='other@example.test')
+        with self.assertRaisesRegex(ValueError,'邮箱与登记账号不符'):
+            await self.run_fixture(page,panel,close,queue,{})
+        page.bring_to_front.assert_not_awaited()
+        panel.click.assert_not_awaited()
+
+    async def test_duplicate_entries_never_guessed(self):
+        page,panel,close,state,queue=self.make_fixture(duplicate=True)
+        with self.assertRaisesRegex(ValueError,'多个账号详情入口'):
+            await self.run_fixture(page,panel,close,queue,{})
+        page.bring_to_front.assert_not_awaited()
+        panel.click.assert_not_awaited()
+
+    async def test_already_open_panel_is_left_open(self):
+        page,panel,close,state,queue=self.make_fixture()
+        close.count.return_value=1
+        opened,top=await self.run_fixture(page,panel,close,queue,{})
+        self.assertFalse(opened)
+        self.assertIsNone(top)
+        page.bring_to_front.assert_not_awaited()
+        panel.click.assert_not_awaited()
+
+    async def test_page_change_is_not_navigated_back_or_clicked(self):
+        page,panel,close,state,queue=self.make_fixture()
+        async def front(): page.url='https://flow.google.com/project/other'
+        page.bring_to_front.side_effect=front
+        with self.assertRaisesRegex(ValueError,'页面在读取时发生切换'):
+            await self.run_fixture(page,panel,close,queue,{})
+        panel.click.assert_not_awaited()
+        self.assertEqual(state['lease_exits'],1)
+
+
+if __name__=='__main__':
+    unittest.main()

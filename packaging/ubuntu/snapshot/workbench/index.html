@@ -11,7 +11,7 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar" aria-label="主导航">
-      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>算力中心</strong><small>FLOW · GEMINI · MUSIC <span class="brand-version" aria-label="版本 0.3.4">v0.3.4</span></small></div></div>
+      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>算力中心</strong><small>FLOW · GEMINI · MUSIC <span class="brand-version" aria-label="版本 0.3.5">v0.3.5</span></small></div></div>
       <div class="nav-label">算力中心</div>
       <nav class="navigation" aria-label="算力中心">
         <button class="nav-item active" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>总览<span class="nav-arrow">›</span></button>
@@ -261,8 +261,11 @@
             <section class="api-panel" aria-labelledby="api-start">
               <div class="api-heading"><span>01</span><div><h2 id="api-start" tabindex="-1">请求准备</h2></div></div>
               <p>调用地址是 <code>http://127.0.0.1:18922</code>。远程连接时需保持算力中心的端口转发。请求带 <code>Authorization: Bearer &lt;算力中心密钥&gt;</code>；JSON 用 <code>application/json</code>，文件原始字节用 <code>application/octet-stream</code>。</p>
-              <p>提交对话、识图或生成前，用 <code>Idempotency-Key</code> 传入并保存一个 UUID。超时或返回 <code>unknown</code> 时用原编号查询。</p>
-              <div class="api-endpoint"><b>GET</b><code>/api/snapshot</code><span>用 flow_models 取模型 ID，用 tasks 查任务状态和下载路径。</span></div>
+              <p>提交对话、识图或生成前，用 <code>Idempotency-Key</code> 传入并保存一个 UUID。超时或返回 <code>unknown</code> 时用原编号查询，不能换新编号重发。</p>
+              <div class="api-endpoint"><b>GET</b><code>/health</code><span>统一 API 存活检查，不需要密钥；只说明 18922 端口可访问。</span></div>
+              <div class="api-endpoint"><b>GET</b><code>/api/health</code><span>带密钥读取 API v1、部署信息和请求策略。</span></div>
+              <div class="api-endpoint"><b>GET</b><code>/api/snapshot</code><span>读取 flow_models、tasks、real_accounts 和可用状态；提交前重新读取。</span></div>
+              <p class="api-note"><strong>状态处理：</strong>200/201 表示查询或创建成功，202 表示已排队，400/401/403/404/409 表示请求或状态问题，502/503 表示上游暂时不可用。连接超时、502、503 或 <code>unknown</code> 都要保留原编号查询，不能重复生成。</p>
               <div class="api-code-head"><span>Python 公共准备 · 先设置 STUDIOWRIGHT_API_KEY</span><button type="button" data-copy-code="api-code-base">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-base">import json, os
 from pathlib import Path
 from uuid import uuid4
@@ -330,15 +333,14 @@ print(call("/api/real-pool/image-analysis-validate", payload, rid))
               <div class="api-heading"><span>04</span><div><h2 id="api-aigc" tabindex="-1">Flow · 生成图片或视频</h2></div></div>
               <div class="api-endpoint"><b>POST</b><code>/api/real-pool/flow</code><span>传 kind、confirm: true 和 params。返回 request_id、status、task_id；submitted 表示已排队。</span></div>
               <p>Flow 确认接收视频后释放派发名额，其他账号可以继续上传和提交。同账号依次处理自己的任务，已提交视频由算力中心跟进并下载。提交后保留原 <code>task_id</code>，可继续提交新请求并轮询前一条的结果。</p>
-              <p>在 <code>params</code> 里填写 <code>prompt</code>、<code>model</code>、<code>aspect</code>、<code>count</code>、<code>resolution</code>、<code>duration</code>。模型 ID 从快照取。时长按模型区分：Omni 1.1 Flash 为 4/6/8/10 秒，Omni 1.2 Flash 为 3～15 秒连续可调；画面比例 16:9 或 9:16。账号和项目由算力中心安排；积分按 Flow 实际报价计费，平台不设单笔上限。非约定参数（如 <code>max_credits</code>、<code>auto_retry</code>）携带了也会被忽略，不产生效果。</p>
+               <p>图片在 <code>params</code> 里填写 <code>prompt</code>、<code>model</code>、<code>aspect</code>、<code>count</code>；视频额外填写 <code>resolution</code>、<code>duration</code>。模型 ID 从快照取。时长按模型区分：Omni 1.1 Flash 为 4/6/8/10 秒，Omni 1.2 Flash 为 3～15 秒连续可调；画面比例 16:9 或 9:16。账号和项目由算力中心安排；积分按 Flow 实际报价计费，平台不设单笔上限。非约定参数（如 <code>max_credits</code>、<code>auto_retry</code>）携带了也会被忽略，不产生效果。</p>
               <div class="api-code-head"><span>复制纯文字生成请求 · 实际提交</span><button type="button" data-copy-code="api-code-generate">复制代码</button></div><pre class="api-code" tabindex="0"><code id="api-code-generate">rid = str(uuid4())
 print("请求编号:", rid, flush=True)
 payload = {
-    "kind": "image",  # 生视频时改为 video，并填写对应模型和时长（Omni 1.1 为 4/6/8/10 秒，Omni 1.2 为 3～15 秒）；首尾帧参考见下方"带参考素材"
+    "kind": "image",  # 生视频时改为 video，并补上 resolution 和 duration；首尾帧参考见下方"带参考素材"
     "confirm": True,
     "params": {"prompt": "一张清晨海边的照片", "model": "填写快照中的模型 ID",
-               "aspect": "16:9", "count": 1, "resolution": "720p",
-               "duration": 8}
+               "aspect": "16:9", "count": 1}
 }
 print(call("/api/real-pool/flow", payload, rid))</code></pre>
               <h3>带参考素材</h3>
@@ -423,7 +425,7 @@ if record.get("task_id"):
                     while chunk := res.read(65536):
                         output.write(chunk)</code></pre>
               <p>已入库素材：<code>GET /api/library?page=1&amp;limit=24</code> 查列表，<code>GET /api/library/{素材ID}</code> 查详情，<code>GET /api/library/{素材ID}/file</code> 下载原文件。</p>
-              <p>错误通常返回 <code>{"error":"原因"}</code>。<code>401</code> 检查密钥，<code>400</code> 检查请求参数，<code>404</code> 核对路径或编号。<code>GET /health</code> 检查 API 是否可访问，无需密钥。</p>
+              <p>错误通常返回 <code>{"error":"原因"}</code>。<code>401</code> 检查密钥，<code>400</code> 检查请求参数，<code>404</code> 核对路径或编号，<code>409</code> 先查询原任务。<code>GET /health</code> 检查 18922 API 是否可访问，无需密钥。</p>
             </section>
           </div>
           <dialog id="apiKeyDialog" class="api-copy-dialog api-key-dialog" aria-labelledby="apiKeyDialogHeading"><h2 id="apiKeyDialogHeading">密钥创建成功</h2><p id="apiKeyDialogHelp">密钥已加密保存，以后可在列表中再次复制。</p><label for="apiKeySecret">密钥</label><textarea id="apiKeySecret" readonly rows="2"></textarea><div class="api-key-dialog-actions"><button id="apiKeyCopy" class="button button-primary" type="button">复制密钥</button><button id="apiKeyDone" class="button button-light" type="button">完成</button></div><p id="apiKeyCopyStatus" role="status" aria-live="polite"></p></dialog>
