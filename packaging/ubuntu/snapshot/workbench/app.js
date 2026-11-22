@@ -1329,14 +1329,10 @@ function renderAccountInsights(snapshot, target) {
     const known=ready!=null && total>0;
     const rest=known ? total-ready : null;
     const label=override ?? (rest==null ? '状态待核对' : rest>0 ? `${amount(rest)} 个未就绪` : '');
-    const isFlow = service === 'FLOW';
-    const tag = isFlow ? 'button' : 'div';
-    const attributes = isFlow
-      ? `type="button" data-governance="flow" aria-busy="${governanceAudits.flow?.running === true}"`
-      : '';
+    const key = service.toLowerCase();
+    const name = key === 'flow' ? 'Flow' : 'Gemini';
     const description = known ? `就绪 ${amount(ready)} / ${total}` : '状态待核对';
-    const action = isFlow ? `<span class="governance-entry-label">${governanceAudits.flow?.running ? '正在检查…' : '一键就绪 →'}</span>` : '';
-    return `<${tag} class="dashboard-ring-item${isFlow ? ' governance-entry' : ''}" ${attributes} aria-label="${isFlow ? 'Flow 一键就绪' : service}，${description}"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${total || '—'}</small></strong><span>就绪账号</span></span></span>${action}<span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></${tag}>`;
+    return `<button type="button" class="dashboard-ring-item governance-entry" data-governance="${key}" aria-label="${name} 一键就绪，${description}" title="${name} 一键就绪"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${total || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></button>`;
   };
   // 音乐账号池圆环：就绪（令牌未过期）账号数 / 池内账号数，只修复未就绪账号。
   const musicAccounts = musicServiceStatus?.accounts || [];
@@ -1349,7 +1345,7 @@ function renderAccountInsights(snapshot, target) {
   target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验` : (geminiPending || geminiBlocked ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ') : null))}${musicRingMarkup}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${accounts.length} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
   <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话轮询分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
   scope.querySelector('.dashboard-metrics').insertAdjacentHTML('afterend',
-    '<p data-flow-governance-status role="status" class="subtle"></p>');
+    '<p data-governance-status role="status" class="sr-only"></p>');
   $('dashboardRuntime').replaceChildren(scope.querySelector('[data-dashboard-running]'));
   scope.querySelector('[data-dashboard-ring="FLOW"]').style.setProperty('--fill',`${health ?? 0}%`);
   scope.querySelector('[data-dashboard-ring="GEMINI"]').style.setProperty('--fill',`${eligible!=null && accounts.length ? eligible/accounts.length*100 : 0}%`);
@@ -1357,10 +1353,11 @@ function renderAccountInsights(snapshot, target) {
   scope.querySelector('[data-insight-accounts]').addEventListener('click',()=>setView('accounts'));
   scope.querySelector('[data-insight-conversations]').addEventListener('click',()=>setView('conversations'));
   scope.querySelectorAll('[data-runtime-activate]').forEach(button=>button.addEventListener('click',()=>openGovernance(button.dataset.runtimeActivate)));
-  scope.querySelector('[data-governance="flow"]').addEventListener('click',()=>openGovernance('flow'));
+  scope.querySelectorAll('[data-governance]').forEach(button =>
+    button.addEventListener('click', () => openGovernance(button.dataset.governance)));
   scope.querySelector('[data-music-readiness]')?.addEventListener('click', startMusicReadiness);
   renderMusicReadiness();
-  renderFlowGovernanceStatus();
+  renderGovernanceRings();
   renderServiceActivationFeedback(scope);
   for (const service of expandedResults) {
     const details=scope.querySelector(`[data-activation-feedback="${service}"] details`);
@@ -1746,31 +1743,25 @@ function renderGovernanceGuidance(service, audit) {
   panel.dataset.rendered=body;
 }
 
-function renderFlowGovernanceStatus() {
-  const status = $('operationsDashboard').querySelector('[data-flow-governance-status]');
-  const audit = governanceAudits.flow;
-  if (!status) return;
-  const ready = audit?.rows.filter(countsAsReady).length;
-  const message = !audit?.repair && !audit?.repairNext ? ''
-    : audit.running || audit.repairNext ? '正在检查并恢复 Flow 未就绪账号…'
-    : audit.error || `Flow 检查完成 · ${ready} / ${audit.rows.length} 个账号就绪。`;
+function renderGovernanceRings() {
+  const dashboard = $('operationsDashboard');
+  for (const service of ['flow','gemini']) {
+    const ring = dashboard.querySelector(`[data-governance="${service}"]`);
+    const busy = governanceAudits[service]?.running === true || state.serviceActivations?.[service]?.status === 'running' ||
+      (service === 'gemini' && governancePosting.size > 0);
+    ring?.setAttribute('aria-busy', String(busy));
+  }
+  const status = dashboard.querySelector('[data-governance-status]');
+  const audit = governanceAudits[governanceService];
+  if (!status || (!audit?.repair && !audit?.repairNext)) return;
+  const name = governanceService === 'flow' ? 'Flow' : 'Gemini';
+  const message = audit.running || audit.repairNext ? `${name} 正在检查账号。`
+    : audit.error || `${name} 检查完成 · ${audit.rows.filter(countsAsReady).length} / ${audit.rows.length} 个账号就绪。`;
   if (status.textContent !== message) status.textContent = message;
-  status.hidden = !message;
 }
 
 function renderGovernance() {
-  renderFlowGovernanceStatus();
-  for (const service of ['flow','gemini']) {
-    const ring = $('operationsDashboard').querySelector(`[data-governance="${service}"]`);
-    const busy = governanceAudits[service]?.running === true || state.serviceActivations?.[service]?.status === 'running' ||
-      (service === 'gemini' && governancePosting.size > 0);
-    if (ring) {
-      ring.setAttribute('aria-busy', String(busy));
-      const caption = ring.querySelector('.governance-entry-label');
-      const text = busy ? '正在检查…' : '一键就绪 →';
-      if (caption && caption.textContent !== text) caption.textContent = text;
-    }
-  }
+  renderGovernanceRings();
   const service = governanceService;
   const isGemini = service === 'gemini';
   const audit=governanceAudits[service];
