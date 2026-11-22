@@ -11,6 +11,31 @@ function load(name, context) {
   vm.runInContext(match[0], context);
 }
 
+test('Flow page warning shows its own reason and screenshot without a generation task', () => {
+  const incident = {id:'0123456789abcdef0123456789abcdef', phase:'login', has_screenshot:true};
+  const context = vm.createContext({incident});
+  for (const name of ['esc', 'flowAccountReason', 'flowAccountNoticeMarkup']) load(name, context);
+  const code = 'flowAccountNoticeMarkup(flowAccountReason({flow_page_incident:incident}, {}, {}, null), incident)';
+  const warning = vm.runInContext(code, context);
+  assert.match(warning, /核对登录时检测到异常活动/);
+  assert.match(warning, /\/api\/flow-warning-screenshots\/0123456789abcdef0123456789abcdef\.png/);
+  incident.has_screenshot = false;
+  assert.match(vm.runInContext(
+    'flowAccountNoticeMarkup(flowAccountReason({flow_page_incident:incident}, {}, {}, null), null)', context), /本次未保存截图/);
+});
+
+test('Flow preflight mismatch explains why the account is blocked without reusing an old screenshot', () => {
+  const context = vm.createContext({});
+  for (const name of ['esc', 'flowAccountReason', 'flowAccountNoticeMarkup']) load(name, context);
+  const message = vm.runInContext(`
+    const reason = flowAccountReason({flow_preflight_reasons:['profile_languages_mismatch', 'system_timezone_mismatch']}, {}, {}, null);
+    flowAccountNoticeMarkup(reason, {id:'123456789abc'});
+  `, context);
+  assert.match(message, /浏览器语言与账号设置不一致/);
+  assert.match(message, /Ubuntu 时区与账号设置不一致/);
+  assert.doesNotMatch(message, /warning-screenshots/);
+});
+
 test('overview renders one shared quota card with both time windows', () => {
   const target = {
     querySelector: selector => selector === 'details[open]' ? null : {addEventListener() {}},

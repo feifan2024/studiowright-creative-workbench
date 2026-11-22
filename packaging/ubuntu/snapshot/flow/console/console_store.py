@@ -21,6 +21,11 @@ class Store:
             db.executescript("""
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS accounts(profile TEXT PRIMARY KEY, label TEXT, email TEXT, checked REAL, state TEXT DEFAULT 'unknown', error TEXT);
+            CREATE TABLE IF NOT EXISTS flow_page_incidents(
+                id TEXT PRIMARY KEY, profile TEXT NOT NULL, phase TEXT NOT NULL,
+                observed REAL NOT NULL, screenshot BLOB, reviewed REAL);
+            CREATE UNIQUE INDEX IF NOT EXISTS active_flow_page_incident
+                ON flow_page_incidents(profile) WHERE reviewed IS NULL;
             CREATE TABLE IF NOT EXISTS projects(profile TEXT, id TEXT, title TEXT, checked REAL, PRIMARY KEY(profile,id));
             CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, profile TEXT, project TEXT, kind TEXT, params TEXT, status TEXT, result TEXT, error TEXT, created REAL, started REAL, finished REAL, request_key TEXT UNIQUE);
             CREATE TABLE IF NOT EXISTS flow_retry_roots(root_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated REAL NOT NULL);
@@ -59,6 +64,22 @@ class Store:
 
     def accounts(self):
         return self.rows("SELECT * FROM accounts ORDER BY profile")
+
+    def page_incidents(self):
+        return {row['profile']: row for row in self.rows(
+            "SELECT profile,id,phase,observed,screenshot IS NOT NULL AS has_screenshot FROM flow_page_incidents WHERE reviewed IS NULL")}
+
+    def record_page_incident(self, profile, phase, screenshot):
+        with closing(self.connect()) as db, db:
+            db.execute("""INSERT INTO flow_page_incidents(id,profile,phase,observed,screenshot)
+                VALUES(?,?,?,?,?) ON CONFLICT(profile) WHERE reviewed IS NULL DO UPDATE SET
+                screenshot=COALESCE(flow_page_incidents.screenshot,excluded.screenshot)""",
+                (secrets.token_hex(16), profile, phase, time.time(), screenshot))
+
+    def review_page_incident(self, profile, ident):
+        with closing(self.connect()) as db, db:
+            return db.execute("""UPDATE flow_page_incidents SET reviewed=?
+                WHERE profile=? AND id=? AND reviewed IS NULL""", (time.time(), profile, ident)).rowcount == 1
 
     def account(self, profile):
         rows = self.rows("SELECT * FROM accounts WHERE profile=?", (profile,))

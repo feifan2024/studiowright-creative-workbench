@@ -18,7 +18,7 @@ class Onboarding(unittest.IsolatedAsyncioTestCase):
         fake=S(selectors=S(COMPOSER='old',BOUND_CHIP='chip',MENTION_CHIP='mention'))
         class Blocked(Exception):pass
         with patch.dict(sys.modules,{'studiowright.flow':fake,'task_coordinator':S(CoordinationBlocked=Blocked)}):
-            with self.assertRaises(Blocked):await fn(S(),page)
+            with self.assertRaises(Blocked):await fn(S(check_page_activity=AsyncMock()),page)
         self.assertIn('flow-base-prompt-box',page.locator.call_args.args[0])
     async def test_empty_agent_panel_prepared_only_after_safety_guards(self):
         fn,ns=method('flow_window_policy.py','safe_page');ns['SAFETY_JS']='flags'
@@ -36,7 +36,8 @@ class Onboarding(unittest.IsolatedAsyncioTestCase):
         fn,_=method('browser_rendering.py','page_for')
         flow=S(url='https://flow.google.com/',is_closed=lambda:False)
         foreign=S(url='',is_closed=lambda:False)
-        session=S(_onboarding=True,context=S(pages=[foreign,flow]),_safe_editor=AsyncMock(),_new_window=AsyncMock())
+        session=S(_onboarding=True,context=S(pages=[foreign,flow]),_safe_editor=AsyncMock(),
+                  _new_window=AsyncMock(),check_page_activity=AsyncMock())
         self.assertIs(await fn(session,'https://flow.google.com/'),flow)
         session._new_window.assert_not_awaited()
         self.assertTrue(all(call.args[0] is flow for call in session._safe_editor.call_args_list))

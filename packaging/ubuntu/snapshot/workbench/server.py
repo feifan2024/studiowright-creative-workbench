@@ -493,6 +493,16 @@ def account_rows(state):
             email = ""
         raw_health = info.get("health")
         health = raw_health if isinstance(raw_health, str) and raw_health in {"ready", "cooling", "attention", "empty", "paused"} else "unknown"
+        preflight = row.get('dispatch_preflight_reasons')
+        preflight = [reason for reason in preflight if isinstance(reason, str)] if isinstance(preflight, list) else []
+        incident = row.get('flow_page_incident')
+        if not (isinstance(incident, dict) and incident.get('profile') == profile
+                and isinstance(incident.get('id'), str) and re.fullmatch(r'[0-9a-f]{32}', incident['id'])):
+            incident = None
+        if incident:
+            health = 'paused'
+        elif preflight and health not in ('paused', 'cooling'):
+            health = 'attention'
         balance = info.get("balance")
         if isinstance(balance, bool) or not isinstance(balance, (int, float)) or not math.isfinite(balance) or balance < 0:
             balance = None
@@ -500,6 +510,9 @@ def account_rows(state):
                      "profile": profile, "label": clean_text(row.get("label"), 120), "email": email,
                      "flow_login": "verified" if row.get("state") == "verified" else "unknown",
                      "flow_health": health, "flow_balance": balance,
+                     "flow_preflight_reasons": preflight,
+                     "flow_page_incident": ({'id': incident['id'], 'phase': incident.get('phase'),
+                                             'has_screenshot': incident.get('has_screenshot') == 1} if incident else None),
                      "flow_next_credit_date": info.get("next_credit_date"),
                      "flow_balance_error": clean_text(info.get("balance_error"), 200),
                      "flow_balance_fresh": info.get("balance_fresh") is True,
@@ -789,11 +802,15 @@ class Sources:
             pass
         return 503, {'error':'重试结果待核对，请刷新原任务记录。'}
 
-    def flow_risk_resume(self, profile):
+    def flow_risk_resume(self, profile, incident=None):
         if not isinstance(profile, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', profile):
             raise ValueError('账号标识不正确。')
-        url = f"http://127.0.0.1:{self.ports['flow']}/api/accounts/risk-resume"
-        body = json.dumps({'profile': profile}).encode('utf-8')
+        action = 'page-incident-review' if incident is not None else 'risk-resume'
+        url = f"http://127.0.0.1:{self.ports['flow']}/api/accounts/{action}"
+        data = {'profile': profile}
+        if incident is not None:
+            data['incident'] = incident
+        body = json.dumps(data).encode('utf-8')
         request = Request(url, data=body, method='POST', headers={'Content-Type':'application/json',
                           'Origin': f"http://127.0.0.1:{self.ports['flow']}", 'X-Console-Request':'1'})
         try:
@@ -803,6 +820,8 @@ class Sources:
                 raise ValueError('Flow 恢复状态未确认，请刷新后核对。')
             return result
         except HTTPError as exc:
+            if exc.code == 409:
+                raise ValueError('这条警告已核查或已变化，请刷新。') from None
             if exc.code == 400:
                 raise ValueError('该账号当前没有需要人工恢复的暂停。') from None
             raise ValueError('Flow 恢复暂不可用，请稍后核对。') from None
@@ -965,7 +984,8 @@ class Sources:
         payload = {'accounts': [{'profile': a['profile'], 'key': a['key'], 'email': a['email'],
                                 'projects': [p['source_id'] for p in projects if p['source_profile']==a['profile']],
                                 'review_task': windows.get(a['profile'],{}).get('task_id') if windows.get(a['profile'],{}).get('state')=='result_unknown' else None,
-                                'repairable': (a['flow_login']=='verified' and a['flow_risk_known'] and not a['flow_risk_paused']
+                                'repairable': (a['flow_login']=='verified' and not a['flow_page_incident']
+                                               and a['flow_risk_known'] and not a['flow_risk_paused']
                                                and a['flow_pacing_known'] and not a['flow_cooling'])}
                                for a in accounts if a.get('email')],
                    'bindings': coordination.get('window_bindings', []), 'busy': sorted(p for p in busy if p)}
@@ -1125,10 +1145,12 @@ def flow_task_notes(tasks, accounts, coordination=None):
             continue
         if (task['status'] == 'queued' and task['kind'] in ('image', 'video') and account
                 and (task.get('retry') or {}).get('state') != 'pending_switch'):
-            if account['flow_risk_paused']:
+            if account.get('flow_page_incident') or account['flow_risk_paused']:
                 task['note'] = '等待人工核查并恢复该账号的 Flow。'
             elif account['flow_cooling']:
                 task['note'] = '账号冷却中，任务等待派发。'
+            elif account.get('flow_preflight_reasons'):
+                task['note'] = '账号派发自检未通过。请查看账号卡片。'
 
 
 class Coordinator:
@@ -1464,11 +1486,12 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 return self.stream_tasks()
             if self.path == '/api/frontend/events':
                 return self.stream_frontend()
-            warning = re.fullmatch(r'/api/flow-warning-screenshots/([0-9a-f]{12})\.png', self.path)
+            warning = re.fullmatch(r'/api/flow-warning-screenshots/([0-9a-f]{12}|[0-9a-f]{32})\.png', self.path)
             if warning and deployment == 'ubuntu':
-                from flow_warning_archive import FLOW_ROOT, read_png
+                from flow_warning_archive import FLOW_ROOT, read_page_png, read_png
                 try:
-                    body = read_png(FLOW_ROOT, warning.group(1))
+                    ident = warning.group(1)
+                    body = (read_page_png if len(ident) == 32 else read_png)(FLOW_ROOT, ident)
                 except FileNotFoundError:
                     return self.json_response(404, {'error': '未找到这张警告截图。'})
                 except (OSError, ValueError, sqlite3.Error):
@@ -2267,10 +2290,17 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                             raise ValueError('请选择此账号已登记的项目。')
                         return self.json_response(200, sources.flow_retry_project(profile, projects[0]['source_id']))
                     if self.path.endswith('/flow-risk-resume'):
-                        if set(data) != {'account'} or not isinstance(data['account'], str) or not re.fullmatch(r'[0-9a-f]{64}', data['account']):
+                        if set(data) not in ({'account'}, {'account', 'incident'}) or not isinstance(data['account'], str) or not re.fullmatch(r'[0-9a-f]{64}', data['account']):
                             raise ValueError('请选择已登记账号。')
                         matches = [a for a in account_data['items'] if a.get('key') == 'flow-account-' + data['account']]
-                        if len(matches) != 1 or matches[0].get('flow_risk_paused') is not True:
+                        if len(matches) != 1:
+                            raise ValueError('账号无法唯一匹配，请刷新。')
+                        if 'incident' in data:
+                            current = matches[0].get('flow_page_incident')
+                            if not current or data['incident'] != current['id']:
+                                raise ValueError('这条警告已核查或已变化，请刷新。')
+                            return self.json_response(200, sources.flow_risk_resume(matches[0]['profile'], current['id']))
+                        if matches[0].get('flow_risk_paused') is not True:
                             raise ValueError('该账号当前没有需要人工恢复的暂停。')
                         return self.json_response(200, sources.flow_risk_resume(matches[0]['profile']))
                     if self.path.endswith('/dispatch-policy'):

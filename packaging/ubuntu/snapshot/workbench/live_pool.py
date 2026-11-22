@@ -1362,6 +1362,7 @@ class RealPool:
         blocked = RealPool._flow_window_blocked(snapshot)
         return {a['profile']: a for a in snapshot.get('real_accounts', {}).get('items', [])
                 if isinstance(a, dict) and isinstance(a.get('profile'), str) and a.get('flow_login') == 'verified'
+                and not a.get('flow_page_incident') and not a.get('flow_preflight_reasons')
                 and a.get('flow_health') == 'ready' and a.get('flow_risk_known') is True
                 and a.get('flow_risk_paused') is False and a.get('flow_pacing_known') is True
                 and a.get('flow_cooling') is False and a['profile'] not in blocked}

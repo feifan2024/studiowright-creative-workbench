@@ -16,6 +16,37 @@ DISALLOWED_FLAGS = (
     '--proxy-pac-url', '--proxy-auto-detect', '--proxy-bypass-list',
     '--host-resolver-rules',
 )
+LANGUAGE = re.compile(r'[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*')
+TIMEZONE = re.compile(r'[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*')
+
+
+def dispatch_check(root, profile):
+    """Require an explicit locale policy for each account used for generation."""
+    policy = Path(root) / 'console-data/dispatch-locales.json'
+    try:
+        if policy.is_symlink():
+            raise ValueError('unexpected symlink')
+        values = json.loads(policy.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return False, ['dispatch_locale_missing']
+    except (OSError, ValueError):
+        return False, ['dispatch_locale_invalid']
+    if not isinstance(values, dict):
+        return False, ['dispatch_locale_invalid']
+    if profile not in values:
+        return False, ['dispatch_locale_missing']
+    expected = values[profile]
+    if not isinstance(expected, dict) or set(expected) != {'languages', 'timezone'}:
+        return False, ['dispatch_locale_invalid']
+    languages, timezone = expected['languages'], expected['timezone']
+    if (not isinstance(languages, list) or not languages
+            or not all(isinstance(value, str) and LANGUAGE.fullmatch(value) for value in languages)
+            or not isinstance(timezone, str) or not TIMEZONE.fullmatch(timezone)):
+        return False, ['dispatch_locale_invalid']
+    try:
+        return check_profile(root, profile, expected_languages=languages, expected_timezone=timezone)
+    except (OSError, RuntimeError, ValueError):
+        return False, ['profile_preflight_unavailable']
 
 
 def _chrome_processes(proc_root, target):

@@ -30,6 +30,7 @@ from web_auth import WebAuth
 from login_sessions import Vault, normalize_bundle
 from material_library import Library
 from material_tags import SEARCH_LABELS
+from preflight import dispatch_check
 from remote_login import RemoteLogins
 
 HERE = Path(__file__).resolve().parent
@@ -88,6 +89,13 @@ class Console:
             del self.generation_busy[profile]
         self.busy.discard(profile)
 
+    def dispatch_preflight(self, profiles):
+        if self.test:
+            return {profile: [] for profile in profiles}
+        holds = self.store.page_incidents()
+        return {profile: (['flow_page_warning'] if profile in holds
+                          else dispatch_check(self.root, profile)[1]) for profile in profiles}
+
     async def execute(self, task, *, on_video_submitted=None):
         # This second check is before the adapter is called, so a racing restriction
         # can safely leave the existing task in the queue without resubmission.
@@ -100,9 +108,11 @@ class Console:
             database = self.root / 'data/studiowright.db'
             if task['kind'] in {'image', 'video'} and not (self.test and not database.exists()):
                 status = account_status([{'profile': task['profile']}], database)[0]
+                preflight = await asyncio.to_thread(self.dispatch_preflight, [task['profile']])
                 detail = self.store.retry_detail(task['id'])
                 switched = (task.get('retry_reason') or (detail or {}).get('reason')) == 'switch_account'
-                if (status['generation_state'] != 'not_cooling_down' or status['risk_paused'] is not False
+                if (preflight[task['profile']] or status['generation_state'] != 'not_cooling_down'
+                        or status['risk_paused'] is not False
                         or (switched and (task['profile'] not in self.switch_ready_profiles()
                                           or not self.retry_project_matches(task['profile'], task['project'])))):
                     self.store.release_unsubmitted(task['id'], task.get('attempt_ordinal', 0))
@@ -344,6 +354,11 @@ class Console:
                         allowed = {a['profile'] for a in accounts}  # FakeAdapter fixture only.
                     if not keyboard_ready:
                         allowed.clear()
+                    if allowed and not self.test:
+                        queued = {r['profile'] for r in self.store.rows(
+                            "SELECT DISTINCT profile FROM flow_task_execution_rows WHERE status='queued' AND kind IN ('image','video')")}
+                        checks = await asyncio.to_thread(self.dispatch_preflight, allowed & queued)
+                        allowed = {profile for profile, reasons in checks.items() if not reasons}
                     task = self.store.claim(self.busy | self.balance_busy, allowed, self.switch_ready_profiles(),
                                             set(), self.generation_projects,
                                             request_keys=set(scope['requests']) if scope else None)
@@ -387,6 +402,7 @@ class Console:
         if not self.test:
             allowed -= {w['profile'] for w in Coordinator().status()['windows']
                         if w['state'] not in ('idle',)}
+            allowed = {profile for profile, reasons in self.dispatch_preflight(allowed).items() if not reasons}
         balances = {r['profile']:r['balance'] for r in self.store.rows(
             "SELECT profile,balance FROM account_balances WHERE status='ready' AND observed BETWEEN ? AND ?",
             (now-900,now))}
@@ -473,9 +489,10 @@ class Console:
             self.balance_refreshing = True
             try:
                 async with async_playwright() as pw:
+                    incidents = self.store.page_incidents()
                     for account in self.store.accounts():
                         profile = account["profile"]
-                        if profile in self.busy or self.remote.for_profile(profile):
+                        if profile in self.busy or profile in incidents or self.remote.for_profile(profile):
                             continue
                         slot = self.dispatch_limit.try_acquire()
                         if slot is None:
@@ -484,7 +501,8 @@ class Console:
                         # account queued while the balance reader owns its window.
                         self.balance_busy.add(profile)
                         try:
-                            balance = await asyncio.wait_for(read_balance(account, pw, include_details=True), timeout=20)
+                            balance = await asyncio.wait_for(
+                                read_balance(account, pw, include_details=True, incident_root=self.root), timeout=20)
                             self.insights.record(profile, balance["balance"], next_credit_date=balance.get("next_credit_date"))
                         except BalanceReadDeferred:
                             continue
@@ -775,6 +793,12 @@ def create_app(root, adapter, test=False):
         tasks = [c.public_task(t) for t in c.store.tasks()]
         now = time.time()
         accounts = account_status(c.store.accounts(), c.root / "data/studiowright.db", now)
+        preflight = await asyncio.to_thread(c.dispatch_preflight, [a['profile'] for a in accounts])
+        incidents = c.store.page_incidents()
+        for account in accounts:
+            profile = account['profile']
+            account['dispatch_preflight_reasons'] = preflight[profile]
+            account['flow_page_incident'] = incidents.get(profile)
         insights = await asyncio.to_thread(c.insights.report, accounts, now, c.balance_refreshing)
         return JSONResponse(
             {
@@ -823,6 +847,20 @@ def create_app(root, adapter, test=False):
             status = account_status([{'profile': profile}], c.root / 'data/studiowright.db')[0]
             return JSONResponse({'ok': True, 'cooling': status['generation_state'] == 'cooling_down',
                 'message': 'Flow 已恢复；如仍在冷却，任务会继续等待冷却结束。'})
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({'error': safe_error(exc)}, status_code=400)
+
+    async def review_flow_page_incident(request):
+        try:
+            data = await payload(request)
+            profile, ident = data.get('profile'), data.get('incident')
+            if (set(data) != {'profile', 'incident'} or not isinstance(profile, str)
+                    or not PROFILE.fullmatch(profile) or not isinstance(ident, str)
+                    or not re.fullmatch(r'[0-9a-f]{32}', ident) or not c.store.account(profile)):
+                raise ValueError('请选择需要人工核查的账号警告。')
+            if not c.store.review_page_incident(profile, ident):
+                return JSONResponse({'error': '这条警告已核查或已变化，请刷新。'}, status_code=409)
+            return JSONResponse({'ok': True, 'message': '已记录核查，账号仍须通过其他派发检查。'})
         except (ValueError, TypeError) as exc:
             return JSONResponse({'error': safe_error(exc)}, status_code=400)
 
@@ -1390,6 +1428,7 @@ def create_app(root, adapter, test=False):
         Route("/api/state", state),
         Route("/api/accounts/credits/refresh", refresh_balances, methods=["POST"]),
         Route("/api/accounts/risk-resume", resume_flow_risk, methods=["POST"]),
+        Route("/api/accounts/page-incident-review", review_flow_page_incident, methods=["POST"]),
         Route("/api/keys", api_keys, methods=["GET", "POST"]),
         Route("/api/keys/{ident}/revoke", api_key_revoke, methods=["POST"]),
         Route("/api/bridge/pair", bridge_pair, methods=["POST"]),

@@ -155,7 +155,7 @@ def parse_credit_renewal(text, now=None):
     return next(iter(values)) if len(values)==1 else None
 
 
-async def read_balance(account, playwright, include_details=False):
+async def read_balance(account, playwright, include_details=False, *, incident_root=None):
     from filelock import FileLock,Timeout
     from playwright.async_api import TimeoutError as BrowserTimeout
     from studiowright import chrome,paths
@@ -170,6 +170,9 @@ async def read_balance(account, playwright, include_details=False):
         # Do not call upstream attach/ensure_running: that could open a new window.
         browser=await playwright.chromium.connect_over_cdp('http://127.0.0.1:'+str(chrome.debug_port(account['profile'])),timeout=4000,no_defaults=True)
         page=await fixed_flow_page(browser,account['profile'])
+        if incident_root is not None:
+            from page_activity_guard import stop_on_page_warning
+            await stop_on_page_warning(page, incident_root, account['profile'], 'browse')
         checked_url=page.url
         email=(account.get('email') or '').lower()
         panel=page.get_by_role('button',name=ACCOUNT_PANEL).filter(visible=True)
@@ -180,6 +183,8 @@ async def read_balance(account, playwright, include_details=False):
         for _ in range(12):
             if page.url!=checked_url:
                 raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
+            if incident_root is not None:
+                await stop_on_page_warning(page, incident_root, account['profile'], 'browse')
             panel_text=await body.inner_text(timeout=750)
             value=parse_balance(panel_text,branded_only=True)
             if value is not None:

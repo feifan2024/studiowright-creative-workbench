@@ -29,7 +29,8 @@ async def read_when_ready(page, script, *, attempts=5, pause=asyncio.sleep):
                 raise ValueError('页面持续跳转，登录检查暂未完成；未判定账号失效，未提交生成。') from error
             await pause(.5)
 
-async def resume_google_session(context, expected, read_flow, *, attempts=16, pause=asyncio.sleep):
+async def resume_google_session(context, expected, read_flow, *, attempts=16, pause=asyncio.sleep, check_warning=None):
+    from page_activity_guard import PageActivityWarning
     expected=(expected or '').strip().lower()
     if not re.fullmatch(r'[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}',expected):
         return {'status':'unknown','reason':'没有已登记的目标邮箱，未选择其他账号。'}
@@ -38,6 +39,8 @@ async def resume_google_session(context, expected, read_flow, *, attempts=16, pa
     try:
         await page.goto(ENTRY,wait_until='domcontentloaded',timeout=30000)
         for _ in range(attempts):
+            if check_warning is not None:
+                await check_warning(page)
             route=urlsplit(page.url)
             if route.hostname=='flow.google.com':
                 state=await read_when_ready(page,read_flow,pause=pause)
@@ -66,6 +69,8 @@ async def resume_google_session(context, expected, read_flow, *, attempts=16, pa
                 return {'status':'unknown','reason':'登录检查跳到了预期之外的站点，未继续操作。'}
             await pause(1)
         return {'status':'unknown','reason':'Google 登录检查尚未确认结果；没有自动输入任何凭证。'}
+    except PageActivityWarning:
+        raise
     except Exception:
         return {'status':'unknown','reason':'Google 登录检查未完成，可能是网络或页面加载问题；未判定账号失效。'}
     finally:

@@ -242,8 +242,18 @@ class RealAdapter:
             if kind in {'sync', 'session_import'}:
                 studio.session._onboarding = True
             from studiowright.flow.page import FLOW_ROOT
+            from login_readiness import read_when_ready
+            from page_activity_guard import stop_on_page_warning
+
+            async def check_login_warning(current):
+                await stop_on_page_warning(current, self.root, profile, 'login')
+
+            async def read_login_state():
+                await check_login_warning(page)
+                return await read_when_ready(page, READ_STATE)
 
             page = await asyncio.wait_for(studio.session.page_for(FLOW_ROOT), timeout=35)
+            await check_login_warning(page)
             if not page.url.startswith(FLOW_ROOT):
                 await page.goto(FLOW_ROOT, wait_until="domcontentloaded", timeout=45000)
             if kind == "session_import":
@@ -266,18 +276,18 @@ class RealAdapter:
                 ):
                     raise ValueError("登录包邮箱与目标账号不一致，未写入。")
                 async def finalize(state):
-                    from login_readiness import read_when_ready
                     for _ in range(6):
                         if state.get("projects"):
                             break
                         await asyncio.sleep(.5)
-                        state = await read_when_ready(page, READ_STATE)
+                        state = await read_login_state()
                         if not state.get("signed_in") or state.get("emails") != [bundle["email"]]:
                             raise ValueError("Flow 首页登录状态变化。")
                     projects = flow_home_projects(state, known_titles)
                     if previous_project and (previous_project.rsplit("/", 1)[-1] in known_titles
                                              or any(p["id"] == previous_project.rsplit("/", 1)[-1] for p in projects)):
                         await page.goto(previous_project, wait_until="domcontentloaded", timeout=30000)
+                        await check_login_warning(page)
                     await studio.session.register_verified_identity(bundle["email"])
                     message = f"登录及窗口已核对，已同步 {len(projects)} 个首页项目。"
                     if not projects:
@@ -288,16 +298,16 @@ class RealAdapter:
                     studio.session.context, page, bundle, READ_STATE, vault, finalize=finalize
                 )
             state = None
-            from login_readiness import read_when_ready
             for _ in range(10):
-                state = await read_when_ready(page, READ_STATE)
+                state = await read_login_state()
                 if state["signed_in"] and len(state["emails"]) == 1:
                     break
                 await asyncio.sleep(1)
             if not state["signed_in"] or len(state["emails"]) != 1:
                 if kind == "sync":
                     from login_readiness import resume_google_session
-                    recovery = await resume_google_session(studio.session.context, account.get("email"), READ_STATE)
+                    recovery = await resume_google_session(studio.session.context, account.get("email"), READ_STATE,
+                                                           check_warning=check_login_warning)
                     if recovery["status"] == "reauth_required":
                         raise ValueError(recovery["reason"] + " 请在此账号的“远程登录”窗口完成登录；完成后后台会自动检查，不需要手动同步。")
                     if recovery["status"] == "mismatch":
@@ -305,7 +315,7 @@ class RealAdapter:
                     if recovery["status"] == "resumed":
                         await page.goto(FLOW_ROOT, wait_until="domcontentloaded", timeout=45000)
                         for _ in range(10):
-                            state = await read_when_ready(page, READ_STATE)
+                            state = await read_login_state()
                             if state["signed_in"] and state["emails"] == [account["email"].lower()]:
                                 break
                             await asyncio.sleep(1)
@@ -319,7 +329,7 @@ class RealAdapter:
                     await studio.session._safe_editor(page)
                     record('login_page_recheck')
                     await page.goto(FLOW_ROOT,wait_until='domcontentloaded',timeout=30000)
-                    state=await read_when_ready(page,READ_STATE)
+                    state=await read_login_state()
             if not state["signed_in"] or len(state["emails"]) != 1:
                 if kind in ('image','video'):
                     raise ValueError('task_window_requires_login')
@@ -333,7 +343,7 @@ class RealAdapter:
                 await studio.session.register_verified_identity(email)
                 await page.goto(FLOW_ROOT, wait_until="domcontentloaded", timeout=45000)
                 for _ in range(12):
-                    state = await read_when_ready(page, READ_STATE)
+                    state = await read_login_state()
                     if state["signed_in"] and state["emails"] == [email] and state["projects"]:
                         break
                     await asyncio.sleep(1)

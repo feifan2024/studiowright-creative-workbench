@@ -119,6 +119,20 @@ def read_png(root, job_id, *, review_database=None):
     return data
 
 
+def read_page_png(root, ident):
+    if not re.fullmatch(r'[0-9a-f]{32}', ident):
+        raise ValueError('Invalid Flow page incident ID.')
+    with database(root / 'console-data/console.db') as db:
+        row = db.execute("""SELECT screenshot FROM flow_page_incidents
+            WHERE id=? AND reviewed IS NULL AND length(screenshot) BETWEEN 1 AND ?""",
+            (ident, MAX_PNG_BYTES)).fetchone()
+    if row is None:
+        raise FileNotFoundError('Warning screenshot is not available.')
+    if not isinstance(row[0], bytes) or not row[0].startswith(b'\x89PNG\r\n\x1a\n'):
+        raise ValueError('Warning screenshot is invalid.')
+    return row[0]
+
+
 def main(argv=None, root=FLOW_ROOT, *, review_database=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('list', 'read', 'sync'))

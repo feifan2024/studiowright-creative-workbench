@@ -450,6 +450,8 @@ class FlowPage:
                     response = await page.reload(wait_until='domcontentloaded', timeout=15000)
                 except PlaywrightTimeout as exc:
                     raise TimeoutError('project_page_not_ready') from exc
+                if hasattr(type(session), 'check_page_activity'):
+                    await session.check_page_activity(page)
                 if response is not None and not response.ok:
                     raise FlowError('project_page_not_ready')
                 if page.url.split('?')[0].split('#')[0].rstrip('/') != url:
@@ -498,6 +500,8 @@ class FlowPage:
 
     # --- page state -------------------------------------------------------------------
     async def ready(self, timeout_s: float = 30) -> None:
+        if hasattr(type(self._session), 'check_page_activity'):
+            await self._session.check_page_activity(self.page)
         try:
             if self._foreground_lease and self._foreground_lease.active:
                 await self.dismiss_flow_changelog()

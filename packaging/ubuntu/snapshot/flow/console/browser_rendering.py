@@ -50,9 +50,15 @@ class RenderingSession(ChromeSession):
         self._task_id, self._profile, self._coordinator = task_id, profile, coordinator
         self._task_pages = set()
 
+    async def check_page_activity(self, page, phase='browse'):
+        from page_activity_guard import stop_on_page_warning
+        if hasattr(self, '_profile'):
+            await stop_on_page_warning(page, paths.home().parent, self._profile, phase)
+
     async def _safe_editor(self, page):
         from studiowright.flow import selectors as s
         from task_coordinator import CoordinationBlocked
+        await self.check_page_activity(page)
         boxes = page.locator("flow-base-prompt-box [contenteditable='true'], " + s.COMPOSER)
         for index in range(await boxes.count()):
             if (await boxes.nth(index).inner_text()).strip():
@@ -119,6 +125,7 @@ class RenderingSession(ChromeSession):
                         raise TimeoutError('task_page_not_ready') from exc
                     raise
             await recover_preparation(navigate,reason='initial_page_load')
+        await self.check_page_activity(page)
         if urlparse(page.url).hostname!='flow.google.com':
             raise CoordinationBlocked('task_window_requires_login')
         await page.evaluate('(name) => { window.name = name; }','sw-'+self._task_role)
@@ -140,7 +147,13 @@ class RenderingSession(ChromeSession):
 
     async def page_for(self, url_prefix: str, role: str = ""):
         if getattr(self, '_onboarding', False):
-            candidates = [p for p in self.context.pages if not p.is_closed() and p.url.startswith('https://flow.google.com/')]
+            candidates = []
+            for page in self.context.pages:
+                if page.is_closed():
+                    continue
+                await self.check_page_activity(page, 'login')
+                if page.url.startswith('https://flow.google.com/'):
+                    candidates.append(page)
             for candidate in candidates:
                 await self._safe_editor(candidate)
             page = candidates[0] if candidates else await self._new_window()

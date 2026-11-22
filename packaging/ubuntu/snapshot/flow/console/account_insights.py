@@ -63,11 +63,13 @@ class Insights:
                 b={**cached[a['profile']], 'status':b.get('status','cached'),'error':b.get('error'),'checked':b.get('checked')}
             value=number(b.get('balance'));observed=number(b.get('observed'))
             fresh=value is not None and observed is not None and 0<=now-observed<=FRESH_SECONDS and b.get('status')=='ready'
-            if a.get('risk_paused') is True:health,reason='paused','多次异常，等待人工核查后恢复'
+            if a.get('flow_page_incident'):health,reason='paused','页面显示异常活动，等待人工核查'
+            elif a.get('risk_paused') is True:health,reason='paused','多次异常，等待人工核查后恢复'
             elif a.get('state')!='verified':health,reason='attention','登录尚未核对或需要检查'
             elif a.get('generation_state')=='cooling_down':health,reason='cooling','异常活动冷却中'
             elif a.get('risk_paused') is not False:health,reason='attention','账号限制状态未读到'
             elif a.get('generation_state')!='not_cooling_down':health,reason='attention','冷却状态未读到'
+            elif a.get('dispatch_preflight_reasons'):health,reason='attention','账号派发自检未通过'
             elif not fresh:health,reason='attention',b.get('error') or ('余额待更新' if value is not None else '余额尚未读到')
             elif value<=0:health,reason='empty','积分已用尽'
             else:health,reason='ready','最近登录已核对、未冷却且有余额'

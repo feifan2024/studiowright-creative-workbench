@@ -391,6 +391,8 @@ class Activation:
 
     def process_flow(self, batch, key, account, snapshot):
         """Submit only one existing Flow login/project check; never generate or retry."""
+        if account.get('flow_page_incident'):
+            return self.update(batch,key,'blocked','Flow 页面显示异常活动，等待人工核查')
         with self.db() as db:
             task_id = db.execute('SELECT flow_task_id FROM items WHERE batch_id=? AND account_key=?', (batch,key)).fetchone()[0]
         if task_id:
