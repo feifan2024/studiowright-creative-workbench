@@ -68,6 +68,10 @@ def _base_args(chrome: Path, profile: Path) -> list[str]:
         f"--user-data-dir={profile}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-component-extensions-with-background-pages",
+        "--disable-default-apps",
+        "--disable-search-engine-choice-screen",
     ]
 
 
