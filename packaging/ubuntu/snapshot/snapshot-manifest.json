@@ -123,8 +123,6 @@
   "flow/source/src/studiowright/store.py": "54fb24c3fa8eda7e63c6146db71dad6f335264594e5b6bad4cb98e4f56316654",
   "flow/source/src/studiowright/studio.py": "b8d5ec8af6f4626e0e92db63e6f8460bc57a6276ac256006bb6f9e3f49b52412",
   "flow/source/uv.lock": "ab78f97258b3c9c3f852c91f7bfaa68f9fb816e5301addcaaece7b28bd251bd5",
-  "workbench/POOL_DESK_LICENSE": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
-  "workbench/POOL_DESK_NOTICE.md": "1f0481613ff7428eb7228696d6364997cde64075a0c0ad98a7af1b2bea8d1d28",
   "workbench/activation.py": "d4e0d33dc8d61c29b700ed6134ed6c2d8550cf7842b18483e9d026b7af641218",
   "workbench/activation_browser.py": "6e3fb1ad7d0ac6e58051f1f7a71efbb55d9c9a894871f88ba4a9eaa728727eb0",
   "workbench/app.js": "041238ccfa22c6251349e25fc45296726630a19066f5ebdec14febb8e24a37af",

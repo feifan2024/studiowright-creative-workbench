@@ -14,8 +14,10 @@ DIST = BASE / 'dist'
 OLD_ID = 'kbnibljeinmjmmpholicjkaiehmilbbk'
 
 
-def replace_exact(path, before, after, count):
+def replace_exact(path, before, after, count, already=()):
     text = path.read_text(encoding='utf-8')
+    if (text.count(before) == 0 and text.count(after) >= count) or any(marker in text for marker in already):
+        return
     if text.count(before) != count:
         raise RuntimeError('程序版本已变化，停止打包：' + str(path.name))
     path.write_text(text.replace(before, after), encoding='utf-8')
@@ -33,16 +35,6 @@ def main():
     shutil.copyfile(BASE / 'server/discovery_install.py', STAGE / 'discovery_install.py')
     shutil.copytree(BASE / 'snapshot', STAGE / 'snapshot')
     shutil.copytree(BASE / 'wheelhouse-linux', STAGE / 'wheels')
-    # Keep the original PoolDesk request core and upstream reference next to
-    # the adapted source and its AGPL notice; no account or runtime data.
-    pooldesk = BASE / 'pooldesk-upstream'
-    upstream = STAGE / 'snapshot/workbench/upstream'
-    upstream.mkdir()
-    shutil.copyfile(pooldesk / 'pool.py', upstream / 'pool.py')
-    shutil.copyfile(pooldesk / 'upstream/client.reference.py', upstream / 'client.reference.py')
-    notice_path = STAGE / 'snapshot/workbench/POOL_DESK_NOTICE.md'
-    replace_exact(notice_path, 'Complete local source is included in this directory.',
-                  'The adapted request core and integration are included with this package; the original request core and reference client are in upstream/.', 1)
     server = STAGE / 'snapshot/flow/console/server.py'
     app = STAGE / 'snapshot/flow/console/static/app.js'
     replace_exact(server, OLD_ID, extension, 2)
@@ -50,16 +42,27 @@ def main():
     replace_exact(app, 'Flow2API 插件', 'StudioWright 账号助手', 4)
     replace_exact(app, '请安装或重新加载 1.4.2', '请安装或重新加载账号助手', 1)
     replace_exact(app, "if(['succeeded','running'].includes(job.status))return;",
-                  "if(job.status!=='waiting')return;", 1)
+                  "if(job.status!=='waiting')return;", 1,
+                  already=("if(job.status!=='waiting'){",))
     replace_exact(app, '未安装或旧版插件，请打开此用户的扩展管理页，安装／重新加载 1.4.2；完成后这里会自动继续。',
-                  '请确认已在此用户的扩展管理页安装并启用账号助手。', 1)
+                  '请确认已在此用户的扩展管理页安装并启用账号助手。', 1,
+                  already=('如尚未安装插件，请在此 Chrome 用户下安装或重新加载插件。连接成功后会自动继续。',))
     retry = ("let ready=false;for(let i=0;i<75;i++){try{await pluginCommand('" + extension +
              "',{action:'sw_probe'},3000);ready=true;break;}catch(e){await report('waiting',e.message);"
              "await new Promise(r=>setTimeout(r,8000));}}\n"
              "  if(!ready)throw Error('等待插件超过 10 分钟，请安装后从本机账号管理重新同步。');")
+    retry_current = ("   let ready=false;\n"
+                     "   for(let i=0;i<75;i++){\n"
+                     "    try{await pluginCommand('" + extension + "',{action:'sw_probe'},3000);ready=true;break;}\n"
+                     "    catch(e){await report('waiting',e.message);await new Promise(resolve=>setTimeout(resolve,8000));}\n"
+                     "   }\n"
+                     "   if(!ready)throw Error('等待插件超过 10 分钟，请安装后从本机账号管理重新同步。');\n")
     single = ("try{await pluginCommand('" + extension + "',{action:'sw_probe'},3000);}"
               "catch(e){throw Error('插件未连接，请安装或重新加载后，在本机账号管理中手动重新发起。');}")
-    replace_exact(app, retry, single, 1)
+    app_text = app.read_text(encoding='utf-8')
+    retry_before = retry if retry in app_text else retry_current if retry_current in app_text else None
+    if retry_before is not None:
+        replace_exact(app, retry_before, single, 1)
     replace_exact(server,
                   'return JSONResponse({"ok": True, "application": "studiowright-console", "test": test})',
                   'return JSONResponse({"ok": True, "application": "studiowright-console", "test": test, "bridge_id": "' + extension + '"})',
@@ -71,9 +74,7 @@ def main():
                   '        plugin_path = request.url.path == "/api/plugin/session" or request.url.path.startswith(\n', 1)
     original_manifest = STAGE / 'snapshot/snapshot-manifest.json'
     captured = json.loads(original_manifest.read_text(encoding='utf-8'))
-    for changed in ('flow/console/server.py', 'flow/console/static/app.js',
-                    'workbench/POOL_DESK_NOTICE.md', 'workbench/upstream/pool.py',
-                    'workbench/upstream/client.reference.py'):
+    for changed in ('flow/console/server.py', 'flow/console/static/app.js'):
         captured[changed] = hashlib.sha256((STAGE / 'snapshot' / changed).read_bytes()).hexdigest()
     original_manifest.write_text(json.dumps(captured, indent=2, sort_keys=True), encoding='utf-8')
     notice = ('创作工作台 Ubuntu 服务端安装包\n\n'
