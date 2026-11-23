@@ -24,11 +24,15 @@ class PageActivityWarning(ValueError):
         super().__init__('Flow 页面显示异常活动提示，账号已停派，等待人工核查。')
 
 
+def _has_warning(text):
+    return any(WARNING.match(line.strip()) for line in text.splitlines())
+
+
 async def stop_on_page_warning(page, root, profile, phase):
     original_url = page.url
     try:
         url = urlsplit(original_url)
-        if (url.scheme != 'https' or url.hostname not in {'flow.google.com', 'accounts.google.com'}
+        if (url.scheme != 'https' or url.hostname not in {'flow.google.com', 'accounts.google.com', 'consent.google.com'}
                 or url.username or url.password or url.port not in (None, 443)):
             return
     except ValueError:
@@ -38,11 +42,14 @@ async def stop_on_page_warning(page, root, profile, phase):
         region = regions.nth(index)
         if not await region.is_visible():
             continue
-        lines = (await region.inner_text(timeout=1000)).splitlines()
-        if any(WARNING.match(line.strip()) for line in lines):
+        if _has_warning(await region.inner_text(timeout=1000)):
             break
     else:
-        return
+        if page.url != original_url:
+            return
+        body = page.locator('body')
+        if not await body.count() or not _has_warning(await body.inner_text(timeout=1000)) or page.url != original_url:
+            return
 
     screenshot = None
     def persist():

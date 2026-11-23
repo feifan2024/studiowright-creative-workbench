@@ -16,12 +16,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 
 SNAPSHOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot'
-sys.path[:0] = [str(SNAPSHOT / 'flow/console'), str(SNAPSHOT / 'workbench')]
+sys.path[:0] = [str(SNAPSHOT / 'flow/console'), str(SNAPSHOT / 'workbench'), str(SNAPSHOT / 'flow/source/src')]
 from console_store import Store
 from flow_warning_archive import read_page_png, view_screenshot_once
 from login_readiness import resume_google_session
-from page_activity_guard import PageActivityWarning, stop_on_page_warning
-from preflight import check_profile, dispatch_check
+from page_activity_guard import WARNING_REGIONS, PageActivityWarning, stop_on_page_warning
+from preflight import FINGERPRINT_SIGNALS, check_profile, collect_browser_fingerprint, dispatch_check
+from studiowright import chrome
 
 
 PNG = base64.b64decode(
@@ -59,13 +60,43 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def warning_page(*, text='Our systems have detected unusual traffic from your computer network.',
-                     url='https://accounts.google.com/sorry'):
+                     body_text='', url='https://accounts.google.com/sorry'):
         region = SimpleNamespace(is_visible=AsyncMock(return_value=True),
                                  inner_text=AsyncMock(return_value=text))
+        regions = SimpleNamespace(count=AsyncMock(return_value=int(text is not None)),
+                                  nth=Mock(return_value=region))
+        body = SimpleNamespace(count=AsyncMock(return_value=1), inner_text=AsyncMock(return_value=body_text))
         return SimpleNamespace(url=url, goto=AsyncMock(), close=AsyncMock(),
                                screenshot=AsyncMock(return_value=PNG),
-                               locator=Mock(return_value=SimpleNamespace(
-                                   count=AsyncMock(return_value=1), nth=Mock(return_value=region))))
+                               locator=Mock(side_effect={WARNING_REGIONS: regions, 'body': body}.__getitem__))
+
+    async def test_body_fallback_checks_each_line_and_ignores_embedded_text(self):
+        unrelated = self.warning_page(text=None, body_text='Help for unusual activity detected.\nOther content')
+        await stop_on_page_warning(unrelated, self.root, 'account-a', 'browse')
+        unrelated.screenshot.assert_not_awaited()
+        page = self.warning_page(text='Page title', body_text='Page title\n  Unusual activity detected.  ')
+        with self.assertRaises(PageActivityWarning):
+            await stop_on_page_warning(page, self.root, 'account-a', 'browse')
+        page.screenshot.assert_awaited_once()
+        self.assertEqual(set(self.store.page_incidents()), {'account-a'})
+
+    async def test_google_consent_is_allowed_and_preserves_the_url_restrictions(self):
+        denied = (
+            'http://consent.google.com/', 'https://consent.google.com:444/',
+            'https://user@consent.google.com/', 'https://sub.consent.google.com/',
+            'https://consent.google.com.invalid/',
+        )
+        for url in denied:
+            with self.subTest(url=url):
+                page = self.warning_page(url=url)
+                await stop_on_page_warning(page, self.root, 'account-a', 'login')
+                page.locator.assert_not_called()
+        page = self.warning_page(url='https://consent.google.com:443/', body_text='Unusual activity detected.')
+        with self.assertRaises(PageActivityWarning):
+            await stop_on_page_warning(page, self.root, 'account-b', 'login')
+        page.locator.assert_called_once_with(WARNING_REGIONS)
+        page.screenshot.assert_awaited_once()
+        self.assertEqual(set(self.store.page_incidents()), {'account-b'})
 
     async def test_login_saves_original_before_close_and_holds_only_the_affected_account(self):
         page = self.warning_page()
@@ -188,3 +219,80 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.task(task['id'])['status'], 'queued')
         self.assertEqual(console.busy, set())
         self.assertEqual(console.adapter.mock_calls, [])
+
+
+class OnlineDispatch(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.profile = 'browser-fixture'
+        data = self.root / 'console-data'
+        data.mkdir()
+        (data / 'dispatch-locales.json').write_text(json.dumps({self.profile: {
+            'languages': ['en-US'], 'timezone': 'Etc/UTC',
+        }}), encoding='utf-8')
+        self.policy = data / 'fingerprint-baseline.json'
+        self.local = self.enterContext(patch('preflight.check_profile', return_value=(True, [])))
+        browser_profile = self.root.resolve() / 'data/profiles' / self.profile
+        port = chrome.debug_port(self.profile)
+        self.port_arg = f'--remote-debugging-port={port}'
+        args = ['chrome', f'--user-data-dir={browser_profile}', self.port_arg]
+        self.processes = self.enterContext(patch('preflight._chrome_processes', return_value=[('42', args)]))
+        self.tab = SimpleNamespace(url='https://flow.google.com/project/fixture', evaluate=AsyncMock())
+        self.sample = dict(webdriver=False, ua='Chrome Fixture', screen=[1920, 1080, 1920, 1040, 24, 24, 1],
+                           canvas='data:image/png;base64,fixture', webgl=['Test vendor', 'Test renderer'])
+        self.tab.evaluate.return_value = self.sample
+        browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[self.tab])])
+        self.connect = AsyncMock(return_value=browser)
+        playwright = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=self.connect))
+        manager = self.enterContext(patch('playwright.async_api.async_playwright'))
+        manager.return_value.__aenter__.return_value = playwright
+
+    def approve_current_fingerprint(self):
+        digest, reason = collect_browser_fingerprint(self.root, self.profile)
+        self.assertIsNone(reason)
+        self.policy.write_text(json.dumps({self.profile: digest}), encoding='utf-8')
+
+    def test_offline_and_invalid_baselines_skip_cdp(self):
+        self.assertEqual(dispatch_check(self.root, self.profile), (True, []))
+        self.assertEqual(dispatch_check(self.root, self.profile, online=True),
+                         (False, ['dispatch_fingerprint_baseline_missing']))
+        self.policy.write_text(json.dumps({self.profile: 'bad'}), encoding='utf-8')
+        self.assertEqual(dispatch_check(self.root, self.profile, online=True),
+                         (False, ['dispatch_fingerprint_baseline_invalid']))
+        self.local.return_value = (False, ['profile_languages_mismatch'])
+        self.assertEqual(dispatch_check(self.root, self.profile, online=True), self.local.return_value)
+        self.connect.assert_not_awaited()
+
+    def test_cdp_requires_exact_fingerprint_match(self):
+        self.approve_current_fingerprint()
+        self.assertEqual(dispatch_check(self.root, self.profile, online=True), (True, []))
+        self.connect.assert_awaited_with(f'http://127.0.0.1:{chrome.debug_port(self.profile)}',
+                                        timeout=4000, no_defaults=True)
+        self.tab.evaluate.assert_awaited_with(FINGERPRINT_SIGNALS)
+        for field in ('ua', 'screen', 'canvas', 'webgl'):
+            with self.subTest(field=field):
+                self.tab.evaluate.return_value = dict(self.sample, **{field: ['changed']})
+                self.assertEqual(dispatch_check(self.root, self.profile, online=True),
+                                 (False, ['dispatch_fingerprint_mismatch']))
+
+    def test_webdriver_and_unavailable_signals_fail_closed(self):
+        self.approve_current_fingerprint()
+        for value in (True, None, 0):
+            with self.subTest(value=value):
+                self.tab.evaluate.return_value = dict(self.sample, webdriver=value)
+                self.assertEqual(dispatch_check(self.root, self.profile, online=True),
+                                 (False, ['dispatch_webdriver_detected']))
+        self.tab.evaluate.return_value = dict(self.sample, webgl=None)
+        self.assertEqual(dispatch_check(self.root, self.profile, online=True),
+                         (False, ['dispatch_fingerprint_unavailable']))
+        self.connect.side_effect = OSError('fixture connection refused')
+        self.assertEqual(dispatch_check(self.root, self.profile, online=True),
+                         (False, ['dispatch_browser_unavailable']))
+
+    def test_the_debug_port_must_belong_to_the_requested_profile(self):
+        self.approve_current_fingerprint()
+        self.connect.reset_mock()
+        self.processes.return_value = [('55', ['chrome', '--user-data-dir=/other', self.port_arg])]
+        self.assertEqual(dispatch_check(self.root, self.profile, online=True),
+                         (False, ['dispatch_browser_unavailable']))
+        self.connect.assert_not_awaited()

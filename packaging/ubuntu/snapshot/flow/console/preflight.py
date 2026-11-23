@@ -1,4 +1,6 @@
-"""Read-only local checks for a managed Flow Chrome profile."""
+"""Read-only checks for a managed Flow Chrome profile."""
+import asyncio
+import hashlib
 from pathlib import Path
 import json
 import re
@@ -18,10 +20,38 @@ DISALLOWED_FLAGS = (
 )
 LANGUAGE = re.compile(r'[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*')
 TIMEZONE = re.compile(r'[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*')
+FINGERPRINT_DIGEST = re.compile(r'[0-9a-f]{64}')
+FINGERPRINT_SIGNALS = """() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 192;
+    canvas.height = 48;
+    const draw = canvas.getContext('2d');
+    if (draw) {
+        draw.fillStyle = '#156081';
+        draw.fillRect(0, 0, 192, 48);
+        draw.fillStyle = '#f3ab50';
+        draw.font = '19px sans-serif';
+        draw.fillText('Flow profile', 8, 29);
+    }
+    const gl = document.createElement('canvas').getContext('webgl');
+    const renderer = gl && gl.getExtension('WEBGL_debug_renderer_info');
+    return {
+        webdriver: navigator.webdriver,
+        ua: navigator.userAgent,
+        screen: [screen.width, screen.height, screen.availWidth, screen.availHeight,
+                 screen.colorDepth, screen.pixelDepth, devicePixelRatio],
+        canvas: draw ? canvas.toDataURL() : null,
+        webgl: gl ? [gl.getParameter(gl.VENDOR), gl.getParameter(gl.RENDERER),
+                     gl.getParameter(gl.VERSION), gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+                     renderer && gl.getParameter(renderer.UNMASKED_VENDOR_WEBGL),
+                     renderer && gl.getParameter(renderer.UNMASKED_RENDERER_WEBGL),
+                     (gl.getSupportedExtensions() || []).sort()] : null,
+    };
+}"""
 
 
-def dispatch_check(root, profile):
-    """Require an explicit locale policy for each account used for generation."""
+def dispatch_check(root, profile, *, online=False):
+    """Check the local dispatch policy and optionally verify the live browser."""
     policy = Path(root) / 'console-data/dispatch-locales.json'
     try:
         if policy.is_symlink():
@@ -44,12 +74,98 @@ def dispatch_check(root, profile):
             or not isinstance(timezone, str) or not TIMEZONE.fullmatch(timezone)):
         return False, ['dispatch_locale_invalid']
     try:
-        return check_profile(root, profile, expected_languages=languages, expected_timezone=timezone)
+        local = check_profile(root, profile, expected_languages=languages, expected_timezone=timezone)
     except (OSError, RuntimeError, ValueError):
         return False, ['profile_preflight_unavailable']
+    if not online or not local[0]:
+        return local
+    return _check_fingerprint_baseline(root, profile)
 
 
-def _chrome_processes(proc_root, target):
+def _check_fingerprint_baseline(root, profile):
+    policy = Path(root) / 'console-data/fingerprint-baseline.json'
+    try:
+        if policy.is_symlink():
+            raise ValueError('unexpected symlink')
+        values = json.loads(policy.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return False, ['dispatch_fingerprint_baseline_missing']
+    except (OSError, ValueError):
+        return False, ['dispatch_fingerprint_baseline_invalid']
+    if not isinstance(values, dict):
+        return False, ['dispatch_fingerprint_baseline_invalid']
+    if profile not in values:
+        return False, ['dispatch_fingerprint_baseline_missing']
+    expected = values[profile]
+    if not isinstance(expected, str) or not FINGERPRINT_DIGEST.fullmatch(expected):
+        return False, ['dispatch_fingerprint_baseline_invalid']
+
+    observed, reason = collect_browser_fingerprint(root, profile)
+    if reason:
+        return False, [reason]
+    if observed != expected:
+        return False, ['dispatch_fingerprint_mismatch']
+    return True, []
+
+
+async def _read_browser_signals(port, flow_url):
+    from playwright.async_api import Error, async_playwright
+
+    try:
+        async with asyncio.timeout(5), async_playwright() as playwright:
+            browser = await playwright.chromium.connect_over_cdp(
+                f'http://127.0.0.1:{port}', timeout=4000, no_defaults=True)
+            pages = browser.contexts[0].pages if browser.contexts else []
+            page = next((tab for tab in pages if tab.url.startswith(flow_url)), None)
+            if page is None:
+                page = next((tab for tab in pages if tab.url == 'about:blank'), None)
+            if page is None:
+                raise RuntimeError('no eligible page')
+            original_url = page.url
+            sample = await page.evaluate(FINGERPRINT_SIGNALS)
+            if page.url != original_url:
+                raise RuntimeError('page changed during sampling')
+            return sample
+    except Error as exc:
+        raise RuntimeError('unable to read browser signals') from exc
+
+
+def collect_browser_fingerprint(root, profile):
+    """Return (SHA-256, error code) from an existing, locally managed browser."""
+    if not isinstance(profile, str) or not PROFILE_NAME.fullmatch(profile):
+        return None, 'invalid_profile'
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        return None, 'dispatch_browser_unavailable'
+
+    try:
+        from studiowright import chrome
+
+        port = chrome.debug_port(profile)
+        target = (Path(root) / 'data/profiles' / profile).resolve()
+        port_arg = f'--remote-debugging-port={port}'
+        listeners = [args for _, args in _chrome_processes(Path('/proc')) if port_arg in args]
+        if len(listeners) != 1 or not browser_profile_matches(listeners[0], target):
+            return None, 'dispatch_browser_unavailable'
+        sample = asyncio.run(_read_browser_signals(port, chrome.FLOW_URL))
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return None, 'dispatch_browser_unavailable'
+
+    if not isinstance(sample, dict):
+        return None, 'dispatch_fingerprint_unavailable'
+    if sample.get('webdriver') is not False:
+        return None, 'dispatch_webdriver_detected'
+    fingerprint = {key: sample.get(key) for key in ('ua', 'screen', 'canvas', 'webgl')}
+    if not all(fingerprint.values()):
+        return None, 'dispatch_fingerprint_unavailable'
+    serialized = json.dumps(fingerprint, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(serialized).hexdigest(), None
+
+
+def _chrome_processes(proc_root, target=None):
     for cmdline in proc_root.glob('[0-9]*/cmdline'):
         try:
             args = [arg.decode(errors='replace') for arg in cmdline.read_bytes().split(b'\0') if arg]
@@ -57,7 +173,7 @@ def _chrome_processes(proc_root, target):
                 args = shlex.split(args[0])
             if (args and Path(args[0]).name in CHROME_NAMES
                     and not any(arg.startswith('--type=') for arg in args)
-                    and browser_profile_matches(args, target)):
+                    and (target is None or browser_profile_matches(args, target))):
                 yield cmdline.parent.name, args
         except (OSError, ValueError):
             # A process can disappear during the scan.
