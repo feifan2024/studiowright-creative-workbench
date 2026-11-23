@@ -207,20 +207,36 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         console = module.Console.__new__(module.Console)
         console.root, console.store, console.test = self.root, self.store, False
         console.adapter = Mock()
-        console.busy, console.generation_busy, console.generation_projects = {'account-a'}, {}, set()
+        pilot = 'ub-chrome-975371911f'
+        self.store.add_account(pilot, 'Pilot')
+        console.busy, console.generation_busy, console.generation_projects = {pilot}, {}, set()
         console.desktop_keyboard_ready = Mock(return_value=True)
         database = self.root / 'data/studiowright.db'
         database.parent.mkdir()
         with closing(sqlite3.connect(database)) as db, db:
             db.executescript('CREATE TABLE pacing(profile TEXT,cooldown_until REAL);'
                              'CREATE TABLE flow_risk(profile TEXT,paused INTEGER,consecutive INTEGER);')
-        task = self.store.create_task('account-a', 'fixed-project', 'image', {}, 'dispatch-fixture')
-        claim = self.store.claim(set(), {'account-a'})
+        task = self.store.create_task(pilot, 'fixed-project', 'image', {}, 'dispatch-fixture')
+        claim = self.store.claim(set(), {pilot})
         self.assertEqual(claim['id'], task['id'])
         await console.execute(claim)
         self.assertEqual(self.store.task(task['id'])['status'], 'queued')
         self.assertEqual(console.busy, set())
         self.assertEqual(console.adapter.mock_calls, [])
+
+    async def test_console_keeps_other_accounts_out_of_pilot_checks_and_preserves_page_holds(self):
+        spec = spec_from_file_location('flow_console_pilot_test', SNAPSHOT / 'flow/console/server.py')
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        console = module.Console.__new__(module.Console)
+        console.root, console.store, console.test = self.root, self.store, False
+        self.store.record_page_incident('account-b', 'login', PNG)
+        pilot = 'ub-chrome-975371911f'
+        with patch('preflight.dispatch_check', return_value=(False, ['dispatch_locale_missing'])) as check:
+            self.assertEqual(console.dispatch_preflight(['account-a', 'account-b', pilot]), {
+                'account-a': [], 'account-b': ['flow_page_warning'], pilot: ['dispatch_locale_missing'],
+            })
+        check.assert_called_once_with(self.root, pilot)
 
 
 class ChromeComponentDispatch(unittest.TestCase):

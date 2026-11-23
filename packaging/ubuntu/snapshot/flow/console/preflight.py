@@ -96,6 +96,13 @@ def dispatch_check(root, profile, *, online=False):
     return _check_fingerprint_baseline(root, profile)
 
 
+def pilot_dispatch_reasons(root, profile):
+    """Apply the new offline dispatch policy to the pilot account only."""
+    if profile != _CHROME_COMPONENT_PROFILE:
+        return []
+    return dispatch_check(root, profile)[1]
+
+
 def _check_fingerprint_baseline(root, profile):
     policy = Path(root) / 'console-data/fingerprint-baseline.json'
     try:

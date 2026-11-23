@@ -31,7 +31,7 @@ from web_auth import WebAuth
 from login_sessions import Vault, normalize_bundle
 from material_library import Library
 from material_tags import SEARCH_LABELS
-from preflight import dispatch_check
+from preflight import pilot_dispatch_reasons
 from remote_login import RemoteLogins
 
 HERE = Path(__file__).resolve().parent
@@ -96,7 +96,7 @@ class Console:
             return {profile: [] for profile in profiles}
         holds = self.store.page_incidents()
         return {profile: (['flow_page_warning'] if profile in holds
-                          else dispatch_check(self.root, profile)[1]) for profile in profiles}
+                          else pilot_dispatch_reasons(self.root, profile)) for profile in profiles}
 
     def session_import_waits_for_proxy(self, profile, email):
         if not isinstance(email, str) or profile != 'account-' + self.store.digest(email)[:12]:
