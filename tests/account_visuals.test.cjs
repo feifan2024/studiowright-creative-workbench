@@ -19,9 +19,14 @@ test('Flow page warning shows its own reason and screenshot without a generation
   const warning = vm.runInContext(code, context);
   assert.match(warning, /核对登录时检测到异常活动/);
   assert.match(warning, /\/api\/flow-warning-screenshots\/0123456789abcdef0123456789abcdef\.png/);
+  assert.match(warning, /data-destroy-flow-screenshot="0123456789abcdef0123456789abcdef"/);
   incident.has_screenshot = false;
-  assert.match(vm.runInContext(
-    'flowAccountNoticeMarkup(flowAccountReason({flow_page_incident:incident}, {}, {}, null), null)', context), /本次未保存截图/);
+  assert.match(vm.runInContext(code, context), /本次未保存截图/);
+  incident.destroyed = true;
+  const destroyed = vm.runInContext(code, context);
+  assert.match(destroyed, /截图已销毁/);
+  assert.match(destroyed, /等待人工核查/);
+  assert.doesNotMatch(destroyed, /<img|data-destroy-flow-screenshot/);
 });
 
 test('Flow preflight mismatch explains why the account is blocked without reusing an old screenshot', () => {

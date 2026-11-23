@@ -512,7 +512,8 @@ def account_rows(state):
                      "flow_health": health, "flow_balance": balance,
                      "flow_preflight_reasons": preflight,
                      "flow_page_incident": ({'id': incident['id'], 'phase': incident.get('phase'),
-                                             'has_screenshot': incident.get('has_screenshot') == 1} if incident else None),
+                                             'has_screenshot': incident.get('has_screenshot') == 1,
+                                             'destroyed': incident.get('screenshot_destroyed') == 1} if incident else None),
                      "flow_next_credit_date": info.get("next_credit_date"),
                      "flow_balance_error": clean_text(info.get("balance_error"), 200),
                      "flow_balance_fresh": info.get("balance_fresh") is True,
@@ -1750,6 +1751,28 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             return self.json_response(200, result)
 
         def do_POST(self):
+            destroy = re.fullmatch(r'/api/flow-warning-screenshots/([0-9a-f]{12}|[0-9a-f]{32})/destroy', self.path)
+            if destroy and deployment == 'ubuntu':
+                if not self.valid(mutation=True):
+                    return self.json_response(403, {'error': '请从工作台确认销毁截图。'})
+                length = self.headers.get_all('Content-Length', [])
+                if (self.headers.get('Transfer-Encoding') or len(length) != 1
+                        or not re.fullmatch(r'[1-9][0-9]?', length[0])):
+                    return self.json_response(400, {'error': '请求格式不正确。'})
+                try:
+                    data = json.loads(self.rfile.read(int(length[0])))
+                except ValueError:
+                    data = None
+                if not isinstance(data, dict) or set(data) != {'confirmed'} or data['confirmed'] is not True:
+                    return self.json_response(400, {'error': '请确认销毁这张截图。'})
+                from flow_warning_archive import FLOW_ROOT, destroy_screenshot
+                try:
+                    destroy_screenshot(FLOW_ROOT, destroy.group(1))
+                except FileNotFoundError:
+                    return self.json_response(404, {'error': '未找到这张警告截图。'})
+                except (OSError, ValueError, sqlite3.Error):
+                    return self.json_response(503, {'error': '截图清理暂未确认，请刷新后核对。'})
+                return self.json_response(200, {'ok': True, 'message': '已销毁这张截图。'})
             if self.path in ('/api/flow-readiness','/api/flow-readiness/review','/api/flow-readiness/auto') and deployment == 'ubuntu':
                 if not self.valid(mutation=True):
                     return self.json_response(403,{'error':'请从工作台发起 Flow 就绪检查。'})

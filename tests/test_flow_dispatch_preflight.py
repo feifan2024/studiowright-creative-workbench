@@ -1,10 +1,14 @@
 import base64
 from contextlib import closing
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
+from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -13,7 +17,7 @@ from unittest.mock import AsyncMock, Mock, patch
 SNAPSHOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot'
 sys.path[:0] = [str(SNAPSHOT / 'flow/console'), str(SNAPSHOT / 'workbench')]
 from console_store import Store
-from flow_warning_archive import read_page_png
+from flow_warning_archive import destroy_screenshot, read_page_png
 from login_readiness import resume_google_session
 from page_activity_guard import PageActivityWarning, stop_on_page_warning
 from preflight import check_profile, dispatch_check
@@ -87,6 +91,56 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.review_page_incident('account-b', holds['account-a']['id']))
         self.assertTrue(self.store.review_page_incident('account-a', holds['account-a']['id']))
         self.assertEqual(self.store.page_incidents(), {})
+        self.assertIsNone(self.store.rows('SELECT screenshot FROM flow_page_incidents')[0]['screenshot'])
+
+    def test_destroy_page_evidence_preserves_stop_and_prevents_capture_from_reappearing(self):
+        self.store.record_page_incident('account-a', 'login', PNG)
+        self.store.record_page_incident('account-b', 'browse', PNG)
+        ident = self.store.page_incidents()['account-a']['id']
+        self.assertEqual(read_page_png(self.root, ident), PNG)
+        for _ in range(2):
+            destroy_screenshot(self.root, ident)
+        self.store.record_page_incident('account-a', 'browse', PNG)
+        holds = self.store.page_incidents()
+        self.assertEqual(holds['account-a']['id'], ident)
+        self.assertEqual(holds['account-a']['screenshot_destroyed'], 1)
+        self.assertEqual(holds['account-a']['has_screenshot'], 0)
+        with self.assertRaises(FileNotFoundError):
+            read_page_png(self.root, ident)
+        self.assertEqual(read_page_png(self.root, holds['account-b']['id']), PNG)
+
+    def test_workbench_requires_explicit_confirmation_before_destroying_preview(self):
+        spec = spec_from_file_location('workbench_screenshot_test', SNAPSHOT / 'workbench/server.py')
+        workbench = module_from_spec(spec)
+        spec.loader.exec_module(workbench)
+        self.store.record_page_incident('account-a', 'login', PNG)
+        ident = self.store.page_incidents()['account-a']['id']
+        handler = workbench.make_handler(Mock(), deployment='ubuntu')
+        with ThreadingHTTPServer(('127.0.0.1', 0), handler) as service:
+            worker = threading.Thread(target=service.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with patch('flow_warning_archive.FLOW_ROOT', self.root), \
+                        closing(HTTPConnection('127.0.0.1', service.server_port, timeout=4)) as client:
+                    def request(method, path, body=None, headers=None):
+                        client.request(method, path, body=body, headers=headers or {})
+                        response = client.getresponse()
+                        return response.status, response.read()
+
+                    image = f'/api/flow-warning-screenshots/{ident}.png'
+                    destroy = f'/api/flow-warning-screenshots/{ident}/destroy'
+                    headers = {'Origin': f'http://127.0.0.1:{service.server_port}',
+                               'Content-Type': 'application/json', 'X-Workbench-Request': '1'}
+                    self.assertEqual(request('GET', image), (200, PNG))
+                    self.assertEqual(request('POST', destroy, '{"confirmed":true}')[0], 403)
+                    self.assertEqual(request('POST', destroy, '{"confirmed":false}', headers)[0], 400)
+                    self.assertEqual(request('GET', image), (200, PNG))
+                    self.assertEqual(request('POST', destroy, '{"confirmed":true}', headers)[0], 200)
+                    self.assertEqual(request('GET', image)[0], 404)
+            finally:
+                service.shutdown()
+                worker.join()
+        self.assertEqual(self.store.page_incidents()['account-a']['id'], ident)
 
     async def test_capture_failure_still_blocks_and_an_unrelated_page_does_not(self):
         page = self.warning_page(text='检测到异常活动。', url='https://flow.google.com/project/example')
@@ -103,7 +157,6 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
 
     async def test_execute_returns_claim_to_queue_before_touching_adapter(self):
         # Load explicitly since both Ubuntu components have a server.py.
-        from importlib.util import module_from_spec, spec_from_file_location
         spec = spec_from_file_location('flow_console_dispatch_test', SNAPSHOT / 'flow/console/server.py')
         module = module_from_spec(spec)
         spec.loader.exec_module(module)

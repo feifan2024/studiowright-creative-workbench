@@ -26,6 +26,7 @@ class Store:
                 observed REAL NOT NULL, screenshot BLOB, reviewed REAL);
             CREATE UNIQUE INDEX IF NOT EXISTS active_flow_page_incident
                 ON flow_page_incidents(profile) WHERE reviewed IS NULL;
+            CREATE TABLE IF NOT EXISTS flow_destroyed_screenshots(id TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS projects(profile TEXT, id TEXT, title TEXT, checked REAL, PRIMARY KEY(profile,id));
             CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, profile TEXT, project TEXT, kind TEXT, params TEXT, status TEXT, result TEXT, error TEXT, created REAL, started REAL, finished REAL, request_key TEXT UNIQUE);
             CREATE TABLE IF NOT EXISTS flow_retry_roots(root_id TEXT PRIMARY KEY, state TEXT NOT NULL, updated REAL NOT NULL);
@@ -67,18 +68,23 @@ class Store:
 
     def page_incidents(self):
         return {row['profile']: row for row in self.rows(
-            "SELECT profile,id,phase,observed,screenshot IS NOT NULL AS has_screenshot FROM flow_page_incidents WHERE reviewed IS NULL")}
+            """SELECT p.profile,p.id,p.phase,p.observed,p.screenshot IS NOT NULL AS has_screenshot,
+                d.id IS NOT NULL AS screenshot_destroyed
+            FROM flow_page_incidents p LEFT JOIN flow_destroyed_screenshots d ON d.id=p.id
+            WHERE p.reviewed IS NULL""")}
 
     def record_page_incident(self, profile, phase, screenshot):
         with closing(self.connect()) as db, db:
             db.execute("""INSERT INTO flow_page_incidents(id,profile,phase,observed,screenshot)
                 VALUES(?,?,?,?,?) ON CONFLICT(profile) WHERE reviewed IS NULL DO UPDATE SET
-                screenshot=COALESCE(flow_page_incidents.screenshot,excluded.screenshot)""",
+                screenshot=COALESCE(flow_page_incidents.screenshot,excluded.screenshot)
+                WHERE NOT EXISTS(SELECT 1 FROM flow_destroyed_screenshots WHERE id=flow_page_incidents.id)""",
                 (secrets.token_hex(16), profile, phase, time.time(), screenshot))
 
     def review_page_incident(self, profile, ident):
         with closing(self.connect()) as db, db:
-            return db.execute("""UPDATE flow_page_incidents SET reviewed=?
+            db.execute("PRAGMA secure_delete=ON")
+            return db.execute("""UPDATE flow_page_incidents SET reviewed=?,screenshot=NULL
                 WHERE profile=? AND id=? AND reviewed IS NULL""", (time.time(), profile, ident)).rowcount == 1
 
     def account(self, profile):

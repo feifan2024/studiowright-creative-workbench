@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 ROOT = Path(__file__).resolve().parents[1] / 'packaging'
 sys.path[:0] = [str(ROOT / name) for name in ('windows', 'ubuntu/snapshot/workbench',
                                             'ubuntu/snapshot/flow/source/src')]
-from flow_warning_archive import current_window_screenshots, purge_reviewed_screenshots, read_png, records, sync_index
+from flow_warning_archive import current_window_screenshots, destroy_screenshot, purge_reviewed_screenshots, read_png, records, sync_index
 from flow_warning_desktop import capture_name, sync_once
 
 try:
@@ -217,6 +217,31 @@ class Delivery(unittest.TestCase):
         self.assertEqual(sync_once(self.read, self.desktop, self.state), (0, 0, 0))
         self.assertTrue(all(path.is_file() for path in (other_account, later_warning, history, personal_copy,
                                                        initial['aaaaaaaaaaaa'], initial['bbbbbbbbbbbb'])))
+
+    def test_destroy_exact_image_without_reviewing_task_or_removing_other_screenshots(self):
+        source = self.capture(JOB_ID)
+        unrelated = self.capture('aaaaaaaaaaaa', later=-1)
+        synced = self.desktop / capture_name(next(
+            row for row, _ in records(self.root, review_database=self.review_database) if row['id'] == JOB_ID))
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (2, 0, 0))
+        self.assertEqual(self.read('read', JOB_ID), PNG)
+        self.assertTrue(source.exists() and synced.exists())
+        with closing(sqlite3.connect(self.root / 'console-data/console.db')) as db, db:
+            db.execute("UPDATE accounts SET email='renamed@example.test'")
+
+        for _ in range(2):
+            destroy_screenshot(self.root, JOB_ID, review_database=self.review_database)
+        self.assertFalse(source.exists())
+        with self.assertRaises(FileNotFoundError):
+            self.read('read', JOB_ID)
+        self.assertEqual(sync_once(self.read, self.desktop, self.state), (0, 1, 0))
+        self.assertFalse(synced.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertEqual(self.jobs.execute('SELECT status FROM jobs WHERE id=?', (JOB_ID,)).fetchone(), ('failed',))
+        self.assertEqual(self.review.execute('SELECT count(*) FROM events').fetchone(), (0,))
+        windows = {'windows': [{'profile': 'profile-a', 'task_id': 'task-a'}]}
+        self.assertEqual(current_window_screenshots(windows, self.root, review_database=self.review_database),
+                         {'profile-a': {'task_id': 'task-a', 'destroyed': True}})
 
 
 if __name__ == '__main__':

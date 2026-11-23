@@ -21,6 +21,12 @@ def database(path):
     return closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=4))
 
 
+def _destroyed_ids(db):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_destroyed_screenshots'").fetchone():
+        return set()
+    return {row[0] for row in db.execute('SELECT id FROM flow_destroyed_screenshots')}
+
+
 def _reconcile(root, job_id=None, *, task_ids=None, review_database=None, profile_filter=None):
     if job_id is not None and not JOB.fullmatch(job_id):
         raise ValueError('Invalid Flow job ID.')
@@ -28,8 +34,9 @@ def _reconcile(root, job_id=None, *, task_ids=None, review_database=None, profil
     if incidents.is_symlink():
         raise ValueError('Unexpected screenshots directory.')
     emails = {}
-    if task_ids is None:
-        with database(root / 'console-data/console.db') as db:
+    with database(root / 'console-data/console.db') as db:
+        destroyed = _destroyed_ids(db)
+        if task_ids is None:
             emails = dict(db.execute('SELECT profile, email FROM accounts'))
     with database(root / 'data/studiowright.db') as db:
         rows = db.execute("""SELECT id, profile, finished, error,
@@ -55,7 +62,7 @@ def _reconcile(root, job_id=None, *, task_ids=None, review_database=None, profil
             continue
         path = incidents / (ident + '.png')
         approved_at = approvals.get((profile, task_id))
-        reviewed = approved_at is not None and finished <= approved_at
+        reviewed = ident in destroyed or (approved_at is not None and finished <= approved_at)
         name = (emails.get(profile) or profile).split('@', 1)[0]
         name = re.sub(r'[^A-Za-z0-9_.+-]', '_', name)[:48] or 'account'
         reason = 'unusual' if 'PUBLIC_ERROR_UNUSUAL_ACTIVITY' in (error or '') else 'generation'
@@ -102,9 +109,10 @@ def current_window_screenshots(coordination, root=FLOW_ROOT, *, review_database=
     if not task_by_profile:
         return {}
     shots = {}
-    for record, _ in records(root, task_ids=set(task_by_profile.values()), review_database=review_database):
+    for record, _, reviewed in _reconcile(root, task_ids=set(task_by_profile.values()), review_database=review_database):
         if task_by_profile.get(record['profile']) == record['task_id']:
-            shots[record['profile']] = {key: record[key] for key in ('id', 'task_id')}
+            shots[record['profile']] = ({'task_id': record['task_id'], 'destroyed': True} if reviewed
+                                        else {key: record[key] for key in ('id', 'task_id')})
     return shots
 
 
@@ -131,6 +139,35 @@ def read_page_png(root, ident):
     if not isinstance(row[0], bytes) or not row[0].startswith(b'\x89PNG\r\n\x1a\n'):
         raise ValueError('Warning screenshot is invalid.')
     return row[0]
+
+
+def destroy_screenshot(root, ident, *, review_database=None):
+    """Remove one archived image while retaining its account or task record."""
+    if not re.fullmatch(r'[0-9a-f]{12}|[0-9a-f]{32}', ident):
+        raise ValueError('Invalid Flow screenshot ID.')
+    path = None
+    if len(ident) == 12:
+        match = next(_reconcile(root, ident, review_database=review_database), None)
+        if match is None:
+            raise FileNotFoundError('Warning screenshot is not available.')
+        _, path, _ = match
+    database_path = root / 'console-data/console.db'
+    if database_path.is_symlink() or not database_path.is_file():
+        raise ValueError('Flow data is not available.')
+    with closing(sqlite3.connect(database_path.as_uri() + '?mode=rw', uri=True, timeout=4)) as db, db:
+        db.execute('PRAGMA secure_delete=ON')
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('CREATE TABLE IF NOT EXISTS flow_destroyed_screenshots(id TEXT PRIMARY KEY)')
+        if path is None:
+            changed = db.execute("""UPDATE flow_page_incidents SET screenshot=NULL
+                WHERE id=? AND reviewed IS NULL AND screenshot IS NOT NULL""", (ident,)).rowcount
+            if not changed and not db.execute('SELECT 1 FROM flow_destroyed_screenshots WHERE id=?', (ident,)).fetchone():
+                raise FileNotFoundError('Warning screenshot is not available.')
+        db.execute('INSERT OR IGNORE INTO flow_destroyed_screenshots VALUES(?)', (ident,))
+    if path is not None:
+        if path.parent.is_symlink() or path.is_symlink():
+            raise ValueError('Unexpected screenshot path.')
+        path.unlink(missing_ok=True)
 
 
 def main(argv=None, root=FLOW_ROOT, *, review_database=None):

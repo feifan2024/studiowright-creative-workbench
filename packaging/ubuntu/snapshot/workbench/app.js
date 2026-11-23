@@ -291,10 +291,13 @@ function flowAccountReason(account, snapshot, row, pageState) {
 function flowAccountNoticeMarkup(reason, screenshot) {
   const id = screenshot?.id;
   const notice = reason?.label ? `<strong>${esc(reason.label)}：</strong>${esc(reason.text)}` : '';
-  if (!reason?.noScreenshot && /^(?:[a-f0-9]{12}|[a-f0-9]{32})$/.test(id) && (!reason?.taskId || screenshot.task_id === reason.taskId)) {
+  if (!reason?.noScreenshot && screenshot?.has_screenshot !== false &&
+      /^(?:[a-f0-9]{12}|[a-f0-9]{32})$/.test(id) && (!reason?.taskId || screenshot.task_id === reason.taskId)) {
     const path = '/api/flow-warning-screenshots/' + id + '.png';
-    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<a class="account-flow-warning" href="${path}" target="_blank" rel="noopener" title="查看 Flow 警告原图"><img src="${path}" width="192" loading="lazy" alt="查看 Flow 警告截图"></a>`;
+    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<div><a class="account-flow-warning" href="${path}" target="_blank" rel="noopener" title="查看 Flow 警告原图"><img src="${path}" width="192" loading="lazy" alt="查看 Flow 警告截图"></a><div><button class="text-link" type="button" data-destroy-flow-screenshot="${id}">已阅，销毁截图</button></div></div>`;
   }
+  const destroyed = !reason?.noScreenshot && screenshot?.destroyed === true && (!reason?.taskId || screenshot.task_id === reason.taskId);
+  if (destroyed) return `<p class="account-flow-reason">${notice} 截图已销毁。</p>`;
   if (!notice) return '';
   return `<p class="account-flow-reason">${notice}${reason.taskId || reason.screenshotMissing ? ' 本次未保存截图。' : ''}</p>`;
 }
@@ -2403,7 +2406,7 @@ function renderAccounts() {
       <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div title="${esc(flowBalanceTitle)}"><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账 ${esc(flowNextCredit || '待官方更新')}${flowNextCredit && !item.flow_balance_fresh ? '（上次读取）' : ''}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
       <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}" title="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${geminiReady && !geminiNeedsAttention ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${quotaView.html}</div></div></div>
       <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${flowFallback ? `<span class="account-mini-status is-attention">Flow · ${esc(flowFallback)}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}${geminiFallback ? `<span class="account-mini-status is-attention">Gemini · ${esc(geminiFallback)}</span>` : ''}</div>
-      ${flowAccountNoticeMarkup(flowReason, pageIncident ? (pageIncident.has_screenshot ? pageIncident : null) : state.snapshot?.flow_warning_screenshots?.[item.profile])}
+      ${flowAccountNoticeMarkup(flowReason, pageIncident ? pageIncident : state.snapshot?.flow_warning_screenshots?.[item.profile])}
       <details><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>
       <div class="account-card-actions">${govRelease}${authControl}${geminiVerify}${flowPaused ? `<button class="button button-light" type="button" data-resume-flow="${accountKey}"${pageIncident ? ` data-incident="${esc(pageIncident.id)}"` : ''}>已核查，恢复 Flow</button>` : ''}</div></article>`;
   }).join("")}</div>`;
@@ -2913,6 +2916,24 @@ $('realAccountTable').addEventListener('change', event => {
 });
 $("realAccountTable").addEventListener("click", async (event) => {
   if (event.target.closest('[data-govern-reauth]')) return handleGovernanceClick(event);
+  const destroyScreenshot = event.target.closest('[data-destroy-flow-screenshot]');
+  if (destroyScreenshot) {
+    if (!window.confirm('销毁这张截图？操作不可撤销，账号状态和任务记录会保留。')) return;
+    destroyScreenshot.disabled = true;
+    accountActionsInFlight.add(destroyScreenshot);
+    try {
+      const id = destroyScreenshot.dataset.destroyFlowScreenshot;
+      const result = await postJson('/api/flow-warning-screenshots/' + id + '/destroy', {confirmed:true});
+      $('accountActionMessage').textContent = result.message;
+      await refresh();
+    } catch (error) {
+      $('accountActionMessage').textContent = error.message || '截图清理暂未确认。';
+    } finally {
+      accountActionsInFlight.delete(destroyScreenshot);
+      destroyScreenshot.disabled = false;
+    }
+    return;
+  }
   const govReleaseButton = event.target.closest('[data-govern-review]');
   if (govReleaseButton) {
     if (!window.confirm(`已核对任务 ${govReleaseButton.dataset.governReview}，现在放行账号并删除本次警告截图？原任务不会重发。`)) return;
@@ -2957,7 +2978,9 @@ $("realAccountTable").addEventListener("click", async (event) => {
     return;
   }
   const isFlowResume = button.hasAttribute('data-resume-flow');
-  if (isFlowResume && !window.confirm('确认已人工核查该账号的 Flow 状态？恢复后，等待中的任务可能在冷却结束后开始执行。')) return;
+  if (isFlowResume && !window.confirm(button.dataset.incident
+    ? '确认已人工核查该账号？此警告的截图将被销毁。恢复后，符合条件的排队任务可能开始执行。'
+    : '确认已人工核查该账号的 Flow 状态？恢复后，等待中的任务可能在冷却结束后开始执行。')) return;
   button.disabled = true;
   accountActionsInFlight.add(button);
   const isToggle = button.hasAttribute('data-toggle-gemini');

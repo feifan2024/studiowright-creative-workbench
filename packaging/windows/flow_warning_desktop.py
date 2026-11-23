@@ -81,11 +81,16 @@ def sync_once(read, destination, database):
     database.execute('CREATE TABLE IF NOT EXISTS delivered(job_id TEXT PRIMARY KEY)')
     for row in index['reviewed']:
         try:
-            target = destination / capture_name(row)
-            if (database.execute('SELECT 1 FROM delivered WHERE job_id=?', (row['id'],)).fetchone()
-                    and not target.is_symlink() and target.is_file()):
-                target.unlink(missing_ok=True)
-                removed += 1
+            name = capture_name(row)
+            if database.execute('SELECT 1 FROM delivered WHERE job_id=?', (row['id'],)).fetchone():
+                # The registered email may have changed since the copy was saved.
+                stamp = name[:19]
+                suffix = name[20 + len(row['account']):]
+                for target in destination.glob(f'{stamp}_*{suffix}'):
+                    account = target.name[20:-len(suffix)]
+                    if re.fullmatch(r'[A-Za-z0-9_.+-]{1,48}', account) and not target.is_symlink() and target.is_file():
+                        target.unlink(missing_ok=True)
+                        removed += 1
         except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
             failures += 1
     for row in index['active']:
