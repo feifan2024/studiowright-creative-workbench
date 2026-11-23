@@ -37,6 +37,7 @@ test('Flow preflight mismatch explains why the account is blocked without reusin
 });
 
 test('overview renders one shared quota card with both time windows', () => {
+  const now = 1800000000;
   const target = {
     querySelector: selector => selector === 'details[open]' ? null : {addEventListener() {}},
     querySelectorAll: () => [],
@@ -47,25 +48,30 @@ test('overview renders one shared quota card with both time windows', () => {
     $: () => target,
     document: {},
     state: {},
+    Date: {now: () => now * 1000},
     officialQuotaReadFailed: false,
     officialQuotaRequest: null,
     officialQuotaData: {
       advanced_pool: {
-        known_accounts: 2,
         total_accounts: 3,
-        windows: {
-          five_hour: {total_remaining_percent: 175, average_remaining_percent: 87.5},
-          weekly: {total_remaining_percent: 120, average_remaining_percent: 60}
+        accounts: {
+          first: {status:'ok', checked_at:now-30, models:['gemini-4-hydrogen','gemini-4-neon'],
+            five_hour:{remaining_percent:100}, weekly:{remaining_percent:60}},
+          second: {status:'ok', checked_at:now-60, models:['gemini-4-neon'],
+            five_hour:{remaining_percent:75}},
+          stale: {status:'ok', checked_at:now-601, models:['gemini-4-hydrogen'],
+            five_hour:{remaining_percent:0}, weekly:{remaining_percent:100}}
         }
       }
     }
   });
-  for (const name of ['esc', 'savedQuotaSummary', 'renderOfficialQuota']) load(name, context);
+  for (const name of ['esc', 'savedQuotaValue', 'savedQuotaSummary', 'renderOfficialQuota']) load(name, context);
   vm.runInContext('renderOfficialQuota()', context);
   assert.equal((target.innerHTML.match(/class="quota-shared-card"/g) || []).length, 1);
-  assert.match(target.innerHTML, /Hydrogen \/ Neon 共用 · 2 \/ 3 个账号已读/);
-  assert.match(target.innerHTML, /5 小时总账池额度<\/span><strong>175%/);
-  assert.match(target.innerHTML, /每周总账池额度<\/span><strong>120%/);
+  assert.match(target.innerHTML, /Hydrogen \/ Neon 共用/);
+  assert.match(target.innerHTML, /5 小时额度<\/span><strong>87\.50%[^]*?aria-valuenow="87\.5"[^]*?>2 \/ 3 个账号已读/);
+  assert.match(target.innerHTML, /每周额度<\/span><strong>60%[^]*?aria-valuenow="60"[^]*?>1 \/ 3 个账号已读/);
+  assert.doesNotMatch(target.innerHTML, /175%|120%/);
 });
 
 test('account avatars mark only enabled advanced Gemini model choices', () => {
@@ -136,7 +142,7 @@ test('compact Gemini quota keeps recovery dates in hover details', () => {
 test('a missing Gemini quota is neutral, and a confirmed zero stays visible', () => {
   const now = 1800000000;
   const context = vm.createContext({
-    Date: {now: () => now * 1000}, officialQuotaReadFailed: false,
+    Date: {now: () => now * 1000}, dateTime: value => '日期' + value, officialQuotaReadFailed: false,
     officialQuotaData: {accounts: {}},
   });
   for (const name of ['esc', 'savedQuotaValue', 'accountOfficialQuotaMarkup']) load(name, context);
@@ -150,8 +156,13 @@ test('a missing Gemini quota is neutral, and a confirmed zero stays visible', ()
     assert.doesNotMatch(html, /aria-valuenow=/);
   }
   const partial = show({status: 'ok', checked_at: now, five_hour: {remaining_percent: 0}});
-  assert.equal(partial.message, '额度暂未获取');
+  assert.equal(partial.message, '部分额度待读取');
   assert.match(partial.html, /aria-valuenow="0"/);
+  assert.match(partial.html, /每周<\/span><strong>待读取/);
+  const stale = show({status: 'ok', checked_at: now - 601, weekly: {remaining_percent: 100}});
+  assert.match(stale.message, /上次读取.*部分额度待读取/);
+  assert.match(stale.html, /5 小时<\/span><strong>待读取/);
+  assert.match(stale.html, /每周<\/span><strong>100%/);
   assert.match(show({status: 'authorization_required'}).message, /重新授权/);
 });
 
@@ -177,6 +188,29 @@ test('an open account page re-reads saved Gemini quota after its initial load', 
   now += context.OFFICIAL_QUOTA_SYNC_MS;
   await sync();
   assert.equal(quotaReads, 1);
+});
+
+test('quota refresh keeps the card tooltip in sync with partial and complete data', () => {
+  const now = 1800000000;
+  const service = {
+    querySelector: () => ({textContent:'可调用'}),
+    setAttribute(name, value) { this[name] = value; }
+  };
+  const panel = {dataset:{accountQuota:'account'}, closest:()=>service};
+  const row = {status:'ok', checked_at:now, weekly:{remaining_percent:100}};
+  const context = vm.createContext({
+    Date:{now:()=>now * 1000}, document:{querySelectorAll:()=>[panel]},
+    officialQuotaReadFailed:false, officialQuotaData:{accounts:{account:row}},
+  });
+  for (const name of ['esc','savedQuotaValue','accountOfficialQuotaMarkup','renderAccountQuotas']) load(name, context);
+  vm.runInContext('renderAccountQuotas()', context);
+  assert.match(service.title, /部分额度待读取/);
+  assert.equal(service['aria-label'], service.title);
+  row.five_hour = {remaining_percent:0};
+  vm.runInContext('renderAccountQuotas()', context);
+  assert.equal(service.title, 'Gemini：可调用');
+  assert.equal(service['aria-label'], service.title);
+  assert.match(panel.innerHTML, /aria-valuenow="0"/);
 });
 
 test('Gemini readiness requests quota recovery and still finishes when quota is unavailable', async () => {

@@ -2018,7 +2018,9 @@ function accountOfficialQuotaMarkup(key) {
   const now = Date.now()/1000;
   const age = row && typeof row.checked_at === 'number' ? now-row.checked_at : null;
   const fresh = row?.status === 'ok' && age !== null && Number.isFinite(age) && age >= 0 && age <= 600;
-  const available = ['five_hour','weekly'].some(window=>savedQuotaValue(row,window)!==null);
+  const values = ['five_hour','weekly'].map(window=>savedQuotaValue(row,window));
+  const available = values.some(value=>value!==null);
+  const partial = available && values.some(value=>value===null);
   const windowMarkup = (window, label, title) => {
     const value = savedQuotaValue(row,window);
     const reset = row?.[window]?.reset_at;
@@ -2039,7 +2041,8 @@ function accountOfficialQuotaMarkup(key) {
   if (!officialQuotaReadFailed && officialQuotaData?.refreshing && (!fresh || !available))
     message = '正在读取额度…';
   else if (!message && !available) message = '额度暂未获取';
-  else if (!message && !fresh) message = '上次读取 '+dateTime(row.checked_at)+'，仅供参考';
+  else if (!message && !fresh) message = '上次读取 '+dateTime(row.checked_at)+'，仅供参考'+(partial ? ' · 部分额度待读取' : '');
+  else if (!message && partial) message = '部分额度待读取';
   const html = `<div class="account-quota-windows">${windowMarkup('five_hour','5 小时','5 小时额度')}${windowMarkup('weekly','每周','每周额度')}</div>`;
   return {html, message};
 }
@@ -2048,6 +2051,13 @@ function renderAccountQuotas() {
   document.querySelectorAll('[data-account-quota]').forEach(panel=>{
     const view = accountOfficialQuotaMarkup(panel.dataset.accountQuota);
     if (panel.innerHTML !== view.html) panel.innerHTML = view.html;
+    const service = panel.closest('.account-service-gemini');
+    const status = service?.querySelector('.account-health')?.textContent;
+    if (status) {
+      const label = 'Gemini：'+status+(view.message ? ' · '+view.message : '');
+      service.setAttribute('aria-label', label);
+      service.title = label;
+    }
   });
 }
 
@@ -4978,6 +4988,8 @@ function renderOfficialQuota() {
     else if (values.every(value=>value!==null)) {
       status = fresh ? (resets.length ? resetText(Math.min(...resets)) : '已读取额度')
         : '上次读取 '+dateTime(row.checked_at)+'，仅供参考';
+    } else if (values.some(value=>value!==null)) {
+      status = fresh ? '部分额度待读取' : '上次读取 '+dateTime(row.checked_at)+'，仅供参考 · 部分额度待读取';
     }
     return `<tr><th scope="row">${esc(names.get(key) || `账号 ${index+1}`)}</th>${values.map((v,i)=>`<td><div class="quota-account-value">${number(v)}</div><div class="quota-account-track" role="img" aria-label="${i ? '每周' : '5小时'}剩余 ${v == null ? '未知' : v+'%'}"><i data-quota-fill="${v ?? 0}"></i></div></td>`).join('')}<td>${esc(status)}</td></tr>`;
   }).join('');
