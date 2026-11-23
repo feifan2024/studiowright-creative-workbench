@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot/workbench'))
 from live_pool import Conflict, RealPool
-from foreground_input import FLOW_PROMPT_TEXT, InputNotSubmitted, Target, paste_and_submit_reserved
+from foreground_input import (
+    FLOW_PREFIX_CHARACTERS, FLOW_PROMPT_TEXT, FLOW_SELECT_PREFIX,
+    InputNotSubmitted, Target, paste_and_submit_reserved,
+)
 
 
 @contextmanager
@@ -28,22 +31,50 @@ def fixture_directory():
 class FlowPromptVerification(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.prompt = '第一行\n第二行\n\n第四行'
+        self.editor = ''
+        self.actions = []
         self.driver = SimpleNamespace(
-            composer_text=AsyncMock(return_value=''), activate_and_confirm=AsyncMock(return_value=True),
+            composer_text=AsyncMock(side_effect=lambda *_: self.editor),
+            activate_and_confirm=AsyncMock(return_value=True),
             composer_ready_cdp=AsyncMock(return_value=True), confirm_focus=AsyncMock(return_value=True),
-            type_prompt_chars=AsyncMock(), copy_prompt_and_paste=AsyncMock(),
+            copy_prompt_and_paste=AsyncMock(side_effect=self.paste),
         )
-        self.composer = SimpleNamespace(evaluate=AsyncMock())
-        self.page = SimpleNamespace(keyboard=SimpleNamespace(insert_text=AsyncMock()))
-        self.checkpoint = AsyncMock()
-        self.send = AsyncMock()
+        self.composer = SimpleNamespace(evaluate=AsyncMock(side_effect=self.evaluate_composer))
+        self.page = SimpleNamespace(
+            evaluate=AsyncMock(side_effect=lambda _, prompt: list(prompt[:5])),
+            keyboard=SimpleNamespace(
+                insert_text=AsyncMock(side_effect=self.insert), press=AsyncMock(side_effect=self.delete),
+            ),
+        )
+        self.checkpoint = AsyncMock(side_effect=lambda: self.actions.append(('checkpoint', self.editor)))
+        self.send = AsyncMock(side_effect=lambda: self.actions.append(('send', self.editor)))
 
-    async def submit(self, keyboard=None):
+    def insert(self, character):
+        self.editor += character
+        self.actions.append(('insert', character))
+
+    def delete(self, key):
+        self.assertEqual(key, 'Backspace')
+        self.actions.append(('delete', self.editor))
+        self.editor = ''
+
+    def paste(self, *args):
+        text = args[-1]
+        self.editor += text
+        self.actions.append(('paste', text))
+
+    def evaluate_composer(self, script, expected=None):
+        if script == FLOW_SELECT_PREFIX:
+            return self.editor == expected
+        self.assertEqual(script, FLOW_PROMPT_TEXT)
+        return self.editor
+
+    async def submit(self, prefix_length=2):
         with (
             fixture_directory() as directory,
             patch('foreground_input.Path.home', return_value=directory),
             patch('foreground_input._pacing_wait', new_callable=AsyncMock),
-            patch('foreground_input._hid_keyboard', AsyncMock(return_value=keyboard)),
+            patch('foreground_input.random.randint', return_value=prefix_length),
             patch('pointer_sequence.record_input_action'),
         ):
             await paste_and_submit_reserved(
@@ -53,40 +84,64 @@ class FlowPromptVerification(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_flow_compares_the_paragraph_text_before_sending(self):
-        self.composer.evaluate.return_value = self.prompt
         await self.submit()
-        self.composer.evaluate.assert_awaited_once_with(FLOW_PROMPT_TEXT)
+        self.page.evaluate.assert_awaited_once_with(FLOW_PREFIX_CHARACTERS, self.prompt)
         self.driver.copy_prompt_and_paste.assert_awaited_once()
-        self.page.keyboard.insert_text.assert_not_awaited()
-        self.checkpoint.assert_awaited_once()
-        self.send.assert_awaited_once()
+        self.assertEqual(self.actions, [
+            ('insert', '第'), ('insert', '一'), ('delete', '第一'), ('paste', self.prompt),
+            ('checkpoint', self.prompt), ('send', self.prompt),
+        ])
 
     async def test_incorrect_text_keeps_a_flow_task_before_submission(self):
-        self.composer.evaluate.return_value = self.prompt.replace('第二行', '改一行')
+        self.driver.copy_prompt_and_paste.side_effect = lambda *_: self.paste(self.prompt + '!')
         with patch('foreground_input.FLOW_PROMPT_TIMEOUT', .02):
             with self.assertRaisesRegex(InputNotSubmitted, '^prompt_input_timeout$'):
                 await self.submit()
         self.checkpoint.assert_not_awaited()
         self.send.assert_not_awaited()
 
-    async def test_272_ascii_characters_use_clipboard_even_with_hid(self):
-        self.prompt = 'A' * 272
-        self.composer.evaluate.return_value = self.prompt
-        keyboard = SimpleNamespace(type=AsyncMock())
-        await self.submit(keyboard)
-        keyboard.type.assert_not_awaited()
+    async def test_long_prompt_deletes_only_the_first_five_characters(self):
+        self.prompt = 'ABCDE' + 'x' * 267
+        await self.submit(prefix_length=5)
         self.driver.copy_prompt_and_paste.assert_awaited_once()
-        self.assertEqual(self.driver.copy_prompt_and_paste.await_args.args[-1], self.prompt)
-        self.send.assert_awaited_once()
+        self.assertEqual(self.actions, [
+            *(('insert', char) for char in 'ABCDE'), ('delete', 'ABCDE'), ('paste', self.prompt),
+            ('checkpoint', self.prompt), ('send', self.prompt),
+        ])
 
-    async def test_short_ascii_can_still_be_typed(self):
-        self.prompt = 'cat'
-        self.composer.evaluate.return_value = self.prompt
-        keyboard = SimpleNamespace(type=AsyncMock())
-        await self.submit(keyboard)
-        self.assertEqual(keyboard.type.await_args.args, ('cat',))
+    async def test_one_character_prompt_is_pasted_without_deletion(self):
+        self.prompt = '字'
+        await self.submit()
+        self.assertEqual(self.actions, [('paste', '字'), ('checkpoint', '字'), ('send', '字')])
+
+    async def test_prefix_with_a_line_break_uses_temporary_paste(self):
+        self.prompt = 'A\nB'
+        await self.submit()
+        self.assertEqual(self.actions, [
+            ('paste', 'A\n'), ('delete', 'A\n'), ('paste', self.prompt),
+            ('checkpoint', self.prompt), ('send', self.prompt),
+        ])
+
+    async def test_prefix_can_contain_a_multi_codepoint_character(self):
+        prefix = '👩‍💻é'
+        self.prompt = prefix + '之后的提示词'
+        self.page.evaluate.side_effect = None
+        self.page.evaluate.return_value = ['👩‍💻', 'é', '之', '后', '的']
+        await self.submit()
+        self.assertEqual(self.actions[:3], [('insert', '👩‍💻'), ('insert', 'é'), ('delete', prefix)])
+
+    async def test_changed_prefix_is_never_deleted(self):
+        def evaluate(script, expected=None):
+            if script == FLOW_SELECT_PREFIX:
+                self.editor += '意外草稿'
+            return self.evaluate_composer(script, expected)
+
+        self.composer.evaluate.side_effect = evaluate
+        with self.assertRaisesRegex(InputNotSubmitted, '^flow_prefix_changed_before_deletion$'):
+            await self.submit()
+        self.page.keyboard.press.assert_not_awaited()
         self.driver.copy_prompt_and_paste.assert_not_awaited()
-        self.send.assert_awaited_once()
+        self.send.assert_not_awaited()
 
 
 class ImageCreditCompatibility(unittest.TestCase):

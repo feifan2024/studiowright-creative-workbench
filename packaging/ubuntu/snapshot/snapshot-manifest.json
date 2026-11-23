@@ -143,7 +143,7 @@
   "workbench/flow_warning_archive.py": "d4ff3917ba031952305c3bc0ae4fb37e768c69aada47d57ac177ac1254b5db6e",
   "workbench/flow_window_binding.py": "0d3d11f9d65703d3a597b51fd15a18083c3822fa71f865810317a4c4a1783bbf",
   "workbench/flow_window_policy.py": "7f7bafb88337b8c4abcb175fa5ec84a9ea5a02bce30950d7eb610db36da384e9",
-  "workbench/foreground_input.py": "ca242e2d343bd76e548a0dc710713506883ee6b44b3d3d9d3b0663226a11cb1c",
+  "workbench/foreground_input.py": "93b3df6a978f5e93bcf3ebeec1190112980a592107bc403f6cc0e6810ed4aa95",
   "workbench/foreground_lease.py": "b02bbfb08f20ff635104c911dbd53ea187171564c80940c361e26cba03401833",
   "workbench/foreground_queue.py": "46b71cf3ff035fb405c586fad383553a61acaa5e8122e47415ff28eb76180167",
   "workbench/gemini_authorization.py": "0423353eff24a7f3aa27c9892c374d7cc3806541c026f2062bb13c75e3f211bc",

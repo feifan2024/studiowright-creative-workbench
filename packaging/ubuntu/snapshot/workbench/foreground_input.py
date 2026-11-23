@@ -28,6 +28,28 @@ FLOW_PROMPT_TEXT = r"""editor => {
     }).join('\n');
 }"""
 
+FLOW_PREFIX_CHARACTERS = """prompt => {
+    const characters = [];
+    for (const {segment} of new Intl.Segmenter().segment(prompt)) {
+        characters.push(segment);
+        if (characters.length === 5) break;
+    }
+    return characters;
+}"""
+
+FLOW_SELECT_PREFIX = r"""(editor, expected) => {
+    if (!document.hasFocus() || !editor.contains(document.activeElement) ||
+        (""" + FLOW_PROMPT_TEXT + r""")(editor).replace(/\r\n/g, '\n') !== expected) {
+        return false;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    const selection = document.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+}"""
+
 
 async def read_flow_prompt(composer):
     return (await composer.evaluate(FLOW_PROMPT_TEXT)).replace('\r\n', '\n')
@@ -136,14 +158,34 @@ async def _verify_prompt(driver, page, composer, target, prompt, seconds=2.0):
         raise InputNotSubmitted('window_focus_lost')
 
 
-async def enter_hybrid_prompt(driver, page, composer, target, keyboard, prompt, record):
-    # Three keypresses fit even at the HID helper's maximum configured delays,
-    # leaving time for focus checks and verification inside the same deadline.
+async def enter_hybrid_prompt(driver, page, composer, target, prompt, record):
     if await driver.composer_text(page, composer) not in ('', '\n'):
         raise InputNotSubmitted('composer_not_empty')
     if not await driver.confirm_focus(target, page, composer):
         raise InputNotSubmitted('window_focus_lost')
-    await _type_prompt_on_device(driver, page, composer, target, keyboard, prompt, record, maximum=3)
+
+    characters = await page.evaluate(FLOW_PREFIX_CHARACTERS, prompt)
+    if len(characters) >= 2:
+        characters = characters[:random.randint(2, len(characters))]
+        prefix = ''.join(characters)
+        record('flow_prefix_input_started', characters=len(characters))
+        if '\n' in prefix or '\r' in prefix:
+            # Paste preserves line breaks without triggering an Enter shortcut.
+            await driver.copy_prompt_and_paste(page, composer, target, prefix)
+        else:
+            for character in characters:
+                if not await driver.confirm_focus(target, page, composer):
+                    raise InputNotSubmitted('window_focus_lost_during_typing')
+                await page.keyboard.insert_text(character)
+        await _verify_prompt(driver, page, composer, target, prefix, seconds=FLOW_PROMPT_TIMEOUT)
+        if not await composer.evaluate(FLOW_SELECT_PREFIX, prefix):
+            raise InputNotSubmitted('flow_prefix_changed_before_deletion')
+        await page.keyboard.press('Backspace')
+        if await driver.composer_text(page, composer) not in ('', '\n'):
+            raise InputNotSubmitted('flow_prefix_deletion_incomplete')
+
+    record('clipboard_paste_started', characters=len(prompt))
+    await driver.copy_prompt_and_paste(page, composer, target, prompt)
     await _verify_prompt(driver, page, composer, target, prompt, seconds=FLOW_PROMPT_TIMEOUT)
 
 
@@ -206,11 +248,9 @@ async def paste_and_submit_reserved(*, driver, page, composer, target, prompt,
                     await asyncio.sleep(.6)
             if hybrid:
                 try:
-                    keyboard = await _hid_keyboard(driver, target)
                     record('hybrid_input_timeout_budget', seconds=FLOW_PROMPT_TIMEOUT, characters=len(prompt))
-                    record('hybrid_input_route', route='hid' if keyboard else 'clipboard')
                     await asyncio.wait_for(
-                        enter_hybrid_prompt(driver, page, composer, target, keyboard, prompt, record),
+                        enter_hybrid_prompt(driver, page, composer, target, prompt, record),
                         timeout=FLOW_PROMPT_TIMEOUT,
                     )
                     record('hybrid_input_verified', characters=len(prompt))
