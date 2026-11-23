@@ -18,6 +18,9 @@ _OFFLINE_PILOT_PROFILES = frozenset({
     'account-2f8797411d41',
     'ub-chrome-424097083b',
     'ub-chrome-e7fc86b674',
+    'account-1',
+    'ub-chrome-2a0f1cbdca',
+    'ub-chrome-b5f593c253',
 })
 _CHROME_RESOURCE_COMPONENTS = {
     'admccjkmockfdflocgggjfgdacdodkdf': '/opt/google/chrome/resources/glic_extension',

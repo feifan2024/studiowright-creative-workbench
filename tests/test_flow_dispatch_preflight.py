@@ -232,7 +232,8 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         console.root, console.store, console.test = self.root, self.store, False
         self.store.record_page_incident('account-b', 'login', PNG)
         pilots = ['ub-chrome-975371911f', 'account-2f8797411d41',
-                  'ub-chrome-424097083b', 'ub-chrome-e7fc86b674']
+                  'ub-chrome-424097083b', 'ub-chrome-e7fc86b674',
+                  'account-1', 'ub-chrome-2a0f1cbdca', 'ub-chrome-b5f593c253']
         with patch('preflight.dispatch_check', return_value=(False, ['dispatch_locale_missing'])) as check:
             expected = {profile: ['dispatch_locale_missing'] for profile in pilots}
             expected.update({'account-a': [], 'account-b': ['flow_page_warning']})
@@ -242,7 +243,8 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
 
 class ChromeComponentDispatch(unittest.TestCase):
     profile = 'ub-chrome-975371911f'
-    additional_profiles = ('account-2f8797411d41', 'ub-chrome-424097083b', 'ub-chrome-e7fc86b674')
+    additional_profiles = ('account-2f8797411d41', 'ub-chrome-424097083b', 'ub-chrome-e7fc86b674',
+                           'account-1', 'ub-chrome-2a0f1cbdca', 'ub-chrome-b5f593c253')
     peer = 'another-profile'
     store_url = 'https://clients2.google.com/service/update2/crx'
 
@@ -281,7 +283,8 @@ class ChromeComponentDispatch(unittest.TestCase):
         self.enterContext(patch('preflight._CHROME_RESOURCE_COMPONENTS', resources))
         self.enterContext(patch('preflight._CHROME_PAYMENTS_COMPONENT', self.payment))
         self.enterContext(patch('preflight._system_timezone', return_value='America/Chicago'))
-        self.enterContext(patch('preflight.mapped_ports', return_value=dict(zip(profiles, range(3101, 3106)))))
+        self.enterContext(patch('preflight.mapped_ports',
+                                return_value={profile: 3101 + index for index, profile in enumerate(profiles)}))
         self.enterContext(patch('preflight._chrome_processes', return_value=()))
 
     def default(self, profile):
