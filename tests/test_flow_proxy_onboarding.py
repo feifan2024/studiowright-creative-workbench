@@ -1,0 +1,138 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import gc
+from importlib.util import module_from_spec, spec_from_file_location
+import json
+from pathlib import Path
+import sys
+from threading import Barrier
+import time
+import unittest
+
+from starlette.testclient import TestClient
+from test_flow_regressions import fixture_directory
+
+SNAPSHOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot'
+sys.path[:0] = [str(SNAPSHOT / name) for name in ('flow/console', 'workbench', 'flow/source/src')]
+from adapter import FakeAdapter
+from flow_proxy_guard import mapped_ports, reserve_confirmed_exit
+
+spec = spec_from_file_location('flow_proxy_onboarding_console', SNAPSHOT / 'flow/console/server.py')
+server = module_from_spec(spec)
+spec.loader.exec_module(server)
+
+
+@unittest.skipUnless(sys.platform.startswith('linux'), 'uses the Ubuntu file lock')
+class WindowsProxyOnboarding(unittest.TestCase):
+    def setUp(self):
+        self.root = self.enterContext(fixture_directory())
+        self.addCleanup(gc.collect)
+        (self.root / 'bin').mkdir()
+        self.mapping = self.root / 'bin/exit-map.txt'
+        self.original = 'existing-profile 3101\n'
+        self.mapping.write_text(self.original, encoding='ascii')
+        self.mapping.chmod(0o600)
+        # Synthetic inventory only. These tests never open a proxy connection.
+        self.exits = {
+            '3101': {'public_ip': '11.22.33.1', 'confirmed': True},
+            '10801': {'public_ip': '::ffff:11.22.33.1', 'confirmed': True},
+            '3112': {'public_ip': '11.22.33.12', 'confirmed': False},
+        }
+        self.inventory = self.root / 'bin/exit-inventory.json'
+        self.write_inventory()
+        self.adapter = FakeAdapter(self.root)
+        app = server.create_app(self.root, self.adapter, test=True)
+        self.console = app.state.console
+        self.store = self.console.store
+        token = 'test-only-bridge'
+        self.store.execute('INSERT INTO bridge_devices VALUES(?,?)', (self.store.digest(token), 0))
+        self.headers = {
+            'Authorization': 'Bearer ' + token,
+            'Origin': 'chrome-extension://kbnibljeinmjmmpholicjkaiehmilbbk',
+            'X-Console-Request': '1',
+        }
+        self.client = TestClient(app)
+        self.addCleanup(self.client.close)
+
+    def write_inventory(self):
+        self.inventory.write_text(json.dumps(self.exits), encoding='ascii')
+        self.inventory.chmod(0o600)
+
+    def add_spare(self):
+        self.exits['3111'] = {'public_ip': '11.22.33.11', 'confirmed': True}
+        self.write_inventory()
+
+    def sync(self, email):
+        response = self.client.post('/api/plugin/session', headers=self.headers, json={
+            'email': email, 'cookies': [
+                {'name': 'fixture', 'value': 'fake', 'domain': 'flow.google.com', 'path': '/',
+                 'secure': True, 'hostOnly': True},
+            ],
+        })
+        self.assertEqual(response.status_code, 202, response.text)
+        return response.json()
+
+    def claim(self):
+        return self.store.claim(set(), session_import_allowed=self.console.ready_session_imports(set(), None))
+
+    def test_same_cached_import_waits_then_verifies_with_a_unique_exit(self):
+        email = 'new-account@example.test'
+        item = self.sync(email)
+        duplicate = self.sync(email)
+        self.assertEqual(duplicate['id'], item['id'])
+        self.assertTrue(duplicate['reused'])
+        status = self.client.get('/api/plugin/session/' + item['id'], headers=self.headers).json()
+        self.assertEqual(status['message'], server.WAITING_FOR_PROXY)
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.mapping.read_text(encoding='ascii'), self.original)
+
+        self.add_spare()
+        task = self.claim()
+        self.assertEqual(task['id'], item['id'])
+        asyncio.run(self.console.execute(task))
+        self.assertEqual(self.store.task(item['id'])['status'], 'succeeded')
+        self.assertEqual(self.store.account(item['profile'])['state'], 'verified')
+        self.assertEqual(self.mapping.read_text(encoding='ascii'), self.original + f"{item['profile']} 3111\n")
+
+    def test_expired_login_cannot_consume_spare_exit(self):
+        item = self.sync('expired@example.test')
+        bundle_id = self.store.task(item['id'])['params']['bundle_id']
+        vault = self.console.vault
+        payload = json.dumps(vault.get(bundle_id)).encode()
+        vault.path(bundle_id).write_bytes(vault.cipher.encrypt_at_time(payload, int(time.time()) - 1900))
+        self.add_spare()
+
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.store.task(item['id'])['status'], 'failed')
+        self.assertFalse(vault.path(bundle_id).exists())
+        self.assertEqual(self.mapping.read_text(encoding='ascii'), self.original)
+
+    def test_concurrent_profiles_cannot_share_the_last_exit(self):
+        self.add_spare()
+        barrier = Barrier(2)
+        profiles = ('account-0123456789ab', 'account-b9876543210a')
+
+        def reserve(profile):
+            barrier.wait(timeout=5)
+            return reserve_confirmed_exit(self.root, profile)
+
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            results = list(workers.map(reserve, profiles))
+        self.assertCountEqual(results, [None, 3111])
+        winner = profiles[results.index(3111)]
+        self.assertEqual(mapped_ports(self.mapping), {'existing-profile': 3101, winner: 3111})
+        self.assertEqual(reserve_confirmed_exit(self.root, winner), 3111)
+
+    def test_unverified_inventory_keeps_existing_binding_and_blocks_new_claims(self):
+        email = 'existing@example.test'
+        profile = 'account-' + self.store.digest(email)[:12]
+        self.store.add_account(profile, profile)
+        self.store.update_account(profile, email, 'verified')
+        self.mapping.write_text(self.original + f'{profile} 3102\n', encoding='ascii')
+        self.add_spare()
+        item = self.sync(email)
+        self.assertEqual(self.claim()['id'], item['id'])
+        self.sync('new@example.test')
+        self.assertIsNone(self.claim())
+        self.assertEqual(mapped_ports(self.mapping), {'existing-profile': 3101, profile: 3102})

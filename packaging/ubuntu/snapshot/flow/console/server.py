@@ -25,6 +25,7 @@ from api_keys import APIKeys
 from account_insights import Insights
 from console_store import MAX_GENERATION_RETRIES, RETRY_KINDS, Store
 from dispatch_limit import DispatchLimit
+from flow_proxy_guard import mapped_ports, reserve_confirmed_exit
 from flow_references import REFERENCE_FIELDS, ReferenceStore, task_reference_ids
 from web_auth import WebAuth
 from login_sessions import Vault, normalize_bundle
@@ -38,6 +39,7 @@ PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 KINDS = {"sync", "login", "media", "doctor", "quote", "image", "video"}
 TERMINAL_INPUT_STOPS = frozenset(('pasted_text_mismatch', 'prompt_input_timeout'))
 RETRYABLE_INPUT_STOPS = frozenset(('pre_submit_failed:pointer_not_over_input', 'pre_submit_failed:desktop_keyboard_authorization_timeout', 'window_focus_lost', 'composer_unavailable', 'window_activation_unconfirmed'))
+WAITING_FOR_PROXY = '等待已确认空闲的专属代理。分配后，原同步任务会自动继续核对。'
 
 
 def safe_error(exc):
@@ -95,6 +97,41 @@ class Console:
         holds = self.store.page_incidents()
         return {profile: (['flow_page_warning'] if profile in holds
                           else dispatch_check(self.root, profile)[1]) for profile in profiles}
+
+    def session_import_waits_for_proxy(self, profile, email):
+        if not isinstance(email, str) or profile != 'account-' + self.store.digest(email)[:12]:
+            return False
+        try:
+            return profile not in mapped_ports(self.root / 'bin/exit-map.txt')
+        except (OSError, ValueError):
+            return True
+
+    def ready_session_imports(self, busy, request_keys):
+        ready = set()
+        for row in self.store.rows("""SELECT t.id,t.profile,t.params,t.request_key,a.email FROM tasks t
+            JOIN accounts a ON a.profile=t.profile
+            WHERE t.kind='session_import' AND t.status='queued' ORDER BY t.created,t.id"""):
+            if row['profile'] in busy or (request_keys is not None and row['request_key'] not in request_keys):
+                continue
+            params = json.loads(row['params'])
+            email = params.get('expected_email')
+            if self.session_import_waits_for_proxy(row['profile'], email):
+                if (row['email'] or '').lower() != email:
+                    continue
+                ident = params.get('bundle_id')
+                try:
+                    self.vault.get(ident)
+                except (TypeError, ValueError):
+                    updated = self.store.execute("""UPDATE tasks SET status='failed',finished=?,error=?
+                        WHERE id=? AND status='queued'""", (time.time(), '登录包已过期或不可读取，请重新同步。', row['id']))
+                    if updated:
+                        with contextlib.suppress(OSError, TypeError, ValueError):
+                            self.vault.remove(ident)
+                    continue
+                if reserve_confirmed_exit(self.root, row['profile']) is None:
+                    continue
+            ready.add(row['id'])
+        return ready
 
     async def execute(self, task, *, on_video_submitted=None):
         # This second check is before the adapter is called, so a racing restriction
@@ -359,9 +396,12 @@ class Console:
                             "SELECT DISTINCT profile FROM flow_task_execution_rows WHERE status='queued' AND kind IN ('image','video')")}
                         checks = await asyncio.to_thread(self.dispatch_preflight, allowed & queued)
                         allowed = {profile for profile, reasons in checks.items() if not reasons}
-                    task = self.store.claim(self.busy | self.balance_busy, allowed, self.switch_ready_profiles(),
+                    busy = self.busy | self.balance_busy
+                    request_keys = set(scope['requests']) if scope else None
+                    import_ready = self.ready_session_imports(busy, request_keys)
+                    task = self.store.claim(busy, allowed, self.switch_ready_profiles(),
                                             set(), self.generation_projects,
-                                            request_keys=set(scope['requests']) if scope else None)
+                                            request_keys=request_keys, session_import_allowed=import_ready)
                     if not task:
                         slot.close()
                         break
@@ -1260,7 +1300,9 @@ def create_app(root, adapter, test=False):
                 return JSONResponse({
                     "id": previous["id"], "profile": profile, "email": bundle["email"],
                     "status": previous["status"], "reused": True,
-                    "message": "已有导入正在核对，继续查看原任务。",
+                    "message": (WAITING_FOR_PROXY if previous['status'] == 'queued'
+                                and c.session_import_waits_for_proxy(profile, bundle['email'])
+                                else "已有导入正在核对，继续查看原任务。"),
                 }, status_code=202)
             ident = c.vault.put(bundle)
             try:
@@ -1280,7 +1322,8 @@ def create_app(root, adapter, test=False):
                     "profile": profile,
                     "email": bundle["email"],
                     "status": "queued",
-                    "message": "登录信息已安全接收，等待在线邮箱核对；接收不代表登录成功。",
+                    "message": (WAITING_FOR_PROXY if c.session_import_waits_for_proxy(profile, bundle['email'])
+                                else "登录信息已安全接收，等待在线邮箱核对；接收不代表登录成功。"),
                 },
                 status_code=202,
             )
@@ -1291,14 +1334,18 @@ def create_app(root, adapter, test=False):
         row = c.store.task(request.path_params["ident"])
         if not row or row["kind"] != "session_import":
             return JSONResponse({"error": "登录同步记录不存在。"}, status_code=404)
+        result = row.get('result') or {}
+        message = result.get('message')
+        if row['status'] == 'queued' and c.session_import_waits_for_proxy(row['profile'], row['params'].get('expected_email')):
+            message = WAITING_FOR_PROXY
         return JSONResponse(
             {
                 "id": row["id"],
                 "status": row["status"],
-                "email": (row.get("result") or {}).get("email"),
+                "email": result.get("email"),
                 "error": row.get("error"),
-                "message": (row.get("result") or {}).get("message"),
-                "project_count": len((row.get("result") or {}).get("projects", [])),
+                "message": message,
+                "project_count": len(result.get("projects", [])),
             }
         )
 

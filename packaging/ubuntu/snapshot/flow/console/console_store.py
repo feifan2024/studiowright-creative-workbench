@@ -237,13 +237,14 @@ class Store:
             db.execute("UPDATE tasks SET status='interrupted',finished=?,error='后台曾中断；任务可能已提交，不会自动重试。请先核对原任务和项目素材。' WHERE status='running'", (now,))
 
     def claim(self, busy, generation_allowed=None, retry_switch_allowed=None, generation_shareable=None,
-              active_generation_projects=None, request_keys=None):
+              active_generation_projects=None, request_keys=None, *, session_import_allowed=None):
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
                 "SELECT * FROM flow_task_execution_rows WHERE status='queued' ORDER BY created"
             ).fetchall()
             row = next((r for r in rows if (request_keys is None or r['request_key'] in request_keys) and r["profile"] not in busy and
+                        (session_import_allowed is None or r['kind'] != 'session_import' or r['id'] in session_import_allowed) and
                         (r['kind'] not in ('image', 'video') or
                          (r['profile'], r['project']) not in (active_generation_projects or set())) and
                         (generation_allowed is None or r["kind"] not in ('image', 'video') or

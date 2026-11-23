@@ -15,6 +15,12 @@
 
 后台在核对登录或检查已连接的 Flow 页面时遇到异常活动提示，会先尝试保存截图，再停派该账号。在工作台账号卡片上核查后可手动解除这条停派记录。其他派发限制仍会逐项核对。
 
+## Windows 同步新增账号的代理
+
+在 Flow 安装目录的 `bin/exit-inventory.json` 中记录已核实的出口。键为 Ubuntu 本机 SOCKS 端口，值包含 `public_ip` 和布尔字段 `confirmed`。`public_ip` 填上游实际使用的公网 IPv4 或 IPv6 地址。库存文件由运行 Flow 的用户所有，禁止其他用户写入。库存须覆盖 `bin/exit-map.txt` 中已有绑定的已确认出口，才能核对新出口是否与它们共享公网 IP。
+
+Windows 同步生成的 `account-*` 配置沿用已有绑定。首次需要分配时，后台沿用 `exit-map.txt.lock` 加锁，从已确认的独立空闲出口中认领一个，再进行正常登录核对。库存缺失、无合适出口或正在编辑映射时，原同步任务留在队列。登录包仍按 30 分钟有效期处理，过期后需要在 Windows 重新同步。维护库存时使用同一把锁，保持同一公网出口的地址记录一致。后台通过库存分配已准备的出口，公网 IP 的申请和路由配置由运维处理。
+
 ## 可选在线自检
 
 `preflight.dispatch_check(root, profile, online=True)` 先通过离线检查，再读取已运行的本机 Chrome。在线检查从已有 Flow 标签页或空白标签页读取 `navigator.webdriver`、UA、屏幕参数、Canvas 和 WebGL。`navigator.webdriver` 必须为 `false`，四项信号的组合摘要必须与基线一致。运行中的浏览器不可访问、信号不全或基线缺失时，在线自检失败。现有派发入口使用默认离线模式。
