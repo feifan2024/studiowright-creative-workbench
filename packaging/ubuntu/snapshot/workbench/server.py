@@ -1751,28 +1751,29 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
             return self.json_response(200, result)
 
         def do_POST(self):
-            destroy = re.fullmatch(r'/api/flow-warning-screenshots/([0-9a-f]{12}|[0-9a-f]{32})/destroy', self.path)
-            if destroy and deployment == 'ubuntu':
-                if not self.valid(mutation=True):
-                    return self.json_response(403, {'error': '请从工作台确认销毁截图。'})
-                length = self.headers.get_all('Content-Length', [])
-                if (self.headers.get('Transfer-Encoding') or len(length) != 1
-                        or not re.fullmatch(r'[1-9][0-9]?', length[0])):
+            view = re.fullmatch(r'/api/flow-warning-screenshots/([0-9a-f]{12}|[0-9a-f]{32})/view', self.path)
+            if view and deployment == 'ubuntu':
+                if not self.valid() or self.headers.get('Origin') != 'http://' + self.headers.get('Host', '').lower():
+                    return self.json_response(403, {'error': '请从工作台打开警告原图。'})
+                required_body = b'view=original'
+                if (self.headers.get('Transfer-Encoding')
+                        or self.headers.get_all('Content-Length', []) != [str(len(required_body))]
+                        or self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/x-www-form-urlencoded'):
                     return self.json_response(400, {'error': '请求格式不正确。'})
                 try:
-                    data = json.loads(self.rfile.read(int(length[0])))
-                except ValueError:
-                    data = None
-                if not isinstance(data, dict) or set(data) != {'confirmed'} or data['confirmed'] is not True:
-                    return self.json_response(400, {'error': '请确认销毁这张截图。'})
-                from flow_warning_archive import FLOW_ROOT, destroy_screenshot
+                    self.connection.settimeout(4)
+                    if self.rfile.read(len(required_body)) != required_body:
+                        return self.json_response(400, {'error': '请求格式不正确。'})
+                except OSError:
+                    return self.json_response(400, {'error': '请求读取未完成。'})
+                from flow_warning_archive import FLOW_ROOT, view_screenshot_once
                 try:
-                    destroy_screenshot(FLOW_ROOT, destroy.group(1))
+                    body = view_screenshot_once(FLOW_ROOT, view.group(1))
                 except FileNotFoundError:
-                    return self.json_response(404, {'error': '未找到这张警告截图。'})
+                    return self.json_response(404, {'error': '截图已阅后销毁或已不可用。'})
                 except (OSError, ValueError, sqlite3.Error):
-                    return self.json_response(503, {'error': '截图清理暂未确认，请刷新后核对。'})
-                return self.json_response(200, {'ok': True, 'message': '已销毁这张截图。'})
+                    return self.json_response(503, {'error': '警告原图暂不可读取。'})
+                return self.respond(200, body, 'image/png')
             if self.path in ('/api/flow-readiness','/api/flow-readiness/review','/api/flow-readiness/auto') and deployment == 'ubuntu':
                 if not self.valid(mutation=True):
                     return self.json_response(403,{'error':'请从工作台发起 Flow 就绪检查。'})

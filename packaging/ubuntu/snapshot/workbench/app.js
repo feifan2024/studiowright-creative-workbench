@@ -293,8 +293,8 @@ function flowAccountNoticeMarkup(reason, screenshot) {
   const notice = reason?.label ? `<strong>${esc(reason.label)}：</strong>${esc(reason.text)}` : '';
   if (!reason?.noScreenshot && screenshot?.has_screenshot !== false &&
       /^(?:[a-f0-9]{12}|[a-f0-9]{32})$/.test(id) && (!reason?.taskId || screenshot.task_id === reason.taskId)) {
-    const path = '/api/flow-warning-screenshots/' + id + '.png';
-    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<div><a class="account-flow-warning" href="${path}" target="_blank" rel="noopener" title="查看 Flow 警告原图"><img src="${path}" width="192" loading="lazy" alt="查看 Flow 警告截图"></a><div><button class="text-link" type="button" data-destroy-flow-screenshot="${id}">已阅，销毁截图</button></div></div>`;
+    const path = '/api/flow-warning-screenshots/' + id;
+    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<form method="post" action="${path}/view" target="_blank" rel="noopener"><button class="account-flow-warning" type="submit" name="view" value="original" title="打开原图，阅后即焚"><img src="${path}.png" width="192" loading="lazy" alt="打开 Flow 警告原图，阅后即焚"></button></form>`;
   }
   const destroyed = !reason?.noScreenshot && screenshot?.destroyed === true && (!reason?.taskId || screenshot.task_id === reason.taskId);
   if (destroyed) return `<p class="account-flow-reason">${notice} 截图已销毁。</p>`;
@@ -2916,24 +2916,6 @@ $('realAccountTable').addEventListener('change', event => {
 });
 $("realAccountTable").addEventListener("click", async (event) => {
   if (event.target.closest('[data-govern-reauth]')) return handleGovernanceClick(event);
-  const destroyScreenshot = event.target.closest('[data-destroy-flow-screenshot]');
-  if (destroyScreenshot) {
-    if (!window.confirm('销毁这张截图？操作不可撤销，账号状态和任务记录会保留。')) return;
-    destroyScreenshot.disabled = true;
-    accountActionsInFlight.add(destroyScreenshot);
-    try {
-      const id = destroyScreenshot.dataset.destroyFlowScreenshot;
-      const result = await postJson('/api/flow-warning-screenshots/' + id + '/destroy', {confirmed:true});
-      $('accountActionMessage').textContent = result.message;
-      await refresh();
-    } catch (error) {
-      $('accountActionMessage').textContent = error.message || '截图清理暂未确认。';
-    } finally {
-      accountActionsInFlight.delete(destroyScreenshot);
-      destroyScreenshot.disabled = false;
-    }
-    return;
-  }
   const govReleaseButton = event.target.closest('[data-govern-review]');
   if (govReleaseButton) {
     if (!window.confirm(`已核对任务 ${govReleaseButton.dataset.governReview}，现在放行账号并删除本次警告截图？原任务不会重发。`)) return;

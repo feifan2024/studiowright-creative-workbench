@@ -120,9 +120,17 @@ def read_png(root, job_id, *, review_database=None):
     match = next(records(root, job_id, review_database=review_database), None)
     if match is None:
         raise FileNotFoundError('Warning screenshot is not available.')
-    with match[1].open('rb') as stream:
+    return _read_png_file(match[1])
+
+
+def _read_png_file(path):
+    with path.open('rb') as stream:
         data = stream.read(MAX_PNG_BYTES + 1)
-    if len(data) > MAX_PNG_BYTES or not data.startswith(b'\x89PNG\r\n\x1a\n'):
+    return _checked_png(data)
+
+
+def _checked_png(data):
+    if not isinstance(data, bytes) or len(data) > MAX_PNG_BYTES or not data.startswith(b'\x89PNG\r\n\x1a\n'):
         raise ValueError('Warning screenshot is invalid.')
     return data
 
@@ -136,21 +144,20 @@ def read_page_png(root, ident):
             (ident, MAX_PNG_BYTES)).fetchone()
     if row is None:
         raise FileNotFoundError('Warning screenshot is not available.')
-    if not isinstance(row[0], bytes) or not row[0].startswith(b'\x89PNG\r\n\x1a\n'):
-        raise ValueError('Warning screenshot is invalid.')
-    return row[0]
+    return _checked_png(row[0])
 
 
-def destroy_screenshot(root, ident, *, review_database=None):
-    """Remove one archived image while retaining its account or task record."""
+def view_screenshot_once(root, ident, *, review_database=None):
+    """Return the original to one viewer and remove the archived copy."""
     if not re.fullmatch(r'[0-9a-f]{12}|[0-9a-f]{32}', ident):
         raise ValueError('Invalid Flow screenshot ID.')
     path = None
     if len(ident) == 12:
-        match = next(_reconcile(root, ident, review_database=review_database), None)
+        match = next(records(root, ident, review_database=review_database), None)
         if match is None:
             raise FileNotFoundError('Warning screenshot is not available.')
-        _, path, _ = match
+        _, path = match
+        data = _read_png_file(path)
     database_path = root / 'console-data/console.db'
     if database_path.is_symlink() or not database_path.is_file():
         raise ValueError('Flow data is not available.')
@@ -158,16 +165,24 @@ def destroy_screenshot(root, ident, *, review_database=None):
         db.execute('PRAGMA secure_delete=ON')
         db.execute('BEGIN IMMEDIATE')
         db.execute('CREATE TABLE IF NOT EXISTS flow_destroyed_screenshots(id TEXT PRIMARY KEY)')
+        claimed = db.execute('INSERT OR IGNORE INTO flow_destroyed_screenshots VALUES(?)', (ident,)).rowcount
+        if not claimed:
+            raise FileNotFoundError('Warning screenshot is not available.')
         if path is None:
-            changed = db.execute("""UPDATE flow_page_incidents SET screenshot=NULL
-                WHERE id=? AND reviewed IS NULL AND screenshot IS NOT NULL""", (ident,)).rowcount
-            if not changed and not db.execute('SELECT 1 FROM flow_destroyed_screenshots WHERE id=?', (ident,)).fetchone():
+            row = db.execute("""SELECT screenshot FROM flow_page_incidents
+                WHERE id=? AND reviewed IS NULL AND length(screenshot) BETWEEN 1 AND ?""",
+                (ident, MAX_PNG_BYTES)).fetchone()
+            if row is None:
                 raise FileNotFoundError('Warning screenshot is not available.')
-        db.execute('INSERT OR IGNORE INTO flow_destroyed_screenshots VALUES(?)', (ident,))
+            data = _checked_png(row[0])
+            db.execute('UPDATE flow_page_incidents SET screenshot=NULL WHERE id=?', (ident,))
     if path is not None:
-        if path.parent.is_symlink() or path.is_symlink():
-            raise ValueError('Unexpected screenshot path.')
-        path.unlink(missing_ok=True)
+        try:
+            if not path.parent.is_symlink() and not path.is_symlink():
+                path.unlink(missing_ok=True)
+        except OSError:
+            logging.getLogger(__name__).warning('Could not remove viewed Flow screenshot %s', ident)
+    return data
 
 
 def main(argv=None, root=FLOW_ROOT, *, review_database=None):

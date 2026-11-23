@@ -19,14 +19,16 @@ test('Flow page warning shows its own reason and screenshot without a generation
   const warning = vm.runInContext(code, context);
   assert.match(warning, /核对登录时检测到异常活动/);
   assert.match(warning, /\/api\/flow-warning-screenshots\/0123456789abcdef0123456789abcdef\.png/);
-  assert.match(warning, /data-destroy-flow-screenshot="0123456789abcdef0123456789abcdef"/);
+  assert.match(warning, /<form method="post" action="\/api\/flow-warning-screenshots\/0123456789abcdef0123456789abcdef\/view" target="_blank"/);
+  assert.equal((warning.match(/<button\b/g) || []).length, 1);
+  assert.doesNotMatch(warning, /已阅，销毁截图/);
   incident.has_screenshot = false;
   assert.match(vm.runInContext(code, context), /本次未保存截图/);
   incident.destroyed = true;
   const destroyed = vm.runInContext(code, context);
   assert.match(destroyed, /截图已销毁/);
   assert.match(destroyed, /等待人工核查/);
-  assert.doesNotMatch(destroyed, /<img|data-destroy-flow-screenshot/);
+  assert.doesNotMatch(destroyed, /<img|<form/);
 });
 
 test('Flow preflight mismatch explains why the account is blocked without reusing an old screenshot', () => {
@@ -314,7 +316,8 @@ test('the account card shows only the matching failure screenshot', () => {
   context.reason = vm.runInContext("flowAccountReason(account,snapshot,{status:'blocked'},'busy')", context);
   assert.equal(context.reason.taskId, 'stopped');
   const markup = vm.runInContext("flowAccountNoticeMarkup(reason,{id:'123456789abc',task_id:'stopped'})", context);
-  assert.match(markup, /href="\/api\/flow-warning-screenshots\/123456789abc\.png"/);
+  assert.match(markup, /action="\/api\/flow-warning-screenshots\/123456789abc\/view"/);
+  assert.match(markup, /src="\/api\/flow-warning-screenshots\/123456789abc\.png"/);
   assert.match(markup, /<img .*src="\/api\/flow-warning-screenshots\/123456789abc\.png"/);
   assert.doesNotMatch(markup, /失败原因|等待图片回执超时/);
   assert.equal(vm.runInContext("flowAccountNoticeMarkup(reason,null)", context), '');

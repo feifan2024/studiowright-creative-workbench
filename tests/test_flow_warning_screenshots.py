@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 ROOT = Path(__file__).resolve().parents[1] / 'packaging'
 sys.path[:0] = [str(ROOT / name) for name in ('windows', 'ubuntu/snapshot/workbench',
                                             'ubuntu/snapshot/flow/source/src')]
-from flow_warning_archive import current_window_screenshots, destroy_screenshot, purge_reviewed_screenshots, read_png, records, sync_index
+from flow_warning_archive import current_window_screenshots, purge_reviewed_screenshots, read_png, records, sync_index, view_screenshot_once
 from flow_warning_desktop import capture_name, sync_once
 
 try:
@@ -229,8 +229,9 @@ class Delivery(unittest.TestCase):
         with closing(sqlite3.connect(self.root / 'console-data/console.db')) as db, db:
             db.execute("UPDATE accounts SET email='renamed@example.test'")
 
-        for _ in range(2):
-            destroy_screenshot(self.root, JOB_ID, review_database=self.review_database)
+        self.assertEqual(view_screenshot_once(self.root, JOB_ID, review_database=self.review_database), PNG)
+        with self.assertRaises(FileNotFoundError):
+            view_screenshot_once(self.root, JOB_ID, review_database=self.review_database)
         self.assertFalse(source.exists())
         with self.assertRaises(FileNotFoundError):
             self.read('read', JOB_ID)

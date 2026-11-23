@@ -1,5 +1,6 @@
 import base64
 from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from importlib.util import module_from_spec, spec_from_file_location
@@ -17,7 +18,7 @@ from unittest.mock import AsyncMock, Mock, patch
 SNAPSHOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot'
 sys.path[:0] = [str(SNAPSHOT / 'flow/console'), str(SNAPSHOT / 'workbench')]
 from console_store import Store
-from flow_warning_archive import destroy_screenshot, read_page_png
+from flow_warning_archive import read_page_png, view_screenshot_once
 from login_readiness import resume_google_session
 from page_activity_guard import PageActivityWarning, stop_on_page_warning
 from preflight import check_profile, dispatch_check
@@ -98,8 +99,16 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         self.store.record_page_incident('account-b', 'browse', PNG)
         ident = self.store.page_incidents()['account-a']['id']
         self.assertEqual(read_page_png(self.root, ident), PNG)
-        for _ in range(2):
-            destroy_screenshot(self.root, ident)
+        def open_original():
+            try:
+                return view_screenshot_once(self.root, ident)
+            except FileNotFoundError:
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as clients:
+            first = clients.submit(open_original)
+            second = clients.submit(open_original)
+            self.assertCountEqual([first.result(), second.result()], [PNG, None])
         self.store.record_page_incident('account-a', 'browse', PNG)
         holds = self.store.page_incidents()
         self.assertEqual(holds['account-a']['id'], ident)
@@ -109,7 +118,7 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
             read_page_png(self.root, ident)
         self.assertEqual(read_page_png(self.root, holds['account-b']['id']), PNG)
 
-    def test_workbench_requires_explicit_confirmation_before_destroying_preview(self):
+    def test_workbench_previews_without_burning_and_serves_the_original_once(self):
         spec = spec_from_file_location('workbench_screenshot_test', SNAPSHOT / 'workbench/server.py')
         workbench = module_from_spec(spec)
         spec.loader.exec_module(workbench)
@@ -128,15 +137,17 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
                         return response.status, response.read()
 
                     image = f'/api/flow-warning-screenshots/{ident}.png'
-                    destroy = f'/api/flow-warning-screenshots/{ident}/destroy'
+                    view = f'/api/flow-warning-screenshots/{ident}/view'
                     headers = {'Origin': f'http://127.0.0.1:{service.server_port}',
-                               'Content-Type': 'application/json', 'X-Workbench-Request': '1'}
+                               'Content-Type': 'application/x-www-form-urlencoded'}
                     self.assertEqual(request('GET', image), (200, PNG))
-                    self.assertEqual(request('POST', destroy, '{"confirmed":true}')[0], 403)
-                    self.assertEqual(request('POST', destroy, '{"confirmed":false}', headers)[0], 400)
+                    self.assertEqual(request('GET', view)[0], 404)
+                    self.assertEqual(request('POST', view, 'view=original')[0], 403)
+                    self.assertEqual(request('POST', view, 'view=preview!', headers)[0], 400)
                     self.assertEqual(request('GET', image), (200, PNG))
-                    self.assertEqual(request('POST', destroy, '{"confirmed":true}', headers)[0], 200)
+                    self.assertEqual(request('POST', view, 'view=original', headers), (200, PNG))
                     self.assertEqual(request('GET', image)[0], 404)
+                    self.assertEqual(request('POST', view, 'view=original', headers)[0], 404)
             finally:
                 service.shutdown()
                 worker.join()
