@@ -231,16 +231,18 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         console = module.Console.__new__(module.Console)
         console.root, console.store, console.test = self.root, self.store, False
         self.store.record_page_incident('account-b', 'login', PNG)
-        pilot = 'ub-chrome-975371911f'
+        pilots = ['ub-chrome-975371911f', 'account-2f8797411d41',
+                  'ub-chrome-424097083b', 'ub-chrome-e7fc86b674']
         with patch('preflight.dispatch_check', return_value=(False, ['dispatch_locale_missing'])) as check:
-            self.assertEqual(console.dispatch_preflight(['account-a', 'account-b', pilot]), {
-                'account-a': [], 'account-b': ['flow_page_warning'], pilot: ['dispatch_locale_missing'],
-            })
-        check.assert_called_once_with(self.root, pilot)
+            expected = {profile: ['dispatch_locale_missing'] for profile in pilots}
+            expected.update({'account-a': [], 'account-b': ['flow_page_warning']})
+            self.assertEqual(console.dispatch_preflight(['account-a', 'account-b', *pilots]), expected)
+        self.assertEqual([call.args for call in check.call_args_list], [(self.root, profile) for profile in pilots])
 
 
 class ChromeComponentDispatch(unittest.TestCase):
     profile = 'ub-chrome-975371911f'
+    additional_profiles = ('account-2f8797411d41', 'ub-chrome-424097083b', 'ub-chrome-e7fc86b674')
     peer = 'another-profile'
     store_url = 'https://clients2.google.com/service/update2/crx'
 
@@ -256,7 +258,8 @@ class ChromeComponentDispatch(unittest.TestCase):
         policy = self.root / 'console-data/dispatch-locales.json'
         policy.parent.mkdir()
         fields = {'languages': ['zh-CN', 'zh', 'en'], 'timezone': 'America/Chicago'}
-        policy.write_text(json.dumps({profile: fields for profile in (self.profile, self.peer)}), encoding='utf-8')
+        profiles = (self.profile, *self.additional_profiles, self.peer)
+        policy.write_text(json.dumps(dict.fromkeys(profiles, fields)), encoding='utf-8')
 
         resources = {}
         self.records = {}
@@ -269,7 +272,7 @@ class ChromeComponentDispatch(unittest.TestCase):
         manifest['update_url'] = self.store_url
         relative = self.payment + '/1.0.0.6_0'
         self.records[self.payment] = dict(location=10, from_webstore=True, path=relative, manifest=manifest)
-        for profile in (self.profile, self.peer):
+        for profile in profiles:
             folder = self.default(profile) / 'Extensions' / relative
             folder.mkdir(parents=True)
             (folder / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
@@ -278,7 +281,7 @@ class ChromeComponentDispatch(unittest.TestCase):
         self.enterContext(patch('preflight._CHROME_RESOURCE_COMPONENTS', resources))
         self.enterContext(patch('preflight._CHROME_PAYMENTS_COMPONENT', self.payment))
         self.enterContext(patch('preflight._system_timezone', return_value='America/Chicago'))
-        self.enterContext(patch('preflight.mapped_ports', return_value={self.profile: 3101, self.peer: 3102}))
+        self.enterContext(patch('preflight.mapped_ports', return_value=dict(zip(profiles, range(3101, 3106)))))
         self.enterContext(patch('preflight._chrome_processes', return_value=()))
 
     def default(self, profile):
@@ -289,12 +292,14 @@ class ChromeComponentDispatch(unittest.TestCase):
         value = {'extensions': {'settings': records}, 'intl': {'selected_languages': 'zh-CN,zh,en'}}
         (self.default(profile) / name).write_text(json.dumps(value), encoding='utf-8')
 
-    def test_only_selected_account_offline_accepts_the_five_verified_components(self):
+    def test_only_selected_accounts_offline_accept_the_five_verified_components(self):
         denied = False, [f'extension_present:{ident}' for ident in sorted(self.records)]
-        self.assertEqual(dispatch_check(self.root, self.profile), (True, []))
         self.assertEqual(dispatch_check(self.root, self.peer), denied)
         with patch('preflight.collect_browser_fingerprint') as fingerprint:
-            self.assertEqual(dispatch_check(self.root, self.profile, online=True), denied)
+            for profile in (self.profile, *self.additional_profiles):
+                with self.subTest(profile=profile):
+                    self.assertEqual(dispatch_check(self.root, profile), (True, []))
+                    self.assertEqual(dispatch_check(self.root, profile, online=True), denied)
             fingerprint.assert_not_called()
 
     def test_unlisted_extensions_in_either_preferences_file_or_on_disk_are_blocked(self):

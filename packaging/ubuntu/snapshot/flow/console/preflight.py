@@ -13,7 +13,12 @@ from flow_proxy_guard import mapped_ports
 
 PROFILE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 EXTENSION_ID = re.compile(r'[a-p]{32}')
-_CHROME_COMPONENT_PROFILE = 'ub-chrome-975371911f'
+_OFFLINE_PILOT_PROFILES = frozenset({
+    'ub-chrome-975371911f',
+    'account-2f8797411d41',
+    'ub-chrome-424097083b',
+    'ub-chrome-e7fc86b674',
+})
 _CHROME_RESOURCE_COMPONENTS = {
     'admccjkmockfdflocgggjfgdacdodkdf': '/opt/google/chrome/resources/glic_extension',
     'fignfifoniblkonapihmkfakmlgkbkcf': '/opt/google/chrome/resources/network_speech_synthesis/mv3',
@@ -87,7 +92,7 @@ def dispatch_check(root, profile, *, online=False):
             or not isinstance(timezone, str) or not TIMEZONE.fullmatch(timezone)):
         return False, ['dispatch_locale_invalid']
     try:
-        options = {'allow_chrome_components': True} if not online and profile == _CHROME_COMPONENT_PROFILE else {}
+        options = {'allow_chrome_components': True} if not online and profile in _OFFLINE_PILOT_PROFILES else {}
         local = check_profile(root, profile, expected_languages=languages, expected_timezone=timezone, **options)
     except (OSError, RuntimeError, ValueError):
         return False, ['profile_preflight_unavailable']
@@ -97,8 +102,8 @@ def dispatch_check(root, profile, *, online=False):
 
 
 def pilot_dispatch_reasons(root, profile):
-    """Apply the new offline dispatch policy to the pilot account only."""
-    if profile != _CHROME_COMPONENT_PROFILE:
+    """Apply the new offline dispatch policy only to approved profiles."""
+    if profile not in _OFFLINE_PILOT_PROFILES:
         return []
     return dispatch_check(root, profile)[1]
 
@@ -322,7 +327,7 @@ def check_profile(root, profile, *, expected_languages=None, expected_timezone=N
     settings = _extension_settings(preferences)
     if not isinstance(settings, dict):
         reasons.append('extension_settings_invalid')
-    elif allow_chrome_components and profile == _CHROME_COMPONENT_PROFILE:
+    elif allow_chrome_components and profile in _OFFLINE_PILOT_PROFILES:
         try:
             extension_ids = _unexpected_extensions(default, settings, extension_ids)
         except (OSError, ValueError):
