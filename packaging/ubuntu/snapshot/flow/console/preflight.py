@@ -1,5 +1,6 @@
 """Read-only checks for a managed Flow Chrome profile."""
 import asyncio
+import base64
 import hashlib
 from pathlib import Path
 import json
@@ -12,6 +13,18 @@ from flow_proxy_guard import mapped_ports
 
 PROFILE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 EXTENSION_ID = re.compile(r'[a-p]{32}')
+_CHROME_COMPONENT_PROFILE = 'ub-chrome-975371911f'
+_CHROME_RESOURCE_COMPONENTS = {
+    'admccjkmockfdflocgggjfgdacdodkdf': '/opt/google/chrome/resources/glic_extension',
+    'fignfifoniblkonapihmkfakmlgkbkcf': '/opt/google/chrome/resources/network_speech_synthesis/mv3',
+    'mhjfbmdgcfjbbpaeojofohoefgiehjai': '/opt/google/chrome/resources/pdf',
+    'nkeimhogjdpnpccoofpliimaahmaaome': '/opt/google/chrome/resources/hangout_services',
+}
+_CHROME_PAYMENTS_COMPONENT = 'nmmhkkegccagdldgiimedpiccmgmieda'
+_CHROME_STORE_UPDATE_URL = 'https://clients2.google.com/service/update2/crx'
+# Chromium's ManifestLocation values for browser components.
+_CHROME_COMPONENT = 5
+_CHROME_EXTERNAL_COMPONENT = 10
 CHROME_NAMES = {'chrome', 'chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable'}
 DISALLOWED_FLAGS = (
     '--load-extension', '--disable-extensions-except', '--no-proxy-server',
@@ -74,7 +87,8 @@ def dispatch_check(root, profile, *, online=False):
             or not isinstance(timezone, str) or not TIMEZONE.fullmatch(timezone)):
         return False, ['dispatch_locale_invalid']
     try:
-        local = check_profile(root, profile, expected_languages=languages, expected_timezone=timezone)
+        options = {'allow_chrome_components': True} if not online and profile == _CHROME_COMPONENT_PROFILE else {}
+        local = check_profile(root, profile, expected_languages=languages, expected_timezone=timezone, **options)
     except (OSError, RuntimeError, ValueError):
         return False, ['profile_preflight_unavailable']
     if not online or not local[0]:
@@ -193,7 +207,74 @@ def _system_timezone():
         return name
 
 
-def check_profile(root, profile, *, expected_languages=None, expected_timezone=None, proc_root=Path('/proc')):
+def _manifest_key(manifest, ident):
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('key'), str):
+        return None
+    key = manifest['key']
+    try:
+        digest = hashlib.sha256(base64.b64decode(key, validate=True)).hexdigest()[:32]
+    except ValueError:
+        return None
+    return key if digest.translate(str.maketrans('0123456789abcdef', 'abcdefghijklmnop')) == ident else None
+
+
+def _allowed_chrome_component(default, ident, entry, on_disk):
+    resource = _CHROME_RESOURCE_COMPONENTS.get(ident)
+    if (resource is None and ident != _CHROME_PAYMENTS_COMPONENT) or not isinstance(entry, dict):
+        return False
+    manifest = entry.get('manifest')
+    key = _manifest_key(manifest, ident)
+    if not key:
+        return False
+    if resource is not None:
+        return (entry.get('location') == _CHROME_COMPONENT and entry.get('from_webstore') is False
+                and entry.get('path') == resource and not on_disk)
+
+    relative = entry.get('path')
+    if (entry.get('location') != _CHROME_EXTERNAL_COMPONENT or entry.get('from_webstore') is not True
+            or not isinstance(relative, str) or not re.fullmatch(ident + r'/[0-9]+(?:\.[0-9]+){0,3}_[0-9]+', relative)
+            or not on_disk or manifest.get('update_url') != _CHROME_STORE_UPDATE_URL):
+        return False
+    extensions = default / 'Extensions'
+    folder = extensions / relative
+    path = folder / 'manifest.json'
+    try:
+        if (any(p.is_symlink() for p in (extensions, folder.parent, folder, path))
+                or not path.is_file() or path.stat().st_size > 65536):
+            return False
+        disk_manifest = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    return (_manifest_key(disk_manifest, ident) == key
+            and disk_manifest.get('update_url') == _CHROME_STORE_UPDATE_URL)
+
+
+def _extension_settings(preferences):
+    extensions = preferences.get('extensions', {}) if isinstance(preferences, dict) else None
+    return extensions.get('settings', {}) if isinstance(extensions, dict) else None
+
+
+def _unexpected_extensions(default, settings, on_disk):
+    secure_path = default / 'Secure Preferences'
+    secure = {}
+    if secure_path.is_symlink():
+        raise ValueError('unexpected secure preferences symlink')
+    if secure_path.exists():
+        if not secure_path.is_file() or secure_path.stat().st_size > 8 * 1024 * 1024:
+            raise ValueError('invalid secure preferences file')
+        secure = _extension_settings(json.loads(secure_path.read_text(encoding='utf-8')))
+        if not isinstance(secure, dict):
+            raise ValueError('invalid secure extension settings')
+    unexpected = on_disk.difference(settings, secure)
+    for source in (settings, secure):
+        unexpected.update(ident for ident, entry in source.items()
+                          if EXTENSION_ID.fullmatch(ident)
+                          and not _allowed_chrome_component(default, ident, entry, ident in on_disk))
+    return unexpected
+
+
+def check_profile(root, profile, *, expected_languages=None, expected_timezone=None, proc_root=Path('/proc'),
+                  allow_chrome_components=False):
     """Return (ok, reasons), without opening Chrome or making network requests.
 
     `root` is the Flow install directory. Optional expectations come from the
@@ -231,10 +312,15 @@ def check_profile(root, profile, *, expected_languages=None, expected_timezone=N
     except (OSError, ValueError):
         reasons.append('preferences_unreadable')
         preferences = {}
-    extension_settings = preferences.get('extensions', {})
-    settings = extension_settings.get('settings', {}) if isinstance(extension_settings, dict) else None
+    settings = _extension_settings(preferences)
     if not isinstance(settings, dict):
         reasons.append('extension_settings_invalid')
+    elif allow_chrome_components and profile == _CHROME_COMPONENT_PROFILE:
+        try:
+            extension_ids = _unexpected_extensions(default, settings, extension_ids)
+        except (OSError, ValueError):
+            reasons.append('extension_settings_invalid')
+            extension_ids.update(name for name in settings if EXTENSION_ID.fullmatch(name))
     else:
         extension_ids.update(name for name in settings if EXTENSION_ID.fullmatch(name))
     reasons.extend(f'extension_present:{name}' for name in sorted(extension_ids))

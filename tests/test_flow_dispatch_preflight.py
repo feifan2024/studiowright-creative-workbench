@@ -1,6 +1,8 @@
 import base64
+import copy
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from importlib.util import module_from_spec, spec_from_file_location
@@ -219,6 +221,104 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.task(task['id'])['status'], 'queued')
         self.assertEqual(console.busy, set())
         self.assertEqual(console.adapter.mock_calls, [])
+
+
+class ChromeComponentDispatch(unittest.TestCase):
+    profile = 'ub-chrome-975371911f'
+    peer = 'another-profile'
+    store_url = 'https://clients2.google.com/service/update2/crx'
+
+    @staticmethod
+    def manifest(label):
+        key = label.encode('ascii')
+        digest = hashlib.sha256(key).hexdigest()[:32]
+        ident = digest.translate(str.maketrans('0123456789abcdef', 'abcdefghijklmnop'))
+        return ident, {'key': base64.b64encode(key).decode('ascii')}
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        policy = self.root / 'console-data/dispatch-locales.json'
+        policy.parent.mkdir()
+        fields = {'languages': ['zh-CN', 'zh', 'en'], 'timezone': 'America/Chicago'}
+        policy.write_text(json.dumps({profile: fields for profile in (self.profile, self.peer)}), encoding='utf-8')
+
+        resources = {}
+        self.records = {}
+        for name in ('gemini', 'network-speech', 'pdf', 'hangouts'):
+            ident, manifest = self.manifest(name)
+            resources[ident] = '/opt/google/chrome/resources/' + name
+            self.records[ident] = dict(location=5, from_webstore=False, path=resources[ident], manifest=manifest)
+        self.builtin = next(iter(resources))
+        self.payment, manifest = self.manifest('payments')
+        manifest['update_url'] = self.store_url
+        relative = self.payment + '/1.0.0.6_0'
+        self.records[self.payment] = dict(location=10, from_webstore=True, path=relative, manifest=manifest)
+        for profile in (self.profile, self.peer):
+            folder = self.default(profile) / 'Extensions' / relative
+            folder.mkdir(parents=True)
+            (folder / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+            self.write_prefs(profile, self.records)
+        self.payment_manifest = self.default(self.profile) / 'Extensions' / relative / 'manifest.json'
+        self.enterContext(patch('preflight._CHROME_RESOURCE_COMPONENTS', resources))
+        self.enterContext(patch('preflight._CHROME_PAYMENTS_COMPONENT', self.payment))
+        self.enterContext(patch('preflight._system_timezone', return_value='America/Chicago'))
+        self.enterContext(patch('preflight.mapped_ports', return_value={self.profile: 3101, self.peer: 3102}))
+        self.enterContext(patch('preflight._chrome_processes', return_value=()))
+
+    def default(self, profile):
+        return self.root / 'data/profiles' / profile / 'Default'
+
+    def write_prefs(self, profile, records, *, secure=False):
+        name = 'Secure Preferences' if secure else 'Preferences'
+        value = {'extensions': {'settings': records}, 'intl': {'selected_languages': 'zh-CN,zh,en'}}
+        (self.default(profile) / name).write_text(json.dumps(value), encoding='utf-8')
+
+    def test_only_selected_account_offline_accepts_the_five_verified_components(self):
+        denied = False, [f'extension_present:{ident}' for ident in sorted(self.records)]
+        self.assertEqual(dispatch_check(self.root, self.profile), (True, []))
+        self.assertEqual(dispatch_check(self.root, self.peer), denied)
+        with patch('preflight.collect_browser_fingerprint') as fingerprint:
+            self.assertEqual(dispatch_check(self.root, self.profile, online=True), denied)
+            fingerprint.assert_not_called()
+
+    def test_unlisted_extensions_in_either_preferences_file_or_on_disk_are_blocked(self):
+        extra, manifest = self.manifest('unlisted-component')
+        record = dict(location=5, from_webstore=False, path='/opt/google/chrome/resources/other', manifest=manifest)
+        denied = False, [f'extension_present:{extra}']
+        self.write_prefs(self.profile, dict(self.records, **{extra: record}))
+        self.assertEqual(dispatch_check(self.root, self.profile), denied)
+        self.write_prefs(self.profile, self.records)
+        self.write_prefs(self.profile, {extra: record}, secure=True)
+        self.assertEqual(dispatch_check(self.root, self.profile), denied)
+        (self.default(self.profile) / 'Secure Preferences').unlink()
+        (self.default(self.profile) / 'Extensions' / extra).mkdir()
+        self.assertEqual(dispatch_check(self.root, self.profile), denied)
+
+    def test_recognized_id_still_requires_the_verified_installation_source(self):
+        changes = {
+            self.builtin: {'location': 4, 'path': '/tmp/lookalike', 'manifest': {'key': 'wrong'}},
+            self.payment: {'from_webstore': False, 'path': f'{self.payment}/../1.0.0.6_0'},
+        }
+        for ident, fields in changes.items():
+            for field, value in fields.items():
+                with self.subTest(ident=ident, field=field):
+                    records = copy.deepcopy(self.records)
+                    records[ident][field] = value
+                    self.write_prefs(self.profile, records)
+                    self.assertEqual(dispatch_check(self.root, self.profile), (False, [f'extension_present:{ident}']))
+        self.write_prefs(self.profile, self.records)
+        (self.default(self.profile) / 'Extensions' / self.builtin).mkdir()
+        self.assertEqual(dispatch_check(self.root, self.profile), (False, [f'extension_present:{self.builtin}']))
+
+    def test_component_records_that_disagree_with_secure_preferences_or_disk_are_blocked(self):
+        self.write_prefs(self.profile, {self.builtin: dict(self.records[self.builtin], location=4)}, secure=True)
+        self.assertEqual(dispatch_check(self.root, self.profile), (False, [f'extension_present:{self.builtin}']))
+        (self.default(self.profile) / 'Secure Preferences').unlink()
+        self.payment_manifest.write_text(json.dumps(dict(self.records[self.payment]['manifest'], key='wrong')),
+                                         encoding='utf-8')
+        self.assertEqual(dispatch_check(self.root, self.profile), (False, [f'extension_present:{self.payment}']))
+        self.payment_manifest.unlink()
+        self.assertEqual(dispatch_check(self.root, self.profile), (False, [f'extension_present:{self.payment}']))
 
 
 class OnlineDispatch(unittest.TestCase):

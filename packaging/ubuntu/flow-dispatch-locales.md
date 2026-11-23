@@ -13,6 +13,8 @@
 
 语言按 Chrome 设置中的顺序核对，时区使用 Ubuntu 当前配置的 IANA 时区名称。缺少配置、浏览器语言或系统时区不匹配，以及扩展或代理自检失败时，账号的图片和视频任务会留在队列。
 
+`ub-chrome-975371911f` 的离线派发自检允许 Gemini in Chrome、Google Network Speech、Chrome PDF Viewer、Google Hangouts 和 Chrome Web Store Payments。每项都核对组件 ID、清单公钥和安装来源。其他扩展、来源不符的组件会继续拦截。其他账号以及可选在线自检仍按原规则检查扩展。
+
 后台在核对登录或检查已连接的 Flow 页面时遇到异常活动提示，会先尝试保存截图，再停派该账号。在工作台账号卡片上核查后可手动解除这条停派记录。其他派发限制仍会逐项核对。
 
 ## Windows 同步新增账号的代理
