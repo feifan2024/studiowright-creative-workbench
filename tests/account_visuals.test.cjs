@@ -35,23 +35,27 @@ test('opening the original removes the thumbnail immediately and survives a stal
   const id = '123456789abc';
   const button = {disabled:false};
   let removed = 0;
-  let popupUrl = '';
+  let drawn = 0;
   let status = 503;
-  const popup = {opener:{}, location:{replace:url=>{popupUrl=url;}}, close(){}};
+  const canvas = {hidden:true, getContext:()=>({drawImage(){drawn++;}})};
+  const message = {hidden:false};
+  const viewer = {open:true, querySelector:selector=>selector === 'canvas' ? canvas : message};
+  const localStorage = {setItem(key, value){ this[key]=value; }};
   const form = {dataset:{flowScreenshot:id}, action:'/api/flow-warning-screenshots/'+id+'/view',
     querySelector:()=>button, remove:()=>{removed++;}};
   const event = {target:{closest:()=>form}, preventDefault(){}};
   const context = vm.createContext({id,event,
-    window:{open:()=>popup}, URLSearchParams, AbortSignal,
-    URL:{createObjectURL:()=> 'blob:fixture'}, setTimeout:()=>{},
-    $:()=>({}), accountActionsInFlight:new Set(),
+    URLSearchParams, AbortSignal, localStorage, viewedFlowScreenshotsKey:'flowViewedScreenshots',
+    showFlowScreenshotViewer:()=>viewer,
+    createImageBitmap:async ()=>({width:192,height:100,close(){}}),
+    accountActionsInFlight:new Set(),
     fetch:async (path, options)=>{
       assert.equal(path, form.action);
       assert.equal(options.body.toString(), 'view=original');
       return {status, ok:status===200, blob:async()=>({type:'image/png'})};
     }
   });
-  for (const name of ['esc','flowAccountNoticeMarkup','openFlowScreenshot']) load(name, context);
+  for (const name of ['esc','markFlowScreenshotViewed','flowAccountNoticeMarkup','openFlowScreenshot']) load(name, context);
   await vm.runInContext('openFlowScreenshot(event)', context);
   assert.equal(removed, 0);
   const render = () => vm.runInContext("flowAccountNoticeMarkup({label:'Flow 失败原因', text:'生成失败'}, {id})", context);
@@ -59,8 +63,9 @@ test('opening the original removes the thumbnail immediately and survives a stal
   status = 200;
   await vm.runInContext('openFlowScreenshot(event)', context);
   assert.equal(removed, 1);
-  assert.equal(popupUrl, 'blob:fixture');
-  assert.equal(popup.opener, null);
+  assert.equal(drawn, 1);
+  assert.equal(canvas.hidden, false);
+  assert.deepEqual(JSON.parse(localStorage.flowViewedScreenshots), [id]);
   assert.match(render(), /生成失败/);
   assert.doesNotMatch(render(), /<form|<img|截图/);
 });

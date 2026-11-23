@@ -289,6 +289,19 @@ function flowAccountReason(account, snapshot, row, pageState) {
 }
 
 const viewedFlowScreenshots = new Set();
+const viewedFlowScreenshotsKey = 'flowViewedScreenshots';
+try {
+  for (const id of JSON.parse(localStorage.getItem(viewedFlowScreenshotsKey) || '[]').slice(-256)) {
+    if (/^(?:[a-f0-9]{12}|[a-f0-9]{32})$/.test(id)) viewedFlowScreenshots.add(id);
+  }
+} catch (_) { /* The server still tracks views if local storage is unavailable. */ }
+
+function markFlowScreenshotViewed(id) {
+  viewedFlowScreenshots.add(id);
+  try {
+    localStorage.setItem(viewedFlowScreenshotsKey, JSON.stringify([...viewedFlowScreenshots].slice(-256)));
+  } catch (_) { /* The current page still hides the screenshot. */ }
+}
 
 function flowAccountNoticeMarkup(reason, screenshot) {
   const id = screenshot?.id;
@@ -300,10 +313,22 @@ function flowAccountNoticeMarkup(reason, screenshot) {
   if (matches && !reason?.noScreenshot && screenshot?.has_screenshot !== false &&
       /^(?:[a-f0-9]{12}|[a-f0-9]{32})$/.test(id)) {
     const path = '/api/flow-warning-screenshots/' + id;
-    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<form method="post" action="${path}/view" target="_blank" rel="noopener" data-flow-screenshot="${id}"><button class="account-flow-warning" type="submit" name="view" value="original" title="打开原图，阅后即焚"><img src="${path}.png" width="192" loading="lazy" alt="打开 Flow 警告原图，阅后即焚"></button></form>`;
+    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<form method="post" action="${path}/view" target="_blank" rel="noopener" data-flow-screenshot="${id}"><button class="account-flow-warning" type="submit" name="view" value="original" title="打开原图，阅后即焚"><img src="${path}.png" width="192" loading="lazy" draggable="false" alt="打开 Flow 警告原图，阅后即焚"></button></form>`;
   }
   if (!notice) return '';
   return `<p class="account-flow-reason">${notice}${reason.taskId || reason.screenshotMissing ? ' 本次未保存截图。' : ''}</p>`;
+}
+
+function showFlowScreenshotViewer() {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'library-dialog flow-screenshot-viewer';
+  dialog.setAttribute('aria-label', 'Flow 警告原图');
+  dialog.innerHTML = '<header class="library-dialog-header"><h2>Flow 警告原图</h2><button type="button" class="button button-light">关闭</button></header><p role="status">正在打开原图…</p><canvas role="img" aria-label="Flow 警告原图" hidden></canvas>';
+  dialog.querySelector('button').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => dialog.remove(), {once:true});
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
 }
 
 async function openFlowScreenshot(event) {
@@ -313,37 +338,37 @@ async function openFlowScreenshot(event) {
   const id = form.dataset.flowScreenshot;
   const button = form.querySelector('button');
   if (button.disabled || viewedFlowScreenshots.has(id)) return;
-  const popup = window.open('about:blank', '_blank');
-  if (!popup) {
-    $('accountActionMessage').textContent = '请允许工作台打开原图窗口。';
-    return;
-  }
-  popup.opener = null;
+  const viewer = showFlowScreenshotViewer();
+  const status = viewer.querySelector('[role="status"]');
   button.disabled = true;
   accountActionsInFlight.add(button);
   try {
     const response = await fetch(form.action, {method:'POST', credentials:'same-origin', cache:'no-store',
       body:new URLSearchParams({view:'original'}), signal:AbortSignal.timeout(12000)});
     if (!response.ok && response.status !== 404) throw new Error('原图暂不可读取，请稍后再试。');
-    viewedFlowScreenshots.add(id);
+    markFlowScreenshotViewed(id);
     form.remove();
     if (response.status === 404) {
-      popup.close();
+      status.textContent = '这张截图已不可读取。';
       return;
     }
     const image = await response.blob();
     if (image.type !== 'image/png') throw new Error('没有收到原图。');
-    if (!popup.closed) {
-      const url = URL.createObjectURL(image);
+    if (viewer.open) {
+      const bitmap = await createImageBitmap(image);
       try {
-        popup.location.replace(url);
+        const canvas = viewer.querySelector('canvas');
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+        canvas.hidden = false;
+        status.hidden = true;
       } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        bitmap.close();
       }
     }
   } catch (error) {
-    popup.close();
-    $('accountActionMessage').textContent = error.message || '原图暂不可读取，请稍后再试。';
+    status.textContent = error.message || '原图暂不可读取，请稍后再试。';
   } finally {
     accountActionsInFlight.delete(button);
     button.disabled = false;
