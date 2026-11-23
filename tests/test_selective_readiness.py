@@ -74,10 +74,11 @@ class SelectiveReadiness(unittest.TestCase):
 
     def test_flow_targets_exclude_ready_disabled_busy_and_review(self):
         accounts=[dict(profile=k,repairable=k!='paused',review_task='old' if k=='review' else None)
-                  for k in ['healthy','paused','busy','pagebusy','review','broken']]
+                  for k in ['healthy','paused','busy','pagebusy','review','broken','google_check','login']]
         payload=dict(accounts=accounts,busy=['busy'])
-        checks=dict(healthy='ok',paused='binding',busy='binding',pagebusy='busy',review='draft',broken='binding')
+        checks=dict(healthy='ok',paused='binding',busy='binding',pagebusy='busy',review='draft',broken='binding',
+                    google_check='verification_required',login='login')
         self.assertEqual([a['profile'] for a in readiness_repair_accounts(payload,checks)],['broken'])
-        self.assertEqual(len(payload['accounts']),6)
+        self.assertEqual(len(payload['accounts']),8)
 
 if __name__=='__main__':unittest.main()

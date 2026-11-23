@@ -1,10 +1,13 @@
+import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot/workbench'))
 import flow_readiness_recovery as recovery
+import flow_check_readiness as readiness
 
 
 PROJECT = 'https://flow.google.com/project/11111111-1111-4111-8111-111111111111'
@@ -12,6 +15,39 @@ STATE = dict(origin=True, account=True, path=PROJECT.removeprefix('https://flow.
 
 
 class FlowOverlayReload(unittest.IsolatedAsyncioTestCase):
+    async def test_bound_google_challenge_is_reported_without_reading_login_page(self):
+        account = dict(profile='profile-a', key='flow-account-key', projects=[PROJECT.rsplit('/', 1)[1]])
+        binding = dict(binding_state='verified', account_key='key', browser_pid=100, port=9222,
+                       process_start='stamp', page_target='fixed', project_url=PROJECT,
+                       window_id=12, workspace=0, chrome_window=34)
+        target = dict(id='fixed', url='https://accounts.google.com/v3/signin/challenge/pwd',
+                      webSocketDebuggerUrl='ws://127.0.0.1:9222/devtools/page/fixed')
+        unrelated = dict(target, id='other')
+        for pages, window_id, expected in (([target, unrelated], 34, 'verification_required'),
+                                            ([unrelated], 34, 'binding'), ([target], 56, 'binding')):
+            with self.subTest(expected=expected, window_id=window_id):
+                socket = SimpleNamespace(send=AsyncMock(), recv=AsyncMock(return_value=json.dumps({
+                    'result': {'windowId': window_id}})))
+                session = MagicMock()
+                session.__aenter__.return_value = socket
+                fake_websockets = SimpleNamespace(connect=MagicMock(return_value=session))
+                with patch.dict(sys.modules, websockets=fake_websockets), \
+                        patch.object(readiness, 'process_identity', return_value=('profile-a', 'stamp')), \
+                        patch.object(readiness, '_pages', return_value=pages) as inventory, \
+                        patch.object(readiness, 'focus_call', return_value=[{'id': 12, 'workspace': 0}]):
+                    self.assertEqual(await readiness.inspect_page(account, binding), expected)
+                inventory.assert_called_once_with('key', 100, 9222, include_non_flow=True)
+                self.assertEqual([json.loads(call.args[0])['method'] for call in socket.send.await_args_list],
+                                 ['Browser.getWindowForTarget'] if target in pages else [])
+
+    def test_login_url_classifier_requires_the_google_origin(self):
+        self.assertEqual(readiness.google_login_page('https://accounts.google.com/signin/v2/challenge/selection'),
+                         'verification_required')
+        self.assertEqual(readiness.google_login_page('https://accounts.google.com/v3/signin/identifier'), 'login')
+        for url in ('https://accounts.google.com.example.org/signin/challenge',
+                    'https://accounts.google.com/ManageAccount?next=/signin/challenge', PROJECT):
+            self.assertIsNone(readiness.google_login_page(url))
+
     async def test_refreshes_same_project_and_checks_new_document(self):
         loaded = dict(STATE, overlay=False, editor=True)
         old = {'frameTree': {'frame': {'url': PROJECT, 'loaderId': 'old'}}}

@@ -82,6 +82,30 @@ test('Flow preflight mismatch explains why the account is blocked without reusin
   assert.doesNotMatch(message, /warning-screenshots/);
 });
 
+test('Flow reports a verified Google challenge before stale balances and clears it when the editor is ready', () => {
+  const account = {profile:'a',flow_login:'verified',flow_health:'attention',flow_balance_fresh:false,
+    flow_balance_error:'未找到该账号登记的 Flow 固定任务页',flow_risk_known:true,flow_pacing_known:true};
+  const snapshot = {flow_state:{available:true}, real_accounts:{available:true,items:[account]},
+    flow_coordination:{desktop_keyboard_ready:true,window_lifecycle_available:true,window_bindings_available:true,
+      windows:[{profile:'a',state:'idle'}],window_lifecycle:[{profile:'a',unique_ok:1}],
+      window_bindings:[{profile:'a',binding_state:'verified'}]}};
+  const checks = {accounts:{a:'verification_required'}};
+  const context = vm.createContext({account,snapshot,checks,flowReadinessObservation:null,flowWindowIssue:()=>null});
+  for (const name of ['accountIssues','flowGovernance','auditFlowAccounts','flowAccountReason','flowOccupiedSlots']) load(name,context);
+  const row = () => vm.runInContext('auditFlowAccounts(snapshot,{available:true,active:0,maximum:1},checks,1)[0]',context);
+  assert.equal(row().issues[0].title,'Google 要求重新验证');
+  assert.equal(row().status,'blocked');
+  assert.match(vm.runInContext("flowAccountReason(account,snapshot,{},'verification_required').text",context), /Ubuntu 浏览器完成 Google 验证/);
+  checks.accounts.a = 'ok';
+  assert.equal(row().issues.length,1);
+  assert.equal(row().issues[0].title,'任务页已就绪，积分待核对');
+  assert.equal(row().status,'blocked');
+  account.flow_balance_fresh = true;
+  account.flow_balance = 1050;
+  account.flow_health = 'ready';
+  assert.equal(row().status,'ready');
+});
+
 test('overview renders one shared quota card with both time windows', () => {
   const now = 1800000000;
   const target = {

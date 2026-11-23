@@ -54,6 +54,18 @@ def page_verdict(state):
     return 'ok' if state.get('editor') else 'editor'
 
 
+def google_login_page(url):
+    location = urlsplit(url)
+    if (location.scheme, location.netloc) != ('https', 'accounts.google.com'):
+        return None
+    path = location.path.lower().strip('/').split('/')
+    if 'signin' in path:
+        return 'verification_required' if 'challenge' in path else 'login'
+    if path[0] in ('servicelogin', 'accountchooser'):
+        return 'login'
+    return None
+
+
 async def inspect_page(account, binding):
     import websockets
     profile = account['profile']
@@ -63,16 +75,21 @@ async def inspect_page(account, binding):
     pid, port = binding['browser_pid'], binding['port']
     if process_identity(pid, key, port) != (profile, binding['process_start']):
         return 'binding'
-    pages = await asyncio.to_thread(_pages, key, pid, port)
+    pages = await asyncio.to_thread(_pages, key, pid, port, include_non_flow=True)
     pages = [page for page in pages if page.get('id') == binding['page_target']]
     if len(pages) != 1:
         return 'binding'
     page = pages[0]
-    if page['id'] != binding['page_target']:
-        return 'binding'
     project = canonical_project_url(binding['project_url'])
-    if canonical_project_url(page['url']) != project or project.rsplit('/', 1)[1] not in account['projects']:
+    if project.rsplit('/', 1)[1] not in account['projects']:
         return 'project'
+    login_page = google_login_page(page['url'])
+    if not login_page:
+        try:
+            if canonical_project_url(page['url']) != project:
+                return 'project'
+        except ValueError:
+            return 'project'
     windows = await asyncio.to_thread(focus_call, 'List', pid)
     if sum(w.get('id') == binding['window_id'] and w.get('workspace') == binding['workspace'] for w in windows) != 1:
         return 'binding'
@@ -80,13 +97,15 @@ async def inspect_page(account, binding):
     if (endpoint.scheme, endpoint.netloc, endpoint.path, endpoint.query, endpoint.fragment) != (
             'ws', f'127.0.0.1:{port}', '/devtools/page/' + page['id'], '', ''):
         return 'binding'
-    # Return flags only. Do not return prompt text or account credentials.
-    expression = composer_expression(account['email'])
     async with websockets.connect(endpoint.geturl(), open_timeout=2, close_timeout=1, max_size=65536) as ws:
         await ws.send(json.dumps({'id': 1, 'method': 'Browser.getWindowForTarget', 'params': {'targetId': page['id']}}))
         window = json.loads(await ws.recv()).get('result', {}).get('windowId')
         if window != binding['chrome_window']:
             return 'binding'
+        if login_page:
+            return login_page
+        # Return flags only. Do not return prompt text or account credentials.
+        expression = composer_expression(account['email'])
         await ws.send(json.dumps({'id': 2, 'method': 'Runtime.evaluate',
                                   'params': {'expression': expression, 'returnByValue': True}}))
         state = json.loads(await ws.recv()).get('result', {}).get('result', {}).get('value', {})

@@ -59,7 +59,7 @@ def mark(key, status, reason=None):
                    (key, status, time.time(), reason))
 
 
-def _pages(key, pid, port):
+def _pages(key, pid, port, *, include_non_flow=False):
     from shared_session_controller import process_args
     args = process_args(str(pid))
     profiles = [a.split('=', 1)[1] for a in args if a.startswith('--user-data-dir=')]
@@ -73,7 +73,7 @@ def _pages(key, pid, port):
     if len(raw) > 4*1024*1024:
         raise ValueError('browser_inventory_too_large')
     return [p for p in json.loads(raw) if p.get('type') == 'page' and
-            p.get('url', '').startswith('https://flow.google.com/')]
+            (include_non_flow or p.get('url', '').startswith('https://flow.google.com/'))]
 
 
 def flow_only_ready(key):

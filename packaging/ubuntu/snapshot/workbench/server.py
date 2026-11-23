@@ -674,7 +674,7 @@ def readiness_repair_accounts(payload, checks):
     busy = set(payload.get('busy', []))
     return [a for a in payload['accounts']
             if a['repairable'] and a['profile'] not in busy and not a['review_task']
-            and checks.get(a['profile']) not in ('ok', 'busy')]
+            and checks.get(a['profile']) not in ('ok', 'busy', 'login', 'verification_required')]
 
 
 class Sources:
@@ -1068,7 +1068,8 @@ class Sources:
         result = subprocess.run([str(python),'-B',str(helper)], input=json.dumps(payload).encode(),
                                 capture_output=True, check=True, timeout=10)
         checks = json.loads(result.stdout)
-        allowed = {'ok','busy','binding','unique','project','login','load_failed','draft','overlay','editor','unconfirmed'}
+        allowed = {'ok','busy','binding','unique','project','login','verification_required',
+                   'load_failed','draft','overlay','editor','unconfirmed'}
         if not isinstance(checks,dict) or any(v not in allowed for v in checks.values()):
             raise ValueError('invalid_readiness_result')
         for profile, item in repairs.items():
