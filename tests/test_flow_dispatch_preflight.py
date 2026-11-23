@@ -233,7 +233,8 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
         self.store.record_page_incident('account-b', 'login', PNG)
         pilots = ['ub-chrome-975371911f', 'account-2f8797411d41',
                   'ub-chrome-424097083b', 'ub-chrome-e7fc86b674',
-                  'account-1', 'ub-chrome-2a0f1cbdca', 'ub-chrome-b5f593c253']
+                  'account-1', 'ub-chrome-2a0f1cbdca', 'ub-chrome-b5f593c253',
+                  'account-f8d81e309793', 'ub-chrome-748b00e533', 'ub-chrome-f8f5d94158']
         with patch('preflight.dispatch_check', return_value=(False, ['dispatch_locale_missing'])) as check:
             expected = {profile: ['dispatch_locale_missing'] for profile in pilots}
             expected.update({'account-a': [], 'account-b': ['flow_page_warning']})
@@ -244,7 +245,8 @@ class LocalState(unittest.IsolatedAsyncioTestCase):
 class ChromeComponentDispatch(unittest.TestCase):
     profile = 'ub-chrome-975371911f'
     additional_profiles = ('account-2f8797411d41', 'ub-chrome-424097083b', 'ub-chrome-e7fc86b674',
-                           'account-1', 'ub-chrome-2a0f1cbdca', 'ub-chrome-b5f593c253')
+                           'account-1', 'ub-chrome-2a0f1cbdca', 'ub-chrome-b5f593c253',
+                           'account-f8d81e309793', 'ub-chrome-748b00e533', 'ub-chrome-f8f5d94158')
     peer = 'another-profile'
     store_url = 'https://clients2.google.com/service/update2/crx'
 
@@ -318,6 +320,32 @@ class ChromeComponentDispatch(unittest.TestCase):
         (self.default(self.profile) / 'Extensions' / extra).mkdir()
         self.assertEqual(dispatch_check(self.root, self.profile), denied)
 
+    def test_extra_chrome_components_require_their_approved_profile_and_installation(self):
+        docs, dictation = 'account-f8d81e309793', 'ub-chrome-f8f5d94158'
+        for profile, label in ((docs, 'docs_offline'), (dictation, 'dictation_connector')):
+            with self.subTest(profile=profile):
+                ident, manifest = self.manifest(label)
+                if profile == docs:
+                    manifest['update_url'] = self.store_url
+                    root = self.default(profile) / 'Extensions' / ident / '1.112.1_0'
+                    entry = dict(location=6, from_webstore=True, was_installed_by_default=True,
+                                 path=f'{ident}/1.112.1_0')
+                else:
+                    root = self.default(profile).parent / 'DictationConnector/20260928.1'
+                    entry = dict(location=5, from_webstore=False, path=str(root))
+                metadata = root / '_metadata/verified_contents.json'
+                metadata.parent.mkdir(parents=True)
+                metadata.write_text('[]', encoding='utf-8')
+                (root / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+                record = dict(entry, manifest=manifest)
+                self.write_prefs(profile, dict(self.records, **{ident: record}))
+                with patch('preflight._CHROME_' + label.upper(), ident):
+                    self.assertEqual(dispatch_check(self.root, profile), (True, []))
+                    self.write_prefs(self.profile, dict(self.records, **{ident: record}))
+                    self.assertEqual(dispatch_check(self.root, self.profile),
+                                     (False, [f'extension_present:{ident}']))
+                    metadata.unlink()
+                    self.assertEqual(dispatch_check(self.root, profile), (False, [f'extension_present:{ident}']))
     def test_recognized_id_still_requires_the_verified_installation_source(self):
         changes = {
             self.builtin: {'location': 4, 'path': '/tmp/lookalike', 'manifest': {'key': 'wrong'}},

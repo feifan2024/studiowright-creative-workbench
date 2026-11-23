@@ -21,6 +21,9 @@ _OFFLINE_PILOT_PROFILES = frozenset({
     'account-1',
     'ub-chrome-2a0f1cbdca',
     'ub-chrome-b5f593c253',
+    'account-f8d81e309793',
+    'ub-chrome-748b00e533',
+    'ub-chrome-f8f5d94158',
 })
 _CHROME_RESOURCE_COMPONENTS = {
     'admccjkmockfdflocgggjfgdacdodkdf': '/opt/google/chrome/resources/glic_extension',
@@ -29,9 +32,12 @@ _CHROME_RESOURCE_COMPONENTS = {
     'nkeimhogjdpnpccoofpliimaahmaaome': '/opt/google/chrome/resources/hangout_services',
 }
 _CHROME_PAYMENTS_COMPONENT = 'nmmhkkegccagdldgiimedpiccmgmieda'
+_CHROME_DOCS_OFFLINE = 'ghbmnnjooekpmoecnnnilnnbdlolhkhi'
+_CHROME_DICTATION_CONNECTOR = 'kbglekiebdohdafflpmiejhbfdmjdbbe'
 _CHROME_STORE_UPDATE_URL = 'https://clients2.google.com/service/update2/crx'
 # Chromium's ManifestLocation values for browser components.
 _CHROME_COMPONENT = 5
+_CHROME_EXTERNAL_PREF_DOWNLOAD = 6
 _CHROME_EXTERNAL_COMPONENT = 10
 CHROME_NAMES = {'chrome', 'chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable'}
 DISALLOWED_FLAGS = (
@@ -233,9 +239,30 @@ def _manifest_key(manifest, ident):
     return key if digest.translate(str.maketrans('0123456789abcdef', 'abcdefghijklmnop')) == ident else None
 
 
+def _component_manifest_on_disk(folder, *, require_verified_contents=False):
+    path = folder / 'manifest.json'
+    try:
+        if (any(p.is_symlink() for p in (folder.parent, folder, path))
+                or not path.is_file() or path.stat().st_size > 65536):
+            return {}
+        if require_verified_contents:
+            verified = folder / '_metadata/verified_contents.json'
+            if (verified.parent.is_symlink() or verified.is_symlink() or not verified.is_file()
+                    or not verified.stat().st_size):
+                return {}
+        disk_manifest = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    return disk_manifest if isinstance(disk_manifest, dict) else {}
+
+
 def _allowed_chrome_component(default, ident, entry, on_disk):
+    profile = default.parent.name
     resource = _CHROME_RESOURCE_COMPONENTS.get(ident)
-    if (resource is None and ident != _CHROME_PAYMENTS_COMPONENT) or not isinstance(entry, dict):
+    docs = profile == 'account-f8d81e309793' and ident == _CHROME_DOCS_OFFLINE
+    dictation = profile == 'ub-chrome-f8f5d94158' and ident == _CHROME_DICTATION_CONNECTOR
+    if (resource is None and ident != _CHROME_PAYMENTS_COMPONENT and not docs and not dictation
+            or not isinstance(entry, dict)):
         return False
     manifest = entry.get('manifest')
     key = _manifest_key(manifest, ident)
@@ -245,21 +272,26 @@ def _allowed_chrome_component(default, ident, entry, on_disk):
         return (entry.get('location') == _CHROME_COMPONENT and entry.get('from_webstore') is False
                 and entry.get('path') == resource and not on_disk)
 
-    relative = entry.get('path')
-    if (entry.get('location') != _CHROME_EXTERNAL_COMPONENT or entry.get('from_webstore') is not True
-            or not isinstance(relative, str) or not re.fullmatch(ident + r'/[0-9]+(?:\.[0-9]+){0,3}_[0-9]+', relative)
+    path = entry.get('path')
+    if dictation:
+        connector_root = default.parent / 'DictationConnector'
+        if (entry.get('location') != _CHROME_COMPONENT or entry.get('from_webstore') is not False or on_disk
+                or not isinstance(path, str)
+                or not re.fullmatch(re.escape(str(connector_root)) + r'/[0-9]+(?:\.[0-9]+){1,3}', path)):
+            return False
+        disk_manifest = _component_manifest_on_disk(Path(path), require_verified_contents=True)
+        return _manifest_key(disk_manifest, ident) == key
+
+    location = _CHROME_EXTERNAL_PREF_DOWNLOAD if docs else _CHROME_EXTERNAL_COMPONENT
+    if (entry.get('location') != location or entry.get('from_webstore') is not True
+            or (docs and entry.get('was_installed_by_default') is not True)
+            or not isinstance(path, str) or not re.fullmatch(ident + r'/[0-9]+(?:\.[0-9]+){0,3}_[0-9]+', path)
             or not on_disk or manifest.get('update_url') != _CHROME_STORE_UPDATE_URL):
         return False
     extensions = default / 'Extensions'
-    folder = extensions / relative
-    path = folder / 'manifest.json'
-    try:
-        if (any(p.is_symlink() for p in (extensions, folder.parent, folder, path))
-                or not path.is_file() or path.stat().st_size > 65536):
-            return False
-        disk_manifest = json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, ValueError):
+    if extensions.is_symlink():
         return False
+    disk_manifest = _component_manifest_on_disk(extensions / path, require_verified_contents=docs)
     return (_manifest_key(disk_manifest, ident) == key
             and disk_manifest.get('update_url') == _CHROME_STORE_UPDATE_URL)
 

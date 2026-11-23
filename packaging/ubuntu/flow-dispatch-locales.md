@@ -15,6 +15,8 @@
 
 后台仅对 `preflight.py` 中逐个核对并启用的账号执行离线派发自检。已启用账号允许 Gemini in Chrome、Google Network Speech、Chrome PDF Viewer、Google Hangouts 和 Chrome Web Store Payments。每项都核对组件 ID、清单公钥和安装来源。其他扩展或来源不符的组件仍会拦截。其他账号沿用已有派发规则，页面告警停派和可选在线自检保持原有行为。
 
+`account-f8d81e309793` 保留 Chrome 默认安装的 Google Docs Offline，`ub-chrome-f8f5d94158` 保留 Chrome 语音输入连接器。这两项分别限定到已核对的账号，并核对组件 ID、安装位置、磁盘清单和 Chrome 校验文件。
+
 后台在核对登录或检查已连接的 Flow 页面时遇到异常活动提示，会先尝试保存截图，再停派该账号。在工作台账号卡片上核查后可手动解除这条停派记录。其他派发限制仍会逐项核对。
 
 ## Windows 同步新增账号的代理
