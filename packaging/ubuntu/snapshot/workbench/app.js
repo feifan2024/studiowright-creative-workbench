@@ -288,19 +288,69 @@ function flowAccountReason(account, snapshot, row, pageState) {
   return null;
 }
 
+const viewedFlowScreenshots = new Set();
+
 function flowAccountNoticeMarkup(reason, screenshot) {
   const id = screenshot?.id;
   const notice = reason?.label ? `<strong>${esc(reason.label)}：</strong>${esc(reason.text)}` : '';
-  if (!reason?.noScreenshot && screenshot?.has_screenshot !== false &&
-      /^(?:[a-f0-9]{12}|[a-f0-9]{32})$/.test(id) && (!reason?.taskId || screenshot.task_id === reason.taskId)) {
-    const path = '/api/flow-warning-screenshots/' + id;
-    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<form method="post" action="${path}/view" target="_blank" rel="noopener"><button class="account-flow-warning" type="submit" name="view" value="original" title="打开原图，阅后即焚"><img src="${path}.png" width="192" loading="lazy" alt="打开 Flow 警告原图，阅后即焚"></button></form>`;
+  const matches = !reason?.taskId || screenshot?.task_id === reason.taskId;
+  if (matches && (screenshot?.destroyed === true || viewedFlowScreenshots.has(id))) {
+    return notice ? `<p class="account-flow-reason">${notice}</p>` : '';
   }
-  const destroyed = !reason?.noScreenshot && screenshot?.destroyed === true && (!reason?.taskId || screenshot.task_id === reason.taskId);
-  if (destroyed) return `<p class="account-flow-reason">${notice} 截图已销毁。</p>`;
+  if (matches && !reason?.noScreenshot && screenshot?.has_screenshot !== false &&
+      /^(?:[a-f0-9]{12}|[a-f0-9]{32})$/.test(id)) {
+    const path = '/api/flow-warning-screenshots/' + id;
+    return `${notice ? `<p class="account-flow-reason">${notice}</p>` : ''}<form method="post" action="${path}/view" target="_blank" rel="noopener" data-flow-screenshot="${id}"><button class="account-flow-warning" type="submit" name="view" value="original" title="打开原图，阅后即焚"><img src="${path}.png" width="192" loading="lazy" alt="打开 Flow 警告原图，阅后即焚"></button></form>`;
+  }
   if (!notice) return '';
   return `<p class="account-flow-reason">${notice}${reason.taskId || reason.screenshotMissing ? ' 本次未保存截图。' : ''}</p>`;
 }
+
+async function openFlowScreenshot(event) {
+  const form = event.target.closest('form[data-flow-screenshot]');
+  if (!form) return;
+  event.preventDefault();
+  const id = form.dataset.flowScreenshot;
+  const button = form.querySelector('button');
+  if (button.disabled || viewedFlowScreenshots.has(id)) return;
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) {
+    $('accountActionMessage').textContent = '请允许工作台打开原图窗口。';
+    return;
+  }
+  popup.opener = null;
+  button.disabled = true;
+  accountActionsInFlight.add(button);
+  try {
+    const response = await fetch(form.action, {method:'POST', credentials:'same-origin', cache:'no-store',
+      body:new URLSearchParams({view:'original'}), signal:AbortSignal.timeout(12000)});
+    if (!response.ok && response.status !== 404) throw new Error('原图暂不可读取，请稍后再试。');
+    viewedFlowScreenshots.add(id);
+    form.remove();
+    if (response.status === 404) {
+      popup.close();
+      return;
+    }
+    const image = await response.blob();
+    if (image.type !== 'image/png') throw new Error('没有收到原图。');
+    if (!popup.closed) {
+      const url = URL.createObjectURL(image);
+      try {
+        popup.location.replace(url);
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+    }
+  } catch (error) {
+    popup.close();
+    $('accountActionMessage').textContent = error.message || '原图暂不可读取，请稍后再试。';
+  } finally {
+    accountActionsInFlight.delete(button);
+    button.disabled = false;
+  }
+}
+
+$('realAccountTable').addEventListener('submit', openFlowScreenshot);
 
 function flowTaskStatusBadge(item) {
   if (['image','video'].includes(item.kind) && ['failed','interrupted'].includes(item.status) &&

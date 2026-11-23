@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'packaging', 'ubuntu', 'snapshot', 'workbench', 'app.js'), 'utf8');
 function load(name, context) {
+  context.viewedFlowScreenshots ??= new Set();
   const match = source.match(new RegExp('^(?:async )?function ' + name + '\\([^]*?^}', 'm'));
   assert.ok(match, name + ' should exist');
   vm.runInContext(match[0], context);
@@ -26,9 +27,42 @@ test('Flow page warning shows its own reason and screenshot without a generation
   assert.match(vm.runInContext(code, context), /本次未保存截图/);
   incident.destroyed = true;
   const destroyed = vm.runInContext(code, context);
-  assert.match(destroyed, /截图已销毁/);
   assert.match(destroyed, /等待人工核查/);
-  assert.doesNotMatch(destroyed, /<img|<form/);
+  assert.doesNotMatch(destroyed, /<img|<form|截图/);
+});
+
+test('opening the original removes the thumbnail immediately and survives a stale refresh', async () => {
+  const id = '123456789abc';
+  const button = {disabled:false};
+  let removed = 0;
+  let popupUrl = '';
+  let status = 503;
+  const popup = {opener:{}, location:{replace:url=>{popupUrl=url;}}, close(){}};
+  const form = {dataset:{flowScreenshot:id}, action:'/api/flow-warning-screenshots/'+id+'/view',
+    querySelector:()=>button, remove:()=>{removed++;}};
+  const event = {target:{closest:()=>form}, preventDefault(){}};
+  const context = vm.createContext({id,event,
+    window:{open:()=>popup}, URLSearchParams, AbortSignal,
+    URL:{createObjectURL:()=> 'blob:fixture'}, setTimeout:()=>{},
+    $:()=>({}), accountActionsInFlight:new Set(),
+    fetch:async (path, options)=>{
+      assert.equal(path, form.action);
+      assert.equal(options.body.toString(), 'view=original');
+      return {status, ok:status===200, blob:async()=>({type:'image/png'})};
+    }
+  });
+  for (const name of ['esc','flowAccountNoticeMarkup','openFlowScreenshot']) load(name, context);
+  await vm.runInContext('openFlowScreenshot(event)', context);
+  assert.equal(removed, 0);
+  const render = () => vm.runInContext("flowAccountNoticeMarkup({label:'Flow 失败原因', text:'生成失败'}, {id})", context);
+  assert.match(render(), /<img/);
+  status = 200;
+  await vm.runInContext('openFlowScreenshot(event)', context);
+  assert.equal(removed, 1);
+  assert.equal(popupUrl, 'blob:fixture');
+  assert.equal(popup.opener, null);
+  assert.match(render(), /生成失败/);
+  assert.doesNotMatch(render(), /<form|<img|截图/);
 });
 
 test('Flow preflight mismatch explains why the account is blocked without reusing an old screenshot', () => {
