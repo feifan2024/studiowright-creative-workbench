@@ -1,9 +1,13 @@
 import importlib.util
+import json
+import os
 import sys
 import threading
+import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 WORKBENCH = Path(__file__).resolve().parents[1] / 'packaging' / 'ubuntu' / 'snapshot' / 'workbench'
 
@@ -20,8 +24,8 @@ def load_quota_module():
     return module
 
 
-def bare_reader(rows):
-    module = load_quota_module()
+def bare_reader(rows, module=None):
+    module = module or load_quota_module()
     reader = module.QuotaReader.__new__(module.QuotaReader)  # skip __init__: no daemon thread
     reader.lock = threading.Lock()
     reader.running = False
@@ -58,7 +62,7 @@ class AutoRefreshTickTest(unittest.TestCase):
         reader = bare_reader({'a': {'status': 'ok'}, 'b': {'status': 'ok'}, 'c': {'status': 'verification_required'}})
         reader.runtime = types.SimpleNamespace(text_models=lambda:{'b':{'model'},'c':set()})
         read = []
-        reader.check = lambda key: read.append(key) or {'status':'ok'}
+        reader.check = lambda key, **_: read.append(key) or {'status':'ok'}
         self.assertEqual(reader._auto_refresh_tick(advanced_only=True),1)
         self.assertEqual(read,['b'])
 
@@ -90,7 +94,7 @@ class AutoRefreshTickTest(unittest.TestCase):
         reader = bare_reader({'a': {'status': 'ok'}, 'b': {'status': 'verification_required'},
                               'c': {'status': 'not_read'}, 'd': {'status': 'network_error'}})
         read = []
-        reader.check = lambda key: read.append(key) or {'status': 'ok', 'checked_at': 0}
+        reader.check = lambda key, **_: read.append(key) or {'status': 'ok', 'checked_at': 0}
 
         self.assertEqual(reader._auto_refresh_tick(), 2)
         self.assertEqual(read, ['a', 'c'])
@@ -113,3 +117,38 @@ class AutoRefreshTickTest(unittest.TestCase):
 
         self.assertEqual(reader._auto_refresh_tick(), 0)
         self.assertEqual(read, [])
+
+    @unittest.skipUnless(hasattr(os, 'fchmod'), 'The quota cache is written on Ubuntu')
+    def test_startup_failure_is_retried_before_updating_the_account_card_data(self):
+        module = load_quota_module()
+        reader = bare_reader({}, module)
+        key = 'a' * 64
+        previous = {'status':'ok','checked_at':100,'weekly':{'remaining_percent':90}}
+        reader.rows[key] = previous
+        reader.runtime = object()
+        reader.account_locks = {}
+        reader.verification_links = {}
+        failure = {'status':'unavailable','reason':'startup_not_ready','checked_at':110}
+        success = {'status':'ok','checked_at':112,'five_hour':{'remaining_percent':100},'weekly':{'remaining_percent':99}}
+        with tempfile.TemporaryDirectory() as directory:
+            reader.cache = Path(directory) / 'quota.json'
+            for recover, outcomes, expected in (
+                (False, [failure, success], 'ok'),
+                (False, [failure, failure], 'unavailable'),
+                (True, [failure, {'status':'network_error'}], 'network_error'),
+                (True, [{'status':'authorization_required'}], 'authorization_required'),
+                (False, [{'status':'verification_required'}], 'verification_required'),
+            ):
+                with self.subTest(recover=recover, expected=expected):
+                    reader.rows[key] = previous
+                    output = iter(outcomes)
+                    def read(runtime, profile):
+                        self.assertEqual(reader.rows[key], previous)
+                        self.assertEqual(profile, key)
+                        return next(output).copy()
+                    with patch.object(module, 'read_account', side_effect=read) as attempts:
+                        result = reader.check(key, recover=recover)
+                    self.assertEqual(result['status'], expected)
+                    self.assertEqual(result['query_attempts'], len(outcomes))
+                    self.assertEqual(attempts.call_count, len(outcomes))
+                    self.assertEqual(json.loads(reader.cache.read_text())['accounts'][key], result)

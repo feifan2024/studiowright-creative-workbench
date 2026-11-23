@@ -400,9 +400,7 @@ class QuotaReader:
     def _refresh(self,keys,recover=False):
         try:
             for key in keys:
-                row=self.check(key)
-                if recover and row.get('status') in ('network_error','unavailable'):
-                    self.check(key)
+                self.check(key, recover=recover)
         except OSError:
             pass  # The in-memory snapshot remains usable when cache storage is unavailable.
         finally:
@@ -430,13 +428,20 @@ class QuotaReader:
         threading.Thread(target=refresh,daemon=True,name='official-quota-after-login').start()
         return True
 
-    def check(self,key):
+    def check(self,key,*,recover=False):
         if not KEY.fullmatch(key):raise ValueError('账号编号不正确')
         with self.lock: account_lock=self.account_locks.setdefault(key,threading.Lock())
         with account_lock:
-            try: row=read_account(self.runtime,key)
-            except (OSError,ValueError,TypeError,KeyError,subprocess.SubprocessError):
-                row={'status':'unavailable','checked_at':time.time(),'reason':'local_read_failed'}
+            for attempt in (1, 2):
+                try:
+                    row=read_account(self.runtime,key)
+                except (OSError,ValueError,TypeError,KeyError,subprocess.SubprocessError):
+                    row={'status':'unavailable','checked_at':time.time(),'reason':'local_read_failed'}
+                status=row.get('status')
+                startup_failed=status=='unavailable' and row.get('reason')=='startup_not_ready'
+                if not (startup_failed or (recover and status in ('network_error','unavailable'))):
+                    break
+            row['query_attempts']=attempt
             with self.lock:
                 link=row.pop('_verification_url',None)
                 if link:self.verification_links[key]=(link,time.time())
