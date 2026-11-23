@@ -28,6 +28,10 @@ class BalanceReadDeferred(ValueError):
     """Foreground input has priority; retain the previous balance observation."""
 
 
+class BalancePanelUnavailable(ValueError):
+    """The verified Flow page did not expose the panel or its balance yet."""
+
+
 async def open_account_panel(page, panel, close, email, checked_url, foreground, restoration=None):
     from adapter import READ_STATE
     from playwright.async_api import TimeoutError as BrowserTimeout
@@ -75,7 +79,7 @@ async def open_account_panel(page, panel, close, email, checked_url, foreground,
             await asyncio.sleep(.2)
         if not verified:
             raise ValueError('Flow 登录信息尚未就绪，保留上次余额。')
-    raise ValueError('已切回登记的 Flow 页面并恢复页顶，仍未确认账号详情入口，保留上次余额。')
+    raise BalancePanelUnavailable('Flow 账号详情暂未打开，保留上次余额并稍后重读。')
 
 
 def parse_balance(text, branded_only=False):
@@ -162,7 +166,7 @@ async def read_balance(account, playwright, include_details=False, *, incident_r
     from adapter import READ_STATE
     lock=FileLock(str(paths.locks_dir()/f"{account['profile']}.lock"))
     try:lock.acquire(timeout=0)
-    except Timeout:raise ValueError('账号正在执行任务，余额稍后更新。') from None
+    except Timeout:raise BalanceReadDeferred('账号正在执行任务，余额稍后更新。') from None
     opened=False;page=None;checked_url=None;scroll_top=None
     foreground=AsyncExitStack()
     restoration={}
@@ -203,7 +207,9 @@ async def read_balance(account, playwright, include_details=False, *, incident_r
                     raise ValueError('Flow 页面或账号发生变化，未保存余额。')
                 return {"balance":value,"next_credit_date":parse_credit_renewal(panel_text)} if include_details else value
             await asyncio.sleep(.25)
-        raise ValueError('页面没有明确显示积分数，未估算余额。')
+        if not verify_identity(await page.evaluate(READ_STATE), email) or page.url != checked_url:
+            raise ValueError('Flow 页面或账号发生变化，未保存余额。')
+        raise BalancePanelUnavailable('Flow 积分暂未显示，保留上次余额并稍后重读。')
     finally:
         opened = opened or restoration.get('opened', False)
         scroll_top = restoration.get('scroll_top', scroll_top)

@@ -26,7 +26,7 @@ class Insights:
             status TEXT,error TEXT)""")
         store.execute("CREATE TABLE IF NOT EXISTS account_credit_renewals(profile TEXT PRIMARY KEY,next_date TEXT,observed REAL)")
 
-    def record(self, profile, balance=None, error=None, now=None, next_credit_date=None):
+    def record(self, profile, balance=None, error=None, now=None, next_credit_date=None, *, transient=False):
         now = time.time() if now is None else now
         if error is None and number(balance) is None:
             raise ValueError('余额不正确。')
@@ -34,7 +34,10 @@ class Insights:
             self.store.execute("INSERT INTO account_balances VALUES(?,?,?,?,'ready',NULL) ON CONFLICT(profile) DO UPDATE SET balance=excluded.balance,observed=excluded.observed,checked=excluded.checked,status='ready',error=NULL", (profile, balance, now, now))
             self.store.execute("INSERT INTO account_credit_renewals VALUES(?,?,?) ON CONFLICT(profile) DO UPDATE SET next_date=excluded.next_date,observed=excluded.observed", (profile,next_credit_date,now))
         else:
-            self.store.execute("INSERT INTO account_balances VALUES(?,NULL,NULL,?,'unknown',?) ON CONFLICT(profile) DO UPDATE SET checked=excluded.checked,status='unknown',error=excluded.error", (profile, now, error))
+            self.store.execute("""INSERT INTO account_balances VALUES(?,NULL,NULL,?,'unknown',?)
+                ON CONFLICT(profile) DO UPDATE SET checked=excluded.checked,error=excluded.error,
+                status=CASE WHEN ? AND account_balances.status IN ('ready','retrying')
+                            THEN 'retrying' ELSE 'unknown' END""", (profile, now, error, transient))
 
     def source_data(self):
         try:
@@ -62,7 +65,7 @@ class Insights:
             if number(b.get('balance')) is None and a['profile'] in cached:
                 b={**cached[a['profile']], 'status':b.get('status','cached'),'error':b.get('error'),'checked':b.get('checked')}
             value=number(b.get('balance'));observed=number(b.get('observed'))
-            fresh=value is not None and observed is not None and 0<=now-observed<=FRESH_SECONDS and b.get('status')=='ready'
+            fresh=value is not None and observed is not None and 0<=now-observed<=FRESH_SECONDS and b.get('status') in ('ready','retrying')
             if a.get('flow_page_incident'):health,reason='paused','页面显示异常活动，等待人工核查'
             elif a.get('risk_paused') is True:health,reason='paused','多次异常，等待人工核查后恢复'
             elif a.get('state')!='verified':health,reason='attention','登录尚未核对或需要检查'

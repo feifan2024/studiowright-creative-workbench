@@ -1,14 +1,18 @@
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace as S
 import unittest
 from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot'
 sys.path[:0] = [str(ROOT/'flow/console'), str(ROOT/'workbench')]
-from balance_reader import open_account_panel, BalanceReadDeferred, REVEAL_HEADER
+from account_insights import FRESH_SECONDS, Insights
+from balance_reader import open_account_panel, BalancePanelUnavailable, BalanceReadDeferred, REVEAL_HEADER
+from console_store import Store
 
 
 class BalanceRecovery(unittest.IsolatedAsyncioTestCase):
@@ -63,7 +67,7 @@ class BalanceRecovery(unittest.IsolatedAsyncioTestCase):
     async def test_still_missing_reports_only_after_one_recovery(self):
         page,panel,close,state,queue=self.make_fixture(stays_missing=True)
         restoration={}
-        with self.assertRaisesRegex(ValueError,'已切回登记的 Flow 页面'):
+        with self.assertRaisesRegex(BalancePanelUnavailable, 'Flow 账号详情暂未打开'):
             await self.run_fixture(page,panel,close,queue,restoration)
         page.bring_to_front.assert_awaited_once()
         panel.click.assert_not_awaited()
@@ -101,6 +105,59 @@ class BalanceRecovery(unittest.IsolatedAsyncioTestCase):
             await self.run_fixture(page,panel,close,queue,{})
         panel.click.assert_not_awaited()
         self.assertEqual(state['lease_exits'],1)
+
+
+class BalanceObservation(unittest.TestCase):
+    def test_temporary_panel_failure_retains_only_a_recent_verified_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            insights = Insights(Store(root/'console-data'), root/'source.db')
+            account = dict(profile='a', state='verified', generation_state='not_cooling_down', risk_paused=False)
+
+            def observe(at, **account_state):
+                return insights.report([dict(account, **account_state)], now=at)['accounts'][0]
+
+            insights.record('a', 775, now=1000)
+            insights.record('a', error='panel not ready', now=1200, transient=True)
+            self.assertTrue(observe(1200)['balance_fresh'])
+            self.assertEqual(observe(1200)['balance_observed'], 1000)
+            self.assertEqual(observe(1200, flow_page_incident=True)['health'], 'paused')
+            self.assertFalse(observe(1001+FRESH_SECONDS)['balance_fresh'])
+            insights.record('a', error='wrong identity', now=1250)
+            insights.record('a', error='panel not ready', now=1260, transient=True)
+            self.assertFalse(observe(1260)['balance_fresh'])
+            insights.record('a', 0, now=1300)
+            insights.record('a', error='panel not ready', now=1310, transient=True)
+            self.assertEqual(observe(1310)['health'], 'empty')
+
+
+class BalanceScheduler(unittest.IsolatedAsyncioTestCase):
+    async def test_only_temporarily_unavailable_account_is_retried_twice(self):
+        spec = spec_from_file_location('flow_balance_console', ROOT/'flow/console/server.py')
+        server = module_from_spec(spec)
+        spec.loader.exec_module(server)
+        calls = []
+        retries_finished = asyncio.Event()
+
+        async def batch(profiles):
+            calls.append(profiles)
+            if len(calls) == 3:
+                retries_finished.set()
+            return {'account-a'}
+
+        console = S(test=False, balance_wake=asyncio.Event(), balance_requested=set(),
+                    balance_full_requested=False, dispatch_limit=S(paused=lambda: False),
+                    read_balance_batch=batch)
+        with patch.object(server, 'BALANCE_RETRY_DELAYS', (0, 0)):
+            worker = asyncio.create_task(server.Console.balance_worker(console))
+            try:
+                await asyncio.wait_for(retries_finished.wait(), timeout=1)
+                await asyncio.sleep(0)
+                self.assertEqual(calls, [None, {'account-a'}, {'account-a'}])
+            finally:
+                worker.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await worker
 
 
 if __name__=='__main__':

@@ -827,10 +827,11 @@ class Sources:
                 raise ValueError('该账号当前没有需要人工恢复的暂停。') from None
             raise ValueError('Flow 恢复暂不可用，请稍后核对。') from None
 
-    def refresh_flow_balances_once(self):
+    def refresh_flow_balances_once(self, profiles=None):
         """Ask the existing Flow service once to read its existing browser panels."""
         port = self.ports['flow']
-        request = Request(f'http://127.0.0.1:{port}/api/accounts/credits/refresh', data=b'{}', method='POST',
+        data = {} if profiles is None else {'profiles': profiles}
+        request = Request(f'http://127.0.0.1:{port}/api/accounts/credits/refresh', data=json.dumps(data).encode(), method='POST',
                           headers={'Content-Type':'application/json', 'X-Console-Request':'1',
                                    'Origin':f'http://127.0.0.1:{port}'})
         with self.opener.open(request, timeout=self.timeout) as response:
@@ -1075,12 +1076,23 @@ class Sources:
         for profile, item in repairs.items():
             if checks.get(profile) in ('binding','project','editor','load_failed','unconfirmed') and item.get('page') in ('draft','login','overlay'):
                 checks[profile] = item['page']
-        if any(checks.get(profile) == 'ok' and 'reload' in item.get('actions', ())
-               for profile, item in repairs.items()):
-            try:
-                self.refresh_flow_balances_once()
-            except (ValueError, OSError, URLError):
-                pass  # A successful page recheck is independent of balance availability.
+        if repair:
+            eligible = {account['profile'] for account in payload['accounts']
+                        if account['repairable'] and not account['review_task']}
+            eligible.difference_update(payload['busy'])
+            if automatic:
+                eligible.intersection_update(profile for profile, item in repairs.items()
+                                             if 'reload' in item.get('actions', ()))
+            stale = [a['profile'] for a in account_rows(state) if a['profile'] in eligible
+                     and checks.get(a['profile']) == 'ok' and not a['flow_balance_fresh']
+                     and a['flow_login'] == 'verified' and not a['flow_page_incident']
+                     and a['flow_risk_known'] and not a['flow_risk_paused']
+                     and a['flow_pacing_known'] and not a['flow_cooling']]
+            if stale:
+                try:
+                    self.refresh_flow_balances_once(stale)
+                except (ValueError, OSError, URLError):
+                    pass  # A successful page recheck is independent of balance availability.
         now = time.time()
         return {'accounts':checks,'checked_at':now,'repairs':repairs,
                 'evidence':generation_evidence(state['tasks'],windows,now),

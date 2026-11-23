@@ -40,6 +40,8 @@ KINDS = {"sync", "login", "media", "doctor", "quote", "image", "video"}
 TERMINAL_INPUT_STOPS = frozenset(('pasted_text_mismatch', 'prompt_input_timeout'))
 RETRYABLE_INPUT_STOPS = frozenset(('pre_submit_failed:pointer_not_over_input', 'pre_submit_failed:desktop_keyboard_authorization_timeout', 'window_focus_lost', 'composer_unavailable', 'window_activation_unconfirmed'))
 WAITING_FOR_PROXY = '等待已确认空闲的专属代理。分配后，原同步任务会自动继续核对。'
+BALANCE_SWEEP_SECONDS = 300
+BALANCE_RETRY_DELAYS = (10, 25)
 
 
 def safe_error(exc):
@@ -58,6 +60,8 @@ class Console:
         self.keys = APIKeys(self.store)
         self.insights = Insights(self.store, self.root / "data/studiowright.db")
         self.balance_wake = asyncio.Event()
+        self.balance_requested = set()
+        self.balance_full_requested = False
         self.balance_refreshing = False
         self.balance_busy = set()
         dispatch_state = (self.root / 'console-data') if test else (Path.home() / '.local/state/creative-unified-workbench')
@@ -512,52 +516,83 @@ class Console:
                 await asyncio.to_thread(self.library.drain_index)
             await asyncio.sleep(5)
 
+    async def read_balance_batch(self, profiles):
+        from balance_reader import read_balance, BalancePanelUnavailable, BalanceReadDeferred
+        from playwright.async_api import async_playwright
+        retry = set()
+        self.balance_refreshing = True
+        try:
+            async with async_playwright() as pw:
+                accounts = account_status(self.store.accounts(), self.root / 'data/studiowright.db')
+                incidents = self.store.page_incidents()
+                for account in accounts:
+                    profile = account['profile']
+                    if profiles is not None and profile not in profiles:
+                        continue
+                    if self.dispatch_limit.paused():
+                        break
+                    if (profile in incidents or account.get('risk_paused') is True
+                            or account.get('generation_state') == 'cooling_down'):
+                        continue
+                    if profile in self.busy or self.remote.for_profile(profile):
+                        retry.add(profile)
+                        continue
+                    slot = self.dispatch_limit.try_acquire()
+                    if slot is None:
+                        retry.add(profile)
+                        continue
+                    self.balance_busy.add(profile)
+                    try:
+                        balance = await asyncio.wait_for(
+                            read_balance(account, pw, include_details=True, incident_root=self.root), timeout=20)
+                        self.insights.record(profile, balance['balance'], next_credit_date=balance.get('next_credit_date'))
+                    except BalanceReadDeferred:
+                        retry.add(profile)
+                    except BalancePanelUnavailable as exc:
+                        self.insights.record(profile, error=str(exc), transient=True)
+                        retry.add(profile)
+                    except Exception as exc:
+                        message = str(exc) if isinstance(exc, ValueError) else '余额读取暂未完成，保留上次记录。'
+                        self.insights.record(profile, error=message)
+                    finally:
+                        self.balance_busy.discard(profile)
+                        slot.close()
+        finally:
+            self.balance_refreshing = False
+        return retry
+
     async def balance_worker(self):
         if self.test:
             return
-        from balance_reader import read_balance, BalanceReadDeferred
-        from playwright.async_api import async_playwright
+        loop = asyncio.get_running_loop()
+        next_sweep = loop.time()
+        pending = {}
         while True:
-            if self.dispatch_limit.paused():
-                try:
-                    await asyncio.wait_for(self.balance_wake.wait(), timeout=300)
-                except asyncio.TimeoutError:
-                    pass
-                self.balance_wake.clear()
-                continue
             self.balance_wake.clear()
-            self.balance_refreshing = True
+            delay = BALANCE_SWEEP_SECONDS
+            if not self.dispatch_limit.paused():
+                now = loop.time()
+                full = self.balance_full_requested or now >= next_sweep
+                requested = self.balance_requested
+                self.balance_requested = set()
+                self.balance_full_requested = False
+                due = {profile for profile, (_, at) in pending.items() if at <= now}
+                selected = requested | due
+                if full:
+                    next_sweep = now + BALANCE_SWEEP_SECONDS
+                    pending.clear()
+                if full or selected:
+                    try:
+                        retry = await self.read_balance_batch(None if full else selected)
+                    except Exception:
+                        retry = set()
+                    for profile in selected | retry:
+                        count, _ = pending.pop(profile, (0, 0))
+                        if profile in retry and count < len(BALANCE_RETRY_DELAYS):
+                            pending[profile] = (count + 1, loop.time() + BALANCE_RETRY_DELAYS[count])
+                delay = max(0, min([next_sweep, *(at for _, at in pending.values())]) - loop.time())
             try:
-                async with async_playwright() as pw:
-                    incidents = self.store.page_incidents()
-                    for account in self.store.accounts():
-                        profile = account["profile"]
-                        if profile in self.busy or profile in incidents or self.remote.for_profile(profile):
-                            continue
-                        slot = self.dispatch_limit.try_acquire()
-                        if slot is None:
-                            continue
-                        # Reserve before awaiting: the scheduler must leave this
-                        # account queued while the balance reader owns its window.
-                        self.balance_busy.add(profile)
-                        try:
-                            balance = await asyncio.wait_for(
-                                read_balance(account, pw, include_details=True, incident_root=self.root), timeout=20)
-                            self.insights.record(profile, balance["balance"], next_credit_date=balance.get("next_credit_date"))
-                        except BalanceReadDeferred:
-                            continue
-                        except Exception as exc:
-                            message = str(exc) if isinstance(exc, ValueError) else '余额读取暂未完成，保留上次记录。'
-                            self.insights.record(profile, error=message)
-                        finally:
-                            self.balance_busy.discard(profile)
-                            slot.close()
-            except Exception:
-                pass
-            finally:
-                self.balance_refreshing = False
-            try:
-                await asyncio.wait_for(self.balance_wake.wait(), timeout=300)
+                await asyncio.wait_for(self.balance_wake.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
 
@@ -763,14 +798,14 @@ def create_app(root, adapter, test=False):
     async def health(request):
         return JSONResponse({"ok": True, "application": "studiowright-console", "test": test})
 
-    async def payload(request):
+    async def payload(request, *, allow_empty=False):
         limit = 524288 if request.url.path.endswith("/session") else 32768
         if int(request.headers.get("content-length", "0")) > limit:
             raise ValueError("提交内容过大。")
         data = await request.body()
         if len(data) > limit:
             raise ValueError("提交内容过大。")
-        value = json.loads(data)
+        value = {} if allow_empty and not data else json.loads(data)
         if not isinstance(value, dict):
             raise ValueError("提交内容格式不正确。")
         return value
@@ -905,8 +940,23 @@ def create_app(root, adapter, test=False):
             return JSONResponse({'error': safe_error(exc)}, status_code=400)
 
     async def refresh_balances(request):
-        if not c.test and not c.balance_refreshing:
-            c.balance_wake.set()
+        try:
+            data = await payload(request, allow_empty=True)
+            profiles = data.get('profiles')
+            if 'profiles' in data and (
+                    not isinstance(profiles, list) or not 1 <= len(profiles) <= 50
+                    or any(not isinstance(p, str) or not PROFILE.fullmatch(p) or not c.store.account(p)
+                           for p in profiles)):
+                raise ValueError('请选择已登记账号。')
+            if not c.test:
+                if profiles:
+                    c.balance_requested.update(profiles)
+                    c.balance_wake.set()
+                elif not c.balance_refreshing:
+                    c.balance_full_requested = True
+                    c.balance_wake.set()
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({'error': safe_error(exc)}, status_code=400)
         return JSONResponse({"queued": not c.test, "refreshing": c.balance_refreshing,
             "message": "正在读取现有账号窗口的积分，不打开新窗口、不生成。" if not c.test else "模拟环境不会读取真实账号。"})
 
