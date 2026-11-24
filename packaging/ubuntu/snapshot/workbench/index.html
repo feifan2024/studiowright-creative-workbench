@@ -46,7 +46,15 @@
 
           <section id="operationsDashboard" class="operations-dashboard" aria-labelledby="dashboardHeading">
             <header class="dashboard-heading"><h2 id="dashboardHeading">账号就绪</h2><button class="text-link" type="button" data-view="accounts">管理账号 <span aria-hidden="true">→</span></button></header>
-            <div id="overviewInsights" class="dashboard-summary"><p class="dashboard-loading">正在读取账号状态…</p></div>
+            <div id="overviewInsights" class="dashboard-summary">
+              <div class="dashboard-rings">
+                <div data-service-slot="FLOW"><p class="dashboard-loading">正在读取 Flow…</p></div>
+                <div class="desk-dispatch"><label for="dispatchConcurrency">Flow 派发名额</label><select id="dispatchConcurrency" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span></div>
+                <div data-service-slot="GEMINI"><p class="dashboard-loading">正在读取 Gemini…</p></div>
+                <div data-service-slot="MUSIC"><p class="dashboard-loading">正在读取 Music…</p></div>
+              </div>
+              <p data-governance-status role="status" class="sr-only"></p>
+            </div>
             <section id="governanceDialog" class="governance-dialog governance-inline" hidden aria-labelledby="governanceTitle">
               <header><h2 id="governanceTitle">Gemini 一键就绪</h2><button type="button" class="button button-light" data-govern-close>收起</button></header>
               <p id="governanceStatus" role="status"></p>
@@ -54,7 +62,6 @@
               <footer><button id="governanceCheck" class="button button-light" type="button">重新检查</button><button id="governanceRecords" type="button" class="text-link">对话记录 →</button></footer>
             </section>
             <div class="desk-usage">
-              <div class="desk-dispatch"><label for="dispatchConcurrency">Flow 派发名额</label><select id="dispatchConcurrency" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span></div>
               <section id="geminiQuotaOverview" class="dashboard-quotas" aria-label="Flow 任务与 Gemini 额度"><p>正在读取统计…</p></section>
               <div id="dashboardRuntime"></div>
             </div>

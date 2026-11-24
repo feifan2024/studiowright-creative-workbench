@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
+from decimal import Decimal
 import hashlib
 import http.client
 import http.cookiejar
@@ -1297,6 +1299,44 @@ def music_admin_token():
     return result.get('token') or ''
 
 
+def music_credit_summary(accounts, path, observed_at):
+    """Store the latest observed balance change for the same set of accounts."""
+    balances = {}
+    for row in accounts:
+        email = row.get('email')
+        credits = row.get('credits')
+        if not isinstance(email, str) or not email.strip() or type(credits) not in (int, float) or not math.isfinite(credits) or credits < 0:
+            return {'total': None, 'last_change': None}
+        email = email.strip().lower()
+        if email in balances:
+            return {'total': None, 'last_change': None}
+        balances[email] = Decimal(str(credits))
+    total = sum(balances.values(), Decimal(0))
+    result = {'total': float(total), 'last_change': None}
+    membership = hashlib.sha256(json.dumps(sorted(balances)).encode()).hexdigest()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with closing(sqlite3.connect(path, timeout=2)) as db, db:
+            db.execute("""CREATE TABLE IF NOT EXISTS music_credit_observations (
+                id INTEGER PRIMARY KEY, membership TEXT, balance TEXT, change TEXT, observed_at INTEGER)""")
+            db.execute('BEGIN IMMEDIATE')
+            previous = db.execute('SELECT membership,balance,change,observed_at FROM music_credit_observations WHERE id=1').fetchone()
+            if previous and observed_at <= previous[3]:
+                change = previous[2] if previous[0] == membership else None
+                if previous[0] == membership:
+                    result['total'] = float(previous[1])
+            else:
+                change = None
+                if previous and previous[0] == membership:
+                    difference = total - Decimal(previous[1])
+                    change = str(difference) if difference else previous[2]
+                db.execute('INSERT OR REPLACE INTO music_credit_observations VALUES(1,?,?,?,?)',
+                           (membership, str(total), change, observed_at))
+    except (OSError, sqlite3.Error):
+        return result
+    return {**result, 'last_change': None if change is None else float(change)}
+
+
 def music_service_status():
     _, _, key = music_credentials()
     status = {'schema_version': 1, 'available': bool(key), 'accounts': []}
@@ -1304,7 +1344,10 @@ def music_service_status():
         status['reason'] = '音乐服务未配置（缺少 FlowMusic2API 凭据）。'
         return status
     try:
+        observed_at = time.time_ns()
         rows = music_call('GET', '/api/tokens', token=music_admin_token())
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError('音乐账号列表格式无效。')
         now_utc = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())
         status['accounts'] = [{'email': row.get('email'), 'credits': row.get('credits'),
                                'today_music': row.get('today_music_count'), 'tier': row.get('user_paygate_tier'),
@@ -1312,6 +1355,8 @@ def music_service_status():
                                # auto-refreshed access token is not yet past its expiry.
                                'ready': bool(row.get('is_active')) and str(row.get('at_expires') or '') > now_utc}
                               for row in rows if isinstance(row, dict)]
+        path = Path.home()/'.local/state/creative-unified-workbench/music-credits.sqlite3'
+        status['credits'] = music_credit_summary(status['accounts'], path, observed_at)
     except (OSError, ValueError, KeyError) as exc:
         status['available'] = False
         status['reason'] = f'音乐服务暂不可读取：{exc}'
