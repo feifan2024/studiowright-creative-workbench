@@ -67,20 +67,6 @@
             <div><span class="section-kicker">QUICK ACTIONS</span><h2 id="overviewQuickHeading">常用操作</h2><p>从总览进入设置和接入文档。</p></div>
             <div class="overview-quick-actions"><button id="overviewSchedule" class="button button-light" type="button">通道与设置 <span aria-hidden="true">→</span></button><button id="overviewApiCopy" class="button button-light" type="button">复制 API 调用文档</button><label class="overview-concurrency" title="Flow 确认接收视频后，派发名额可交给其他账号。">Flow 派发名额 <select id="dispatchConcurrency" aria-label="Flow 派发名额" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></label><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span><span id="overviewCopyStatus" class="overview-copy-status" role="status" aria-live="polite"></span></div>
           </section>
-
-
-          <section class="status-section" aria-labelledby="statusHeading">
-            <div class="section-title"><div><span class="section-kicker">CONNECTIONS</span><h2 id="statusHeading">服务连接</h2></div><span class="subtle">连接状态不代表账号已登录</span></div>
-            <div class="service-grid">
-              <article class="service-card"><div class="service-icon flow-icon" aria-hidden="true">◈</div><div class="service-info"><div class="service-title"><h3>Flow 创作服务</h3><span id="flowStatus" class="status-pill neutral">检查中</span></div><p id="flowStatusText">正在检查服务连接</p></div><a href="#api" data-view="api" class="service-open" aria-label="查看 Flow API 文档">→</a></article>
-              <article class="service-card"><div class="service-icon gemini-icon" aria-hidden="true">✧</div><div class="service-info"><div class="service-title"><h3 id="geminiName">Gemini · 统一账号池</h3><span id="geminiStatus" class="status-pill neutral">检查中</span></div><p id="geminiStatusText">正在读取统一账号池</p></div><a href="#accounts" data-view="accounts" class="service-open" aria-label="管理统一账号池">→</a></article>
-            </div>
-          </section>
-
-          <div class="activity-grid">
-            <section class="panel" aria-labelledby="recentProjectsHeading"><div class="panel-heading"><div><span class="section-kicker">PROJECTS</span><h2 id="recentProjectsHeading">最近登记的项目</h2></div><button class="text-link" data-view="projects">查看全部 →</button></div><div id="recentProjects" class="compact-list"><div class="empty">正在读取项目…</div></div></section>
-            <section class="panel" aria-labelledby="recentTasksHeading"><div class="panel-heading"><div><span class="section-kicker">ACTIVITY</span><h2 id="recentTasksHeading">最近任务</h2></div><button class="text-link" data-view="tasks">查看全部 →</button></div><div id="recentTasks" class="compact-list"><div class="empty">正在读取任务…</div></div></section>
-          </div>
         </section>
 
         <section id="accountsView" class="view" aria-labelledby="accountsHeading" hidden>

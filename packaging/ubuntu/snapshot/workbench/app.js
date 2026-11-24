@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { status: null, snapshot: null, snapshotReceivedAt: 0, view: "overview", refreshSequence: 0, dispatchPaused: null };
+const state = { snapshot: null, snapshotReceivedAt: 0, view: "overview", refreshSequence: 0, dispatchPaused: null };
 state.serviceActivations = {};
 state.connectionLost = false;
 
@@ -140,7 +140,6 @@ async function refreshChannelStatus() {
       state.channelStatus = data; channelReadFailed = false;
       if (accountOrderOverride && JSON.stringify(data.shared_account_order || data.account_order) === JSON.stringify(accountOrderOverride)) accountOrderOverride = null;
     } catch (_) { channelReadFailed = true; }
-    renderConnections();
     if (state.snapshot && state.view === 'overview') renderAccountInsights(state.snapshot, $('overviewInsights'));
     if (state.snapshot && state.view === 'accounts') renderAccounts();
     if (state.view === 'conversations') syncConversationControls();
@@ -775,34 +774,6 @@ window.addEventListener('pageshow', wakeSnapshotRefresh);
 window.addEventListener('online', wakeSnapshotRefresh);
 window.addEventListener('offline', () => { showConnectionState(false); $('lastUpdated').textContent = '连接中断 · 保留已读取的数据'; });
 
-function renderConnections() {
-  for (const service of ["flow", "gemini"]) {
-    const data = state.status?.[service];
-    const pill = $(service + "Status");
-    const description = $(service + "StatusText");
-    if (service === "gemini") {
-      $('geminiName').textContent = 'Gemini · 官方独立通道';
-      pill.className = 'status-pill neutral';
-      pill.textContent = state.channelStatus?.production_send_available ? '官方调用已接入' : '官方调用暂不可用';
-      description.textContent = officialSummary();
-      continue;
-    }
-    if (!data) {
-      pill.className = "status-pill neutral";
-      pill.textContent = "状态未知";
-      description.textContent = "暂时无法检查连接";
-    } else if (data.connected) {
-      pill.className = "status-pill online";
-      pill.textContent = "已连接";
-      description.textContent = service === "flow" ? "管理后台可响应" : (data.description || "Gemini 后台可响应");
-    } else {
-      pill.className = "status-pill offline";
-      pill.textContent = "未连接";
-      description.textContent = data.message || "服务没有返回正常状态";
-    }
-  }
-}
-
 function renderOverview() {
   const snapshot = state.snapshot;
   renderOverviewCharts(snapshot);
@@ -821,16 +792,6 @@ function renderOverview() {
   $("taskCount").textContent = readable ? tasks.length.toLocaleString("zh-CN") : "—";
   $("materialCount").textContent = library?.available && Number.isInteger(library.counts?.total) ? library.counts.total.toLocaleString("zh-CN") : "—";
   $("materialBreakdown").textContent = library?.available && library.counts ? `图片 ${library.counts.images ?? "未知"} · 视频 ${library.counts.videos ?? "未知"}` : (library?.message || "暂时无法读取素材库");
-  if (!readable) {
-    const reason = snapshot?.flow_state?.message || "Flow 后台暂时无法读取";
-    $("recentProjects").innerHTML = empty("项目暂不可读取", reason);
-    $("recentTasks").innerHTML = empty("任务暂不可读取", reason);
-    return;
-  }
-  $("recentProjects").innerHTML = projects.length ? projects.slice(0, 5).map((item) => `
-    <div class="compact-row"><span class="row-icon" aria-hidden="true">▤</span><div class="row-info"><span class="row-title" title="${esc(item.title)}">${esc(item.title)}</span><span class="row-sub">Flow · ${esc(item.source_profile)}</span></div><span class="row-end">${esc(dateTime(item.checked).split(" ")[0])}</span></div>`).join("") : empty("还没有已登记项目", "原后台读取或登记后会显示在这里。");
-  $("recentTasks").innerHTML = tasks.length ? tasks.slice(0, 5).map((item) => `
-    <div class="compact-row"><span class="row-icon" aria-hidden="true">◷</span><div class="row-info"><span class="row-title" title="${esc(item.project_title)}">${esc(item.project_title)}</span><span class="row-sub">${esc(kindLabel(item.kind))} · ${esc(dateTime(item.created))}</span>${taskFailureMarkup(item)}</div>${statusBadge(item.status)}</div>`).join("") : empty("暂时没有任务记录", "新任务仍通过原后台创建。");
 }
 
 function overviewDistribution(target, title, caption, parts) {
@@ -2931,7 +2892,6 @@ async function refreshSnapshot(background) {
   state.snapshotAttempted = true;
   const snapshotReady = snapshot.status === 'fulfilled' && snapshot.value?.flow_state?.available === true;
   state.snapshotFresh = snapshotReady;
-  if (status.status === 'fulfilled') state.status = status.value;
   if (snapshotReady) {
     state.snapshot = snapshot.value;
     state.snapshotReceivedAt = Date.now();
@@ -2949,7 +2909,7 @@ async function refreshSnapshot(background) {
 }
 
 function renderVisibleSnapshot(snapshotReady) {
-  if (state.view === 'overview') { renderConnections(); renderOverview(); }
+  if (state.view === 'overview') renderOverview();
   if (state.view === 'accounts' && (snapshotReady || !state.snapshot)) renderAccounts();
   if (state.view === 'records' && snapshotReady) renderTasks();
   if (state.view === 'tasks' && snapshotReady) {
@@ -4944,8 +4904,6 @@ try {
   page('libraryHeading');
 
   page('apiHeading');
-
-  attach(one('#statusHeading'), [one('#overviewView .status-section .section-title > .subtle')], '服务连接');
 
   document.querySelectorAll('#overviewView .summary-card').forEach(card => {
 
