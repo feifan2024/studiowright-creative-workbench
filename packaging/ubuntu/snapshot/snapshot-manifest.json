@@ -129,7 +129,7 @@
   "flow/source/uv.lock": "ab78f97258b3c9c3f852c91f7bfaa68f9fb816e5301addcaaece7b28bd251bd5",
   "workbench/activation.py": "d4e0d33dc8d61c29b700ed6134ed6c2d8550cf7842b18483e9d026b7af641218",
   "workbench/activation_browser.py": "6e3fb1ad7d0ac6e58051f1f7a71efbb55d9c9a894871f88ba4a9eaa728727eb0",
-  "workbench/app.js": "36116b70fe74cd0f6dd006204e3cb36c1186dd8c86aeb429c60a6eaacf8766e5",
+  "workbench/app.js": "5fefb46bfaa57bbab9ea7e008c2fcce0d833895c6d1d938fed411455fbe97d38",
   "workbench/channel_status.py": "dd57b411bab2da7da4181dc3f337698d2e02bd4d447fab97b0170e6df752002f",
   "workbench/crash_recovery.py": "5ec9681a28a218815b1d0d313f10298541fdd4a42474c283b47611efe324952d",
   "workbench/create_flow_project.py": "cec9b440df33f423f14e77fd74b2b70bb2f8356aa671ed2d513ebaed60187053",

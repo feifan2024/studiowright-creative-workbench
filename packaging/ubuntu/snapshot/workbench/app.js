@@ -837,8 +837,11 @@ function overviewDistribution(target, title, caption, parts) {
   const known = parts.every(part => Number.isInteger(part.value) && part.value >= 0);
   const total = known ? parts.reduce((sum, part) => sum + part.value, 0) : 0;
   const list = known ? parts.map(part => `<div><span><i class="chart-dot ${part.color}" aria-hidden="true"></i>${esc(part.label)}</span><strong>${part.value.toLocaleString('zh-CN')}</strong></div>`).join('') : '<p class="chart-unavailable">暂时无法读取数据</p>';
-  const bar = total ? parts.map(part => `<i class="${part.color}" style="width:${(part.value / total * 100).toFixed(2)}%"></i>`).join('') : '';
+  const bar = total ? parts.map(part => `<i class="${part.color}" data-chart-width="${(part.value / total * 100).toFixed(2)}%"></i>`).join('') : '';
   target.innerHTML = `<div class="overview-chart-header"><div><span class="section-kicker">${esc(title === '任务分布' ? 'TASKS' : 'LIBRARY')}</span><h2>${esc(title)}</h2></div><strong>${known ? total.toLocaleString('zh-CN') : '—'}</strong></div><p>${esc(caption)}</p><div class="overview-chart-track ${total ? '' : 'is-empty'}" aria-hidden="true">${bar}</div><div class="overview-chart-legend">${list}</div>`;
+  for (const segment of target.querySelectorAll('[data-chart-width]')) {
+    segment.style.width = segment.dataset.chartWidth;
+  }
 }
 
 function renderOverviewCharts(snapshot) {

@@ -12,6 +12,36 @@ function load(name, context) {
   vm.runInContext(match[0], context);
 }
 
+test('overview distribution applies segment widths through the browser style API', () => {
+  let segments = [];
+  const target = {
+    innerHTML:'',
+    querySelectorAll(selector) {
+      assert.equal(selector, '[data-chart-width]');
+      segments = [...this.innerHTML.matchAll(/data-chart-width="([^"]+)"/g)].map(([, width]) => ({
+        dataset:{chartWidth:width}, style:{}
+      }));
+      return segments;
+    }
+  };
+  const parts = [
+    {label:'已完成', color:'chart-green', value:3},
+    {label:'失败', color:'chart-rust', value:1},
+    {label:'其他状态', color:'chart-slate', value:0}
+  ];
+  const context = vm.createContext({target, parts});
+  for (const name of ['esc', 'overviewDistribution']) load(name, context);
+  const render = () => vm.runInContext("overviewDistribution(target, '任务分布', '', parts)", context);
+  render();
+  assert.doesNotMatch(target.innerHTML, /\sstyle=/);
+  assert.deepEqual(segments.map(segment => segment.style.width), ['75.00%', '25.00%', '0.00%']);
+
+  parts[0].value = null;
+  render();
+  assert.equal(segments.length, 0);
+  assert.match(target.innerHTML, /暂时无法读取数据/);
+});
+
 test('Flow page warning shows its own reason and screenshot without a generation task', () => {
   const incident = {id:'0123456789abcdef0123456789abcdef', phase:'login', has_screenshot:true};
   const context = vm.createContext({incident});
