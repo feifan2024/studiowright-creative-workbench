@@ -201,31 +201,61 @@
         </section>
 
         <section id="tasksView" class="view" aria-labelledby="tasksHeading" hidden>
-          <div class="page-heading"><div><div class="eyebrow"><span></span> TASKS</div><h1 id="tasksHeading">Flow 任务</h1><p>在算力中心查看流程进度和原后台任务。</p></div><a class="button button-light" href="#api" data-view="api">查看 API 文档 →</a></div>
-          <div class="notice" role="note"><span class="notice-symbol" aria-hidden="true">i</span><span>Flow 任务由原后台执行，系统自动安排账号和项目。</span></div>
-          <details class="panel task-tools original-tasks" aria-labelledby="flowCreateHeading">
-            <summary><strong id="flowCreateHeading">创建 Flow 任务</strong></summary><p class="panel-caption">无需填写项目，系统自动安排账号和项目；任务会真实生成并可能消耗积分。</p>
-            <div class="workflow-demo">
-              <details><summary>项目设置（可选）</summary><p><label for="flowProject">指定已有项目（可选）</label><br><select id="flowProject"><option value="auto">自动安排账号和项目</option></select></p><p>保持自动安排即可直接创建任务，无需先建立或填写项目。</p></details>
-              <p><label for="flowKind">类型</label> <select id="flowKind"><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option></select>
-              <label for="flowModel">模型</label> <select id="flowModel"></select>
-              <label for="flowAspect">比例</label> <select id="flowAspect"></select>
-              <label for="flowCount">数量</label> <select id="flowCount"><option>1</option><option>2</option><option>3</option><option>4</option></select></p>
-              <p id="flowVideoOptions" hidden><label for="flowResolution">清晰度</label> <select id="flowResolution"><option>720p</option><option>360p</option></select>
-              <label for="flowDuration">时长（秒）</label> <select id="flowDuration"><option>8</option><option>4</option><option>6</option><option>10</option></select></p>
-              <p><label for="flowStyleId">画风 ID（可选）</label> <input id="flowStyleId" type="text" autocomplete="off"></p>
-              <p><label for="flowPrompt">提示词</label></p><textarea id="flowPrompt" rows="4" cols="70" maxlength="10000"></textarea>
-              <p><label><input id="flowAutoRetry" type="checkbox" checked disabled> 单图或单视频失败后自动换号重试（最多 3 次）</label><br><small>取消勾选后只尝试一次。结果不明时保留原任务供核对。</small></p>
-              <p><label><input id="flowConfirm" type="checkbox"> 我确认创建本次任务，并同意此次可能产生的积分消耗</label></p>
-              <div class="workflow-demo-actions"><button id="flowSend" class="button button-primary" type="button" disabled>提交 Flow 任务</button><button id="flowNewRequest" class="button button-light" type="button" hidden>已核对，结束当前记录</button></div>
-              <p id="flowMessage" role="status">请选择项目并填写提示词。</p>
+          <div class="page-heading desk-heading"><div><h1 id="tasksHeading">Flow 任务</h1></div><a class="button button-light" href="#api" data-view="api">API 文档 <span aria-hidden="true">→</span></a></div>
+          <section class="panel flow-create" aria-labelledby="flowCreateHeading">
+            <header class="flow-create-header">
+              <h2 id="flowCreateHeading">创建 Flow 任务</h2>
+              <p>系统默认自动安排账号和项目。</p>
+            </header>
+            <div class="flow-create-body">
+              <div class="flow-create-prompt">
+                <label for="flowPrompt">提示词</label>
+                <textarea id="flowPrompt" rows="8" maxlength="10000" placeholder="描述你要生成的内容"></textarea>
+              </div>
+              <section class="flow-create-settings" aria-labelledby="flowSettingsHeading">
+                <h3 id="flowSettingsHeading">生成设置</h3>
+                <div class="flow-settings-grid">
+                  <label class="flow-field" for="flowKind">类型<select id="flowKind"><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option></select></label>
+                  <label class="flow-field" for="flowCount">数量<select id="flowCount"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+                  <label class="flow-field flow-field-wide" for="flowModel">模型<select id="flowModel"></select></label>
+                  <label class="flow-field" for="flowAspect">比例<select id="flowAspect"></select></label>
+                  <label class="flow-field" for="flowStyleId">画风 ID（可选）<input id="flowStyleId" type="text" autocomplete="off"></label>
+                  <div id="flowVideoOptions" class="flow-settings-grid flow-field-wide" hidden>
+                    <label class="flow-field" for="flowResolution">清晰度<select id="flowResolution"><option>720p</option><option>360p</option></select></label>
+                    <label class="flow-field" for="flowDuration">时长（秒）<select id="flowDuration"><option>8</option><option>4</option><option>6</option><option>10</option></select></label>
+                  </div>
+                  <label class="flow-field flow-field-wide" for="flowProject">项目（可选）<select id="flowProject"><option value="auto">自动安排账号和项目</option></select></label>
+                </div>
+              </section>
             </div>
-          </details>
-          <details id="taskWindowsPanel" class="panel task-tools original-tasks" aria-labelledby="taskWindowsHeading"><summary><strong id="taskWindowsHeading">调度中心 · 账号任务窗口</strong></summary><p id="taskWindowsSummary" class="panel-caption">正在读取窗口绑定…</p><p class="panel-caption">每个账号固定一扇任务窗口，同账号输入排队。发送前重新核对账号、项目网页和桌面窗口，再激活到前台；手工窗口和草稿保留。以下显示上次核对结果。</p><div id="taskWindowsTable" class="table-wrap"><div class="empty">正在读取窗口…</div></div>
-            <section class="original-tasks" aria-labelledby="accountSyncHeading">
-              <div class="panel-heading"><div><h3 id="accountSyncHeading">调度任务记录</h3><p id="accountSyncSummary" class="panel-caption">正在读取调度任务记录…</p></div></div>
-              <div id="accountSyncTable" class="table-wrap"><div class="empty">正在读取调度任务记录…</div></div>
-            </section>
+            <footer class="flow-create-footer">
+              <div class="flow-create-checks">
+                <label><input id="flowAutoRetry" type="checkbox" checked disabled aria-describedby="flowRetryHelp"> 单图或单视频失败后自动换号重试（最多 3 次）</label>
+                <small id="flowRetryHelp">取消勾选后只尝试一次。结果未确认时保留原任务供核对。</small>
+                <label><input id="flowConfirm" type="checkbox"> 我确认创建这次任务，并同意可能产生的积分消耗</label>
+              </div>
+              <div class="flow-create-actions">
+                <button id="flowSend" class="button button-primary" type="button" disabled>提交 Flow 任务</button>
+                <button id="flowNewRequest" class="button button-light" type="button" hidden>已核对，结束当前记录</button>
+              </div>
+              <p id="flowMessage" role="status">填写提示词并确认积分消耗后提交。</p>
+            </footer>
+          </section>
+          <details id="taskWindowsPanel" class="panel flow-check-records original-tasks" aria-labelledby="taskWindowsHeading">
+            <summary><strong id="taskWindowsHeading">账号检查记录</strong><span>任务窗口与后台检查</span></summary>
+            <div class="flow-check-body">
+              <section aria-labelledby="flowCheckWindowsHeading">
+                <h3 id="flowCheckWindowsHeading">账号任务窗口</h3>
+                <p id="taskWindowsSummary" class="panel-caption">正在读取窗口绑定…</p>
+                <p class="panel-caption">此处显示上次核对结果。发送时会重新核对账号、项目和任务窗口。</p>
+                <div id="taskWindowsTable" class="table-wrap"><div class="empty">正在读取窗口…</div></div>
+              </section>
+              <section aria-labelledby="accountSyncHeading">
+                <h3 id="accountSyncHeading">后台检查</h3>
+                <p id="accountSyncSummary" class="panel-caption">正在读取账号检查记录…</p>
+                <div id="accountSyncTable" class="table-wrap"><div class="empty">正在读取账号检查记录…</div></div>
+              </section>
+            </div>
           </details>
         </section>
         <section id="recordsView" class="view" aria-labelledby="recordsHeading" hidden>

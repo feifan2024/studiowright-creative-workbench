@@ -1000,12 +1000,12 @@ function renderSchedulerTaskRecords(snapshot) {
   if (!table || !summary) return;
   const available = snapshot?.flow_state?.available && Array.isArray(snapshot.tasks);
   const rows = available ? (snapshot.scheduler_tasks || snapshot.tasks.filter(item => schedulerTaskKinds.has(item.kind))) : [];
-  summary.textContent = available ? `共 ${rows.length} 条 · 自动更新` : '暂时无法读取调度记录';
+  summary.textContent = available ? `共 ${rows.length} 条 · 自动更新` : '暂时无法读取账号检查记录';
   const accounts = new Map((snapshot?.real_accounts?.items || []).map(a => [a.profile, a.email || a.label || a.profile]));
   const markup = rows.length ? `<table><thead><tr><th>任务类型</th><th>账号</th><th>状态</th><th>提交时间</th><th>任务编号</th><th>结果</th></tr></thead><tbody>${rows.map(item =>
     `<tr class="task-kind-sync"><td>${esc(kindLabel(item.kind))}</td><td>${esc(accounts.get(item.source_profile) || item.source_profile)}</td><td>${statusBadge(item.status)}</td><td>${esc(dateTime(item.created))}</td><td><code title="${esc(item.source_id)}">${esc(item.source_id)}</code></td><td>${taskFailureMarkup(item) || (item.note ? esc(item.note) : '—')}</td></tr>`).join('')}</tbody></table>`
-    : available ? empty('暂无调度任务记录', '账号同步与状态检查等记录会显示在这里。')
-    : empty('调度任务记录暂不可读取', snapshot?.flow_state?.message || '请检查 Flow 后台连接。');
+    : available ? empty('暂无账号检查记录', '账号同步与状态检查等记录会显示在这里。')
+    : empty('账号检查记录暂不可读取', snapshot?.flow_state?.message || '请检查 Flow 后台连接。');
   if (table.innerHTML !== markup) table.innerHTML = markup;
 }
 
@@ -1122,7 +1122,7 @@ function renderTasks() {
   const filtered = query || status || selectedKind;
   const reset = $("taskFiltersReset");
   if (reset) reset.disabled = !filtered;
-  $("taskListSummary").textContent = (filtered ? `找到 ${tasks.length} 条，共 ${productionRows.length} 条` : `共 ${productionRows.length} 条 · 后台检查见调度中心`) + (snapshot.flow_state.skipped_tasks ? ` · ${snapshot.flow_state.skipped_tasks} 条格式异常` : "");
+  $("taskListSummary").textContent = (filtered ? `找到 ${tasks.length} 条，共 ${productionRows.length} 条` : `共 ${productionRows.length} 条 · 后台检查见 Flow 页的「账号检查记录」`) + (snapshot.flow_state.skipped_tasks ? ` · ${snapshot.flow_state.skipped_tasks} 条格式异常` : "");
   if(snapshot.flow_coordination?.window_policy==='one_per_account') {
     const held=(snapshot.flow_coordination.windows || []).filter(w=>['submitting','submitted','generated','result_unknown'].includes(w.state)).length;
     $('taskListSummary').textContent += ` · 每账号固定窗口、同账号排队 · 单图和单视频可换号重试，最多 3 次${held ? ` · ${held} 个窗口处理中或待核对` : ''}`;
@@ -1275,15 +1275,15 @@ function flowGovernance(snapshot, fresh = state.snapshotFresh, verifiedEmpty = n
       add('flow_empty','Flow 积分不足','积分恢复后重新检查。');
     const window=windows.get(account.profile);
     if (!window || !['idle','preparing','submitting','submitted','generated','downloading','blocked_draft','result_unknown','needs_verification'].includes(window.state))
-      add('flow_binding','任务窗口运行状态待核对','打开调度中心核对固定窗口。');
+      add('flow_binding','任务窗口运行状态待核对','打开 Flow 页的「账号检查记录」核对固定窗口。');
     if (window?.state==='blocked_draft' && !(verifiedEmpty.has(account.profile) && window.updated <= probeStartedAt))
       add('flow_draft','固定任务窗口有草稿或附件','点 Flow 一键就绪，算力中心会刷新固定任务页并复查。');
     if (!issues.some(issue=>issue.key.startsWith('flow_window_') || issue.key==='flow_draft')) {
       const life=lifecycle.get(account.profile);
       if (c?.window_lifecycle_available!==true || life?.unique_ok!==1)
-        add('flow_binding','任务窗口唯一性待核对','打开调度中心核对原账号窗口，保留手动窗口和草稿。');
+        add('flow_binding','任务窗口唯一性待核对','打开 Flow 页的「账号检查记录」核对原账号窗口，保留手动窗口和草稿。');
       if (c?.window_bindings_available!==true || bindings.get(account.profile)?.binding_state!=='verified')
-        add('flow_binding','任务窗口绑定待核对','打开调度中心查看账号、窗口和项目绑定。');
+        add('flow_binding','任务窗口绑定待核对','打开 Flow 页的「账号检查记录」查看账号、窗口和项目绑定。');
     }
     return {account,issues};
   }).filter(row=>row.issues.length) : [];
@@ -1591,7 +1591,7 @@ function auditFlowAccounts(snapshot, dispatch, pageChecks, probeStartedAt) {
     const review=pageChecks?.review?.[profile];
     const repair=pageChecks?.repairs?.[profile];
     const pageIssues={
-      binding:['固定任务窗口绑定待核对','在调度中心核对这个账号的固定窗口和项目。'],
+      binding:['固定任务窗口绑定待核对','在 Flow 页的「账号检查记录」核对这个账号的固定窗口和项目。'],
       unique:['发现多窗口或任务页数量不符','保留手工页面和草稿，核对哪一个是固定任务窗口。'],
       project:['任务窗口不在该账号的已登记项目','核对对应项目与固定窗口绑定。'],
       load_failed:['固定任务页加载失败','点 Flow 一键就绪，刷新原任务页并复查。'],
