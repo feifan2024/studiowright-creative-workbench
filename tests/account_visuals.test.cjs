@@ -45,7 +45,7 @@ test('overview distribution applies segment widths through the browser style API
 test('Flow page warning shows its own reason and screenshot without a generation task', () => {
   const incident = {id:'0123456789abcdef0123456789abcdef', phase:'login', has_screenshot:true};
   const context = vm.createContext({incident});
-  for (const name of ['esc', 'flowAccountReason', 'flowAccountNoticeMarkup']) load(name, context);
+  for (const name of ['esc', 'flowLoginNotice', 'flowAccountReason', 'flowAccountNoticeMarkup']) load(name, context);
   const code = 'flowAccountNoticeMarkup(flowAccountReason({flow_page_incident:incident}, {}, {}, null), incident)';
   const warning = vm.runInContext(code, context);
   assert.match(warning, /核对登录时检测到异常活动/);
@@ -102,7 +102,7 @@ test('opening the original removes the thumbnail immediately and survives a stal
 
 test('Flow preflight mismatch explains why the account is blocked without reusing an old screenshot', () => {
   const context = vm.createContext({});
-  for (const name of ['esc', 'flowAccountReason', 'flowAccountNoticeMarkup']) load(name, context);
+  for (const name of ['esc', 'flowLoginNotice', 'flowAccountReason', 'flowAccountNoticeMarkup']) load(name, context);
   const message = vm.runInContext(`
     const reason = flowAccountReason({flow_preflight_reasons:['profile_languages_mismatch', 'system_timezone_mismatch']}, {}, {}, null);
     flowAccountNoticeMarkup(reason, {id:'123456789abc'});
@@ -121,13 +121,19 @@ test('Flow reports a verified Google challenge before stale balances and clears 
       window_bindings:[{profile:'a',binding_state:'verified'}]}};
   const checks = {accounts:{a:'verification_required'}};
   const context = vm.createContext({account,snapshot,checks,flowReadinessObservation:null,flowWindowIssue:()=>null});
-  for (const name of ['accountIssues','flowGovernance','auditFlowAccounts','flowAccountReason','flowOccupiedSlots']) load(name,context);
+  for (const name of ['flowLoginNotice','accountIssues','flowGovernance','auditFlowAccounts','flowAccountReason','flowOccupiedSlots']) load(name,context);
   const row = () => vm.runInContext('auditFlowAccounts(snapshot,{available:true,active:0,maximum:1},checks,1)[0]',context);
-  assert.equal(row().issues[0].title,'需要 Google 验证');
+  assert.equal(row().issues[0].title,'需要用户登录');
   assert.equal(row().status,'blocked');
   assert.match(vm.runInContext("flowAccountReason(account,snapshot,{},'verification_required').text",context), /Ubuntu 浏览器完成 Google 验证/);
-  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'login').label",context), 'Flow 需要重新登录');
-  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'flow_landing').label",context), 'Flow 返回了介绍页');
+  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'login').label",context), '需要用户登录');
+  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'flow_landing').label",context), '需要用户登录');
+  assert.equal(vm.runInContext("flowLoginNotice('load_failed')",context),null);
+  for (const loginPage of ['login', 'flow_landing']) {
+    checks.accounts.a = loginPage;
+    assert.equal(row().issues[0].title,'需要用户登录');
+    assert.equal(row().status,'blocked');
+  }
   checks.accounts.a = 'ok';
   assert.equal(row().issues.length,1);
   assert.equal(row().issues[0].title,'任务页已就绪，积分待核对');
@@ -220,6 +226,8 @@ test('Flow refresh cooldown belongs to the account that was already rechecked', 
   vm.runInContext("autoRecoverFlowPages({accounts:{first:'overlay',second:'overlay'}})",context);
   assert.deepEqual(Array.from(context.autoFlowRecoveryProfiles), ['second']);
   await context.autoFlowRecovery;
+  vm.runInContext("autoRecoverFlowPages({accounts:{first:'login',second:'verification_required'}})",context);
+  assert.equal(context.autoFlowRecovery,null);
 });
 
 test('compact Gemini quota keeps recovery dates in hover details', () => {
@@ -487,6 +495,7 @@ test('account cards render fallback states without aborting the account list', (
 
 test('account reason identifies running work without inventing a failure', () => {
   const context = vm.createContext({});
+  load('flowLoginNotice', context);
   load('flowAccountReason', context);
   context.account = {profile:'a'};
   context.snapshot = {flow_coordination:{windows:[{profile:'a',task_id:'current',stage:'preparing'}]},
@@ -499,6 +508,7 @@ test('account reason identifies running work without inventing a failure', () =>
 
 test('the account card shows only the matching failure screenshot', () => {
   const context = vm.createContext({});
+  load('flowLoginNotice', context);
   load('flowAccountReason', context);
   load('flowAccountNoticeMarkup', context);
   context.account = {profile:'a'};
@@ -519,6 +529,7 @@ test('the account card shows only the matching failure screenshot', () => {
 test('Flow cooldown shows the failed attempt even after the task succeeds on another account', () => {
   const context = vm.createContext({});
   load('esc', context);
+  load('flowLoginNotice', context);
   load('flowAccountReason', context);
   load('flowAccountNoticeMarkup', context);
   context.account = {profile:'a', flow_cooling:true};
@@ -544,6 +555,7 @@ test('Flow cooldown shows the failed attempt even after the task succeeds on ano
 
 test('unlinked busy state cannot be described as a confirmed failure', () => {
   const context = vm.createContext({});
+  load('flowLoginNotice', context);
   load('flowAccountReason', context);
   const reason = vm.runInContext("flowAccountReason({profile:'a'},{tasks:[]},{status:'blocked'},'busy')", context);
   assert.equal(reason.label, '暂不可用原因');
@@ -557,6 +569,7 @@ test('a running account is queued rather than marked failed, while real blockers
     flowWindowIssue:()=>null, flowRecoveryLabels:{},
     flowGovernance:()=>({shared:[],rows:[{account,issues:[]}]}),
   });
+  load('flowLoginNotice', context);
   load('accountIssues', context);
   load('auditFlowAccounts', context);
   context.account = account;
@@ -582,6 +595,7 @@ test('a finished no-image lookup is failed while an active attempt remains activ
 
 test('ready account clears historical failure but preserves task history and current blockers', () => {
   const context=vm.createContext({});
+  load('flowLoginNotice', context);
   load('flowAccountReason',context);
   context.account={profile:'a'};
   context.snapshot={flow_coordination:{windows:[{profile:'a',task_id:'old'}]},tasks:[{

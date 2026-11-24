@@ -70,6 +70,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .account-alias { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .account-login { flex: none; border-radius: 30px; padding: 4px 9px; background: #f1f2ee; color: #69756d; font-size: 11px; }
 .account-login.is-ready { color: #1c7356; background: #e6f5eb; }
+.account-login.is-login-required { color: #982d2a; background: #fbe7e4; }
 .account-detail-anchor { position: relative; flex: none; }
 .account-detail-anchor::after { content: ''; position: absolute; top: 100%; right: 0; width: 100%; height: 8px; }
 .account-details { flex: none; }
