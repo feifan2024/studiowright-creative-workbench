@@ -38,7 +38,9 @@ def busy_official(db,key):
 
 class OfficialPool:
     def __init__(self,pool,runtime=None):
-        self.pool=pool;self.runtime=runtime or OfficialRuntime(pool.state_dir/'official-runtime.json')
+        self.pool=pool
+        self.runtime=runtime or OfficialRuntime(pool.state_dir/'official-runtime.json',
+                                                excluded_accounts=pool.removed_gemini_accounts)
         self.stop=threading.Event();self.wake=threading.Event();self.threads=[]
         with pool.connection() as db:
             db.executescript('''

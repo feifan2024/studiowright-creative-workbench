@@ -169,6 +169,8 @@ class RealPool:
                     account_key TEXT PRIMARY KEY, gemini_enabled INTEGER NOT NULL DEFAULT 1
                     CHECK(gemini_enabled IN (0,1)), keepalive_enabled INTEGER NOT NULL DEFAULT 1
                     CHECK(keepalive_enabled IN (0,1)));
+                CREATE TABLE IF NOT EXISTS gemini_pool_removals(
+                    account_key TEXT PRIMARY KEY, removed_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS gemini_dispatch_policy(
                     id INTEGER PRIMARY KEY CHECK(id=1), five_hour_limit INTEGER NOT NULL
                     CHECK(five_hour_limit BETWEEN 1 AND 100), weekly_limit INTEGER NOT NULL
@@ -328,6 +330,15 @@ class RealPool:
     def annotate(self, real_accounts):
         if not real_accounts.get('available'):
             return
+        removed = self.removed_gemini_accounts()
+        try:
+            registered = (self.official.runtime.settings() or {}).get('accounts', {})
+        except (OSError, ValueError, TypeError):
+            registered = {}
+        for item in real_accounts.get('items', []):
+            account = item.get('key', '').removeprefix('flow-account-')
+            item['gemini_removed'] = account in removed
+            item['gemini_registered'] = account in registered
         if self.official.ready:
             from official_pool import OFFICIAL_REQUEST_SQL,busy_official
             from gemini_effort import text_model_options
@@ -410,6 +421,45 @@ class RealPool:
             item['gemini_check_reason'] = detail['reason'] if detail else None
             item['gemini_quota_state'] = detail['quota_state'] if detail else 'historical' if item['gemini_usage'] else 'unchecked'
 
+    def removed_gemini_accounts(self):
+        with self.connection() as db:
+            return {row[0] for row in db.execute('SELECT account_key FROM gemini_pool_removals')}
+
+    def remove_gemini_account(self, account, items):
+        from gemini_quota_verification import status as quota_verification_status
+        from official_quota import reader_for
+        self.allowed(account, items)
+        message = '账号已从 Gemini 号池删除。历史对话已保留，Flow 和 Music 不受影响。'
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if self.maintenance():
+                raise Conflict('工作台正在更新，请稍后操作。')
+            if db.execute('SELECT 1 FROM gemini_pool_removals WHERE account_key=?', (account,)).fetchone():
+                return {'removed': True, 'message': message}
+            registered = (self.official.runtime.settings() or {}).get('accounts', {})
+            if account not in registered:
+                raise Conflict('该账号当前不在 Gemini 号池。')
+            active = db.execute("SELECT 1 FROM requests WHERE account_key=? AND status IN ('queued','dispatching','running') LIMIT 1",
+                                (account,)).fetchone()
+            monitor = db.execute("SELECT 1 FROM account_monitor WHERE account_key=? AND status='dispatching'",
+                                 (account,)).fetchone()
+            authorizing = db.execute("SELECT 1 FROM official_reauth WHERE account_key=? AND state IN ('waiting','queued','resending')",
+                                     (account,)).fetchone()
+            batch = self.official.reauth.activation.status()
+            verifying = quota_verification_status(reader_for(self.official.runtime))
+            email = registered[account].get('email')
+            authorization_busy = any(stage['state'] == 'starting' or
+                                     (stage['state'] in ('waiting','rechecking') and stage.get('email') == email)
+                                     for stage in (batch, verifying))
+            if active or monitor or authorizing or authorization_busy:
+                raise Conflict('该账号有排队、执行或授权中的 Gemini 操作，请结束后再删除。')
+            db.execute('INSERT INTO gemini_pool_removals(account_key,removed_at) VALUES(?,?)', (account,time.time()))
+            # A worker may already have read the runtime inventory before this transaction.
+            db.execute('''INSERT INTO account_preferences(account_key,gemini_enabled) VALUES(?,0)
+                          ON CONFLICT(account_key) DO UPDATE SET gemini_enabled=0''', (account,))
+            db.execute('COMMIT')
+        return {'removed': True, 'message': message}
+
     def set_gemini_enabled(self, account, enabled, items):
         """Change workbench Gemini eligibility without altering Flow's account or credentials."""
         self.allowed(account, items)
@@ -420,6 +470,8 @@ class RealPool:
             try:
                 if self.maintenance():
                     raise Conflict('工作台正在更新，请稍后操作。')
+                if enabled and db.execute('SELECT 1 FROM gemini_pool_removals WHERE account_key=?', (account,)).fetchone():
+                    raise Conflict('该账号已从 Gemini 号池删除。')
                 active = db.execute("SELECT 1 FROM requests WHERE account_key=? AND status='dispatching' LIMIT 1", (account,)).fetchone()
                 monitor = db.execute('SELECT status FROM account_monitor WHERE account_key=?', (account,)).fetchone()
                 if active or (monitor and monitor['status'] == 'dispatching'):

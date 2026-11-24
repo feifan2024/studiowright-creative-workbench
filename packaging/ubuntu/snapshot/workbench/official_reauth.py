@@ -132,6 +132,8 @@ class Reauthorization:
     def view(self, row, attempts, state):
         eligible=(row.get('block_reason') in (AUTH_UNSENT,'provider_error')
                   and row.get('block_created')==row.get('finished') and self.evidence(row,attempts))
+        if eligible and row.get('account_key') in self.pool.removed_gemini_accounts():
+            eligible=False
         if state:
             return {'state':state,'can_start':state in REDO_STATES and eligible}
         return {'state':'required','can_start':True} if eligible else None

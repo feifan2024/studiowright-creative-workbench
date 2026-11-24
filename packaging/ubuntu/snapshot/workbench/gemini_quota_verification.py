@@ -13,12 +13,16 @@ def status(reader):
 
 
 def start(reader):
+    try:
+        accounts = (reader.runtime.settings() or {}).get('accounts', {})
+    except (OSError, ValueError, TypeError):
+        accounts = {}
     with reader.lock:
         if reader.verification['state'] in ('starting', 'waiting', 'rechecking'):
             return dict(reader.verification)
         now = time.time()
         plan = [(key, link) for key, (link, stamp) in reader.verification_links.items()
-                if now-stamp <= 600 and reader.rows.get(key, {}).get('status') == 'verification_required']
+                if key in accounts and now-stamp <= 600 and reader.rows.get(key, {}).get('status') == 'verification_required']
         reader.verification = {'state': 'starting' if plan else 'completed',
                                'total':len(plan), 'completed':0, 'failed':0}
         if plan:

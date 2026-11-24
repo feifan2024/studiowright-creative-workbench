@@ -121,7 +121,7 @@ function officialAccount(account) {
 }
 function officialSummary() {
   if (channelReadFailed || !state.channelStatus?.available) return '官方实测记录暂不可读取；不据此判断账号故障。';
-  const accounts = state.snapshot?.real_accounts?.items || [];
+  const accounts = (state.snapshot?.real_accounts?.items || []).filter(account=>!account.gemini_removed);
   const records = accounts.map(officialAccount);
   const count = kind => records.filter(r => r.outcome === kind).length;
   const {ready}=geminiReadiness(state.snapshot);
@@ -439,6 +439,7 @@ function accountIssues(account, snapshot = state.snapshot, geminiRow = null,
 }
 
 function geminiAccountAvailability(account) {
+  if (account.gemini_removed) return {manual:false, auto:false, reason:'已从 Gemini 号池删除'};
   if (account.gemini_channel === 'official_antigravity_cli') {
     const item = officialAccount(account).data;
     const permitted = !channelReadFailed && state.channelStatus?.production_send_available === true && item?.dispatch_eligible === true;
@@ -471,9 +472,10 @@ function geminiSelectionReady(value) {
 
 function renderGeminiAccountOptions(select, accounts) {
   const selected = select.value;
-  const autoCount = accounts.filter((item) => geminiAccountAvailability(item).auto).length;
+  const poolAccounts = accounts.filter(item=>!item.gemini_removed);
+  const autoCount = poolAccounts.filter((item) => geminiAccountAvailability(item).auto).length;
   const markup = `<option value="auto"${autoCount ? '' : ' disabled'}>轮询分配账号（${autoCount ? autoCount + ' 个可参与' : '暂无符合条件账号'}）</option>`
-    + accounts.map((item) => {
+    + poolAccounts.map((item) => {
       const availability = geminiAccountAvailability(item);
       return `<option value="${esc(item.key.slice('flow-account-'.length))}"${availability.manual ? '' : ' disabled'}>${esc(item.email || item.label || item.profile)} · ${esc(availability.reason)}</option>`;
     }).join('');
@@ -1409,12 +1411,13 @@ function flowReadiness(snapshot) {
 
 function geminiReadiness(snapshot) {
   const known=snapshot?.real_accounts?.available===true && state.channelStatus?.available && !channelReadFailed;
+  const total=(snapshot?.real_accounts?.items || []).filter(account=>!account.gemini_removed).length;
   const rows=known ? auditGeminiAccounts(snapshot,state.channelStatus,officialQuotaReadFailed ? null : officialQuotaData) : [];
   const ready=rows.filter(countsAsReady).length;
   const checked=known && rows.length>0 && (ready>0 || rows.every(row=>accountReadinessStatus(row)==='blocked'));
   const verifyRow=row=>accountReadinessStatus(row)==='blocked' && (row.issues || []).length > 0 &&
     (row.issues || []).every(issue => issue.key === 'confirmed_verification');
-  return {ready:checked ? ready : null,
+  return {ready:known && total===0 ? 0 : checked ? ready : null, total,
     blocked:rows.filter(row=>accountReadinessStatus(row)==='blocked' && !verifyRow(row)).length,
     verify:rows.filter(verifyRow).length,
     pending:rows.filter(row=>['unknown','checking'].includes(accountReadinessStatus(row))).length,
@@ -1434,7 +1437,7 @@ function renderAccountInsights(snapshot, target) {
   const flow = snapshot?.flow_insights;
   const amount = n=>typeof n==='number' && Number.isFinite(n) ? new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1}).format(n) : '—';
   const accounts = snapshot?.real_accounts?.items || [];
-  const records = accounts.map(officialAccount);
+  const records = accounts.filter(account=>!account.gemini_removed).map(officialAccount);
   const officialKnown = state.channelStatus?.available && !channelReadFailed;
   const timing = records.map(r=>r.data?.latest_success?.total_ms ?? (r.outcome==='succeeded' ? r.call?.total_ms : null))
     .filter(n=>typeof n==='number' && Number.isFinite(n));
@@ -1449,16 +1452,16 @@ function renderAccountInsights(snapshot, target) {
   const coverage = !yesterday || yesterday.coverage==='not_recorded' ? '昨日暂无覆盖记录'
     : `${yesterday.completed ?? '—'} 个完成 · ${yesterday.unpriced ?? '—'} 个未记价格${yesterday.unresolved ? ` · ${yesterday.unresolved} 个待确认` : ''}${yesterday.coverage==='partial' ? ' · 数据不完整' : ''}`;
   const dispatch = state.channelStatus?.dispatch;
-  const {ready:eligible,blocked:geminiBlocked,verify:geminiVerifyCount,pending:geminiPending}=geminiReadiness(snapshot);
+  const {ready:eligible,total:geminiTotal,blocked:geminiBlocked,verify:geminiVerifyCount,pending:geminiPending}=geminiReadiness(snapshot);
   const ring = (service,ready,override)=>{
-    const total=accounts.length;
-    const known=ready!=null && total>0;
+    const total=service==='GEMINI' ? geminiTotal : accounts.length;
+    const known=ready!=null && (total>0 || service==='GEMINI');
     const rest=known ? total-ready : null;
     const label=override ?? (rest==null ? '状态待核对' : rest>0 ? `${amount(rest)} 个未就绪` : '');
     const key = service.toLowerCase();
     const name = key === 'flow' ? 'Flow' : 'Gemini';
     const description = known ? `就绪 ${amount(ready)} / ${total}` : '状态待核对';
-    return `<button type="button" class="dashboard-ring-item governance-entry" data-governance="${key}" aria-label="${name} 一键就绪，${description}" title="${name} 一键就绪"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${total || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></button>`;
+    return `<button type="button" class="dashboard-ring-item governance-entry" data-governance="${key}" aria-label="${name} 一键就绪，${description}" title="${name} 一键就绪"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${known || total ? total : '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></button>`;
   };
   // 音乐账号池圆环：就绪（令牌未过期）账号数 / 池内账号数，只修复未就绪账号。
   const musicAccounts = musicServiceStatus?.accounts || [];
@@ -1468,13 +1471,13 @@ function renderAccountInsights(snapshot, target) {
   const musicLabel = !musicServiceStatus?.available ? (musicServiceStatus?.reason || '音乐服务暂不可用')
     : musicTotal === 0 ? '账号池为空' : musicReady < musicTotal ? `${musicTotal - musicReady} 个未就绪` : '';
   const musicRingMarkup = `<button type="button" class="dashboard-ring-item governance-entry" data-music-readiness aria-label="音乐一键就绪，${musicKnown ? `就绪 ${amount(musicReady)} / ${musicTotal}` : '状态待读取'}"><span>MUSIC</span><span class="insight-ring insight-ring--music ${musicKnown ? '' : 'is-unknown'}" data-dashboard-ring="MUSIC"><span class="governance-ring-center"><strong>${musicKnown ? amount(musicReady) : '—'}<small> / ${musicTotal || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="music" ${musicLabel ? '' : 'hidden'}>${esc(musicLabel)}</span></button>`;
-  target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验` : (geminiPending || geminiBlocked ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ') : null))}${musicRingMarkup}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${accounts.length} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
+  target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验` : (geminiPending || geminiBlocked ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ') : null))}${musicRingMarkup}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${geminiTotal} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
   <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话轮询分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
   scope.querySelector('.dashboard-metrics').insertAdjacentHTML('afterend',
     '<p data-governance-status role="status" class="sr-only"></p>');
   $('dashboardRuntime').replaceChildren(scope.querySelector('[data-dashboard-running]'));
   scope.querySelector('[data-dashboard-ring="FLOW"]').style.setProperty('--fill',`${health ?? 0}%`);
-  scope.querySelector('[data-dashboard-ring="GEMINI"]').style.setProperty('--fill',`${eligible!=null && accounts.length ? eligible/accounts.length*100 : 0}%`);
+  scope.querySelector('[data-dashboard-ring="GEMINI"]').style.setProperty('--fill',`${eligible!=null && geminiTotal ? eligible/geminiTotal*100 : 0}%`);
   scope.querySelector('[data-dashboard-ring="MUSIC"]').style.setProperty('--fill',`${musicKnown && musicTotal ? musicReady/musicTotal*100 : 0}%`);
   scope.querySelector('[data-insight-accounts]').addEventListener('click',()=>setView('accounts'));
   scope.querySelector('[data-insight-conversations]').addEventListener('click',()=>setView('conversations'));
@@ -1646,7 +1649,7 @@ const geminiProbeReasons={
 
 function auditGeminiAccounts(snapshot, channel, quotaData, expected = null) {
   const byKey=new Map((channel?.accounts || []).map(item=>[item.account_key,item]));
-  return (snapshot.real_accounts?.items || []).map(account=>{
+  return (snapshot.real_accounts?.items || []).filter(account=>!account.gemini_removed).map(account=>{
     const key=account.key?.replace(/^flow-account-/,'');
     const current=byKey.get(key);
     const quota=quotaData?.accounts?.[key];
@@ -1947,6 +1950,7 @@ function renderGovernance() {
   }).join('');
   let body;
   if (audit?.running && !rows.length) body='<p class="governance-empty">正在检查账号、授权和队列，你不用操作。</p>';
+  else if (isGemini && audit?.checkedAt && !audit.error && !rows.length) body='<p class="governance-empty">Gemini 号池当前没有账号。</p>';
   else if (!rows.length) body='<p class="governance-empty">本轮未能确认账号状态，暂时无需操作。</p>';
   else body=`<details data-govern-details><summary>查看全部 ${rows.length} 个账号的检查明细</summary>${detailRows}</details>`;
   const list=$('governanceItems');
@@ -2377,7 +2381,7 @@ function renderAccounts() {
   const automatic = accounts.filter((item) => geminiAccountAvailability(item).auto);
   const paused = accounts.filter((item) => item.gemini_enabled === false).length;
   const balanceSummary=flowReadinessNow.usableBalance==null ? '' : `（就绪积分 ${flowReadinessNow.usableBalance.toLocaleString('zh-CN')}）`;
-  $("realAccountsSummary").textContent = `共 ${accounts.length} 个账号 · Flow 就绪 ${ready} / ${accounts.length}${balanceSummary}${flowReadinessNow.stale ? '（同步暂缓，显示上次结果）' : ''} · Gemini 就绪 ${geminiReadinessNow.ready ?? '—'} / ${accounts.length}`;
+  $("realAccountsSummary").textContent = `共 ${accounts.length} 个账号 · Flow 就绪 ${ready} / ${accounts.length}${balanceSummary}${flowReadinessNow.stale ? '（同步暂缓，显示上次结果）' : ''} · Gemini 就绪 ${geminiReadinessNow.ready ?? '—'} / ${geminiReadinessNow.total}`;
   for (const select of [$("geminiAccount"), $("chatAccount")]) {
     renderGeminiAccountOptions(select, accounts);
   }
@@ -2411,7 +2415,7 @@ function renderAccounts() {
       ? {...auditedFlowRow, checking:true, recovering:true, status:'checking', issues:[]}
       : auditedFlowRow;
     const geminiRow=geminiReadinessNow.rows.get(item.key);
-    const auth=governanceReauthFor(item);
+    const auth=item.gemini_removed ? null : governanceReauthFor(item);
     const authControl=auth?.mode!=='login_only' ? '' : auth.state==='waiting' ? '<span class="subtle">请到 Ubuntu 浏览器完成授权</span>' :
       auth.state==='completed' ? '<span class="subtle">授权已更新 · 待验活</span>' :
       auth.can_start ? `<button class="button button-light" type="button" data-govern-reauth="${esc(auth.request_id)}">打开 Ubuntu 授权页</button>` : '';
@@ -2460,10 +2464,10 @@ function renderAccounts() {
       ? ({blocked:'Gemini 处于不可派发状态，等待就绪核对通过。', unknown:'Gemini 状态尚未完成核对，等待下次检查。'}[geminiRow?.status] || 'Gemini 状态待核对，等待下次检查。') : '';
     // Derive each service's presentation from its own recorded state only.
     const flowNeedsAttention = flowRow?.status==='blocked' && !cooling;
-    const geminiNeedsAttention = geminiCard.attention;
+    const geminiNeedsAttention = !item.gemini_removed && geminiCard.attention;
     const needsAttention = flowNeedsAttention || geminiNeedsAttention;
     const geminiLastCheck = item.gemini_enabled === false ? '已暂停' : item.gemini === 'verified' ? '上次已核对' : '待核对';
-    const geminiStatusText = geminiCard.label;
+    const geminiStatusText = item.gemini_removed ? '已从号池删除' : geminiCard.label;
     const flowIssueTitle = flowIssues.map(issue => issue.title).join('；');
     const geminiIssueTitle = geminiIssues.map(issue => issue.title).join('；');
     const cardState = (flowPaused ? ' is-flow-paused' : cooling ? ' is-flow-cooling' : '') + (needsAttention ? ' is-account-issue' : '');
@@ -2483,21 +2487,23 @@ function renderAccounts() {
     const ownGemini = state.snapshot?.gemini_stats?.accounts?.[item.key.slice('flow-account-'.length)];
     const flowPerformance = flowDone + flowFailed ? `任务 ${flowDone} 成功 / ${flowFailed} 失败 · 成功率 ${Math.round(flowDone * 100 / (flowDone + flowFailed))}%` : '暂无已结束生成任务';
     const gemPerformance = ownGemini ? `对话 ${ownGemini.completed} 完成 · 平均首段 ${typeof ownGemini.avg_first_ms === 'number' ? (ownGemini.avg_first_ms / 1000).toFixed(1) + ' 秒' : '暂无实测'}` : '暂无算力中心对话记录';
-    const quotaView = accountOfficialQuotaMarkup(quotaKey);
+    const quotaView = item.gemini_removed ? {html:'',message:''} : accountOfficialQuotaMarkup(quotaKey);
     const flowNextCredit = item.flow_next_credit_date && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(item.flow_next_credit_date) && item.flow_next_credit_date >= new Date().toLocaleDateString("sv-SE", {timeZone:"Asia/Shanghai"}) ? item.flow_next_credit_date : '';
     const flowBalanceTitle = `积分余额${hasBalance && !item.flow_balance_fresh ? '（上次读取）' : ''}${flowNextCredit ? ' · 下次积分到账 ' + flowNextCredit : ''}`;
     const winRow = (state.snapshot?.flow_coordination?.windows || []).find(w => w.profile === item.profile && w.state === 'result_unknown' && w.task_id);
     const govRelease = winRow ? `<button type="button" class="button button-primary" style="margin-top:6px" data-govern-review="${esc(winRow.task_id)}" data-review-account="${esc(item.key)}">已核对，放行账号</button>` : '';
     const geminiVerify = (geminiRow && geminiRow.status !== 'ready' && geminiRow.status !== 'queue') ? `<button type="button" class="button button-light" style="margin-top:6px" data-gemini-verify>开始 Gemini 验证</button>` : '';
-    return `<article class="account-card${cardState}" draggable="true" data-drag-key="${esc(quotaKey)}">
+    const removeGemini = item.gemini_registered && !item.gemini_removed
+      ? `<button class="button button-light" type="button" data-remove-gemini="${accountKey}" aria-label="从 Gemini 号池删除 ${esc(identity)}"${item.gemini_busy ? ' disabled title="该账号正在处理 Gemini 请求"' : ''}>删除 Gemini 账号</button>` : '';
+    return `<article class="account-card${cardState}"${item.gemini_removed ? '' : ` draggable="true" data-drag-key="${esc(quotaKey)}"`}>
       <div class="account-card-heading">${accountAvatarMarkup(identity, item.gemini_model_options)}<div class="account-identity"><span class="account-alias">${esc(item.label || item.profile)}</span><h3 title="${esc(identity)}">${esc(identity)}</h3></div><span class="account-login ${item.flow_login === 'verified' && !googleVerification ? 'is-ready' : ''}">${esc(login)}</span>
-        <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
+        <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${item.gemini_removed ? '<p>Gemini 已从号池删除，历史对话可在算力中心查看。</p>' : officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
       <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div title="${esc(flowBalanceTitle)}"><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账 ${esc(flowNextCredit || '待官方更新')}${flowNextCredit && !item.flow_balance_fresh ? '（上次读取）' : ''}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
-      <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}" title="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${geminiReady && !geminiNeedsAttention ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div><div data-account-quota="${accountKey}">${quotaView.html}</div></div></div>
+      <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}" title="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${geminiReady && !geminiNeedsAttention ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div>${item.gemini_removed ? '' : `<div data-account-quota="${accountKey}">${quotaView.html}</div>`}</div></div>
       <div class="account-status-row">${windowIssue && (flowPaused || cooling) ? `<span class="account-mini-status is-attention">${esc(windowIssue.title)}</span>` : ''}${flowIssues[0] && !cooling && !flowPaused ? `<span class="account-mini-status is-attention"><i aria-hidden="true"></i>Flow · ${esc(flowIssues[0].title.replace(/^Flow /,''))}</span>` : ''}${flowFallback ? `<span class="account-mini-status is-attention">Flow · ${esc(flowFallback)}</span>` : ''}${geminiIssues[0] || geminiRow?.checking ? `<span class="account-mini-status${geminiNeedsAttention ? ' is-attention' : ''}" title="${esc(geminiIssueTitle || geminiRow?.note || '')}"><i aria-hidden="true"></i>Gemini · ${esc(geminiIssues[0]?.title || geminiRow.note || '正在检查云端响应')}</span>` : ''}${geminiFallback ? `<span class="account-mini-status is-attention">Gemini · ${esc(geminiFallback)}</span>` : ''}</div>
       ${flowAccountNoticeMarkup(flowReason, pageIncident ? pageIncident : state.snapshot?.flow_warning_screenshots?.[item.profile])}
       <details><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>
-      <div class="account-card-actions">${govRelease}${authControl}${geminiVerify}${flowPaused ? `<button class="button button-light" type="button" data-resume-flow="${accountKey}"${pageIncident ? ` data-incident="${esc(pageIncident.id)}"` : ''}>已核查，恢复 Flow</button>` : ''}</div></article>`;
+      <div class="account-card-actions">${govRelease}${authControl}${geminiVerify}${removeGemini}${flowPaused ? `<button class="button button-light" type="button" data-resume-flow="${accountKey}"${pageIncident ? ` data-incident="${esc(pageIncident.id)}"` : ''}>已核查，恢复 Flow</button>` : ''}</div></article>`;
   }).join("")}</div>`;
   updateAccountUsageBars();
   updateAccountCooldowns();
@@ -2506,6 +2512,34 @@ function renderAccounts() {
     if (retryOpen.includes(select.dataset.retryProject)) select.closest('details').open = true;
   }
   if (focusedDetail) document.querySelector(`[aria-controls="${focusedDetail}"]`)?.focus({preventScroll:true});
+}
+
+async function removeGeminiAccountFromPanel(button) {
+  const accountKey = button.dataset.removeGemini;
+  const findAccount = () => state.snapshot?.real_accounts?.items?.find(item=>item.key==='flow-account-'+accountKey);
+  const account = findAccount();
+  if (button.disabled || !account?.gemini_registered || account.gemini_removed) return;
+  const name = account.email || account.label || account.profile;
+  if (!window.confirm(`从 Gemini 号池删除 ${name}？此账号将停止 Gemini 派发，历史对话会保留。Flow 和 Music 不受影响。`)) return;
+  const feedback = $('accountActionMessage');
+  button.disabled = true;
+  accountActionsInFlight.add(button);
+  feedback.textContent = '正在从 Gemini 号池删除账号…';
+  try {
+    const result = await postJson('/api/gemini/accounts/remove', {account:accountKey,confirmed:true});
+    if (result.removed !== true) throw new Error('删除结果未确认，请刷新账号页核对。');
+    await Promise.allSettled([refresh(), refreshChannelStatus(), refreshOfficialQuota()]);
+    const updated = findAccount();
+    if (updated) Object.assign(updated,{gemini_removed:true,gemini_registered:false,gemini_enabled:false});
+    accountOrderOverride = null;
+    feedback.textContent = result.message;
+  } catch (error) {
+    feedback.textContent = error.message || '删除未完成，请刷新账号页核对。';
+  } finally {
+    accountActionsInFlight.delete(button);
+    button.disabled = false;
+    if (state.view==='accounts') renderAccounts();
+  }
 }
 
 async function refreshActivation() {
@@ -3030,6 +3064,11 @@ $("realAccountTable").addEventListener("click", async (event) => {
     finally { geminiVerifyButton.disabled = false; }
     return;
   }
+  const removeGeminiButton = event.target.closest('[data-remove-gemini]');
+  if (removeGeminiButton) {
+    await removeGeminiAccountFromPanel(removeGeminiButton);
+    return;
+  }
   const button = event.target.closest("[data-check-gemini], [data-toggle-gemini], [data-keepalive-gemini], [data-recover-gemini], [data-resume-flow], [data-save-retry-project]");
   if (!button) return;
   if (button.hasAttribute('data-save-retry-project')) {
@@ -3376,16 +3415,17 @@ const flashChatChoices=['low','medium','high'].map(effort=>({
 function syncConversationControls(announce = false) {
   const item=currentConversation, ready=!channelReadFailed && state.channelStatus?.production_send_available === true;
   const select=$('chatAccount'), accounts=state.snapshot?.real_accounts?.items || [];
+  const removedBinding=!!item?.account_key && accounts.some(row=>row.key==='flow-account-'+item.account_key && row.gemini_removed);
   $('chatNew').disabled=!ready;
   const prior=select.value;
   renderGeminiAccountOptions(select,accounts);
   if(item?.account_key) {
-    if(![...select.options].some(o=>o.value===item.account_key)) select.add(new Option('绑定账号暂不可用',item.account_key));
+    if(![...select.options].some(o=>o.value===item.account_key)) select.add(new Option(removedBinding ? '绑定账号已从 Gemini 号池删除' : '绑定账号暂不可用',item.account_key));
     select.value=item.account_key;
   } else if([...select.options].some(o=>o.value===prior)) select.value=prior;
   const pending=!!item?.turns?.some(t=>['queued','dispatching','running'].includes(t.status));
   const imageAnalysis=item?.channel==='official_antigravity_image_analysis';
-  const archived=!!item && (item.simulated || !!item.blocked || (item.turns.length>0 && item.channel!=='official_antigravity_cli'));
+  const archived=!!item && (removedBinding || item.simulated || !!item.blocked || (item.turns.length>0 && item.channel!=='official_antigravity_cli'));
   select.disabled=!item || !!item.account_key || archived || pending || chatSending || !!item.hidden || !ready;
   $('chatPrompt').disabled=!!item?.simulated || imageAnalysis;
   $('chatFiles').disabled=true;
@@ -5058,7 +5098,7 @@ function renderOfficialQuota() {
   const data = officialQuotaReadFailed ? null : officialQuotaData;
   const saved = savedQuotaSummary(data);
   const known = saved.known_accounts;
-  const total = data?.total_accounts || state.snapshot?.real_accounts?.items?.length || 0;
+  const total = data?.total_accounts ?? (state.snapshot?.real_accounts?.items || []).filter(account=>!account.gemini_removed).length;
   const refreshing = data?.refreshing === true;
   const number = value => value == null ? '—' : value.toFixed(2).replace(/\.00$/, '') + '%';
   const resetText = seconds => typeof seconds === 'number' ? `最近恢复 ${dateTime(seconds)}` : '恢复时间以官方状态为准';

@@ -376,6 +376,37 @@ test('Gemini readiness rechecks after login and keeps the authorization result v
   assert.equal(audit.running, false);
 });
 
+test('Gemini removal requires confirmation and then excludes the account from selection', async () => {
+  const target = {key: 'flow-account-a', email: 'a@example.test', gemini_registered: true, gemini: 'verified'};
+  const other = {key: 'flow-account-b', email: 'b@example.test', gemini: 'verified'};
+  const state = {view: 'accounts', snapshot: {real_accounts: {available: true, items: [target, other]}}};
+  const feedback = {textContent: ''};
+  const calls = [];
+  let confirmed = false;
+  const context = vm.createContext({
+    state, button: {dataset: {removeGemini: 'a'}, disabled: false}, accountActionsInFlight: new Set(),
+    accountOrderOverride: ['a', 'b'],
+    window: {confirm(message) { assert.match(message, /a@example\.test/); return confirmed; }},
+    $() { return feedback; },
+    async postJson(path, body) { calls.push({path, account: body.account, confirmed: body.confirmed}); return {removed: true, message: '已删除'}; },
+    async refresh() {}, async refreshChannelStatus() {}, async refreshOfficialQuota() {}, renderAccounts() {},
+    select: {value: 'a', dataset: {}, options: [{value: 'auto'}, {value: 'b'}]},
+  });
+  for (const name of ['esc', 'removeGeminiAccountFromPanel', 'geminiAccountAvailability', 'renderGeminiAccountOptions'])
+    load(name, context);
+  await vm.runInContext('removeGeminiAccountFromPanel(button)', context);
+  assert.deepEqual(calls, []);
+  confirmed = true;
+  await vm.runInContext('removeGeminiAccountFromPanel(button)', context);
+  assert.deepEqual(calls, [{path: '/api/gemini/accounts/remove', account: 'a', confirmed: true}]);
+  assert.equal(feedback.textContent, '已删除');
+  assert.equal(target.gemini_removed, true);
+  vm.runInContext('renderGeminiAccountOptions(select,state.snapshot.real_accounts.items)', context);
+  assert.doesNotMatch(context.select.innerHTML, /a@example/);
+  assert.match(context.select.innerHTML, /b@example/);
+  assert.equal(context.select.value, 'auto');
+});
+
 test('cooldown counts down and becomes awaiting confirmation without changing eligibility', () => {
   const time = {textContent: ''};
   const label = {textContent: ''};

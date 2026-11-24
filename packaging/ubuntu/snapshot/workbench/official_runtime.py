@@ -82,8 +82,9 @@ def check_official_network():
 
 
 class OfficialRuntime:
-    def __init__(self,config):
+    def __init__(self,config,*,excluded_accounts=None):
         self.config=Path(config)
+        self.excluded_accounts=excluded_accounts
 
     def settings(self):
         if self.config.is_symlink() or not self.config.is_file():return None
@@ -94,6 +95,9 @@ class OfficialRuntime:
         binary=Path(data.get('binary',''))
         if not binary.is_absolute() or not binary.is_file() or binary.is_symlink():raise ValueError('官方程序未就绪。')
         if len(data['accounts'])>50 or any(not KEY.fullmatch(k) for k in data['accounts']):raise ValueError('账号配置不正确。')
+        if self.excluded_accounts:
+            removed=self.excluded_accounts()
+            data['accounts']={key:item for key,item in data['accounts'].items() if key not in removed}
         return data
 
     def _token_backup(self,key):

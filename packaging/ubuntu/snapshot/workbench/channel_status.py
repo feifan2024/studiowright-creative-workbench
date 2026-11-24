@@ -107,7 +107,10 @@ def read_status(database, runtime=None):
                         'model':model if isinstance(model,str) and re.fullmatch(r'[a-zA-Z0-9._/-]{1,128}',model) else None,
                         'channel':'official_antigravity_cli','readiness_probe':bool(row['readiness_probe'])}
             runtime_accounts = (runtime or {}).get('accounts', {})
-            for key in sorted(set(controls) | set(latest) | set(runtime_accounts)):
+            removed = set()
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gemini_pool_removals'").fetchone():
+                removed = {row[0] for row in db.execute('SELECT account_key FROM gemini_pool_removals')}
+            for key in sorted((set(controls) | set(latest) | set(runtime_accounts)) - removed):
                 if not KEY.fullmatch(key):
                     continue
                 control = controls.get(key, {})

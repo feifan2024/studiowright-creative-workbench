@@ -1537,7 +1537,8 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 from channel_status import read_status
                 data = read_status(real_pool.path, real_pool.official.public_status()) if real_pool else {'schema_version': 1, 'available': False}
                 if real_pool and data.get('available'):
-                    data['account_order'] = real_pool.official.saved_account_order()
+                    removed = real_pool.removed_gemini_accounts()
+                    data['account_order'] = [key for key in real_pool.official.saved_account_order() if key not in removed]
                 return self.json_response(200 if data.get('available') else 503, data)
             if self.path == '/api/music/records':
                 state_dir = real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench'
@@ -1889,6 +1890,29 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} host shutdown requested from panel', flush=True)
                 threading.Timer(1.5, request_host_shutdown).start()
                 return self.json_response(202, {'status':'shutdown_scheduled'})
+            if self.path == '/api/gemini/accounts/remove':
+                from live_pool import Conflict
+                if not real_pool or not self.valid(mutation=True):
+                    return self.json_response(403, {'error':'请从工作台删除 Gemini 账号。'})
+                length = self.headers.get('Content-Length','')
+                if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length',[])) != 1
+                        or not length.isdigit() or not 2 <= int(length) <= 256):
+                    return self.json_response(400, {'error':'删除账号请求格式不正确。'})
+                try:
+                    data = json.loads(self.rfile.read(int(length)).decode('utf-8'))
+                    if not isinstance(data,dict) or set(data)!={'account','confirmed'} or data['confirmed'] is not True:
+                        raise ValueError('请确认要删除的 Gemini 账号。')
+                    account_data = sources.snapshot().get('real_accounts',{})
+                    if account_data.get('available') is not True:
+                        return self.json_response(503, {'error':'账号名单暂不可读取。'})
+                    result = real_pool.remove_gemini_account(data['account'], account_data.get('items',[]))
+                    return self.json_response(200,result)
+                except Conflict as exc:
+                    return self.json_response(409, {'error':str(exc)})
+                except ValueError as exc:
+                    return self.json_response(400, {'error':str(exc)})
+                except (OSError,sqlite3.Error):
+                    return self.json_response(503, {'error':'暂时无法删除该 Gemini 账号。'})
             if self.path == '/api/account-order':
                 if not real_pool or not self.valid(mutation=True):
                     return self.json_response(403, {'error':'请从工作台发起账号顺序调整。'})
