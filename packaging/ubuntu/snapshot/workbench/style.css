@@ -716,10 +716,14 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 @media (min-width: 791px) {
   .dashboard-rings [data-service-slot] { grid-row: 1; }
   .dashboard-rings .desk-dispatch { grid-row: 2; grid-column: 1; }
+  .dashboard-rings .desk-dispatch-gemini { grid-column: 2; }
 }
 .desk-dispatch label { font-weight: 650; }
 .desk-dispatch select { width: 64px; min-height: 32px; padding: 4px 7px; border: 1px solid #a6beb1; border-radius: 7px; background: #f5faf7; color: #173e31; font: inherit; }
 .desk-dispatch select:not(:disabled) { cursor: pointer; }
+.desk-dispatch-gemini { border-color: #d6e3eb; background: #eff5f9; color: #23536c; }
+.desk-dispatch-gemini input { width: 62px; min-height: 32px; padding: 4px 7px; border: 1px solid #a8bfcd; border-radius: 7px; background: #fff; color: #23536c; font: inherit; }
+.desk-dispatch-gemini .button { min-height: 32px; padding: 4px 8px; color: #23536c; }
 .dispatch-concurrency-status { color: #465f53; font-size: 12px; }
 @media (max-width: 1050px) {
   .dashboard-ring-item { gap: 8px; padding: 12px; }

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from material_backfill import has_labels
 from material_vision import analyze, read_media, PROMPT, SHOT_PROMPT, clean_shot_notes
-from official_pool import account_quota_restriction, busy_official, DEFAULT_MAX_CONCURRENCY
+from official_pool import account_quota_restriction, busy_official
 from official_runtime import MODEL
 
 
@@ -77,7 +77,8 @@ def claim(pool, auto):
             if not shot and db.execute('SELECT 1 FROM material_analyses WHERE asset_id=? LIMIT 1',(ident,)).fetchone():
                 db.execute(f"UPDATE {table} SET status='skipped',updated=?,note='已有分析记录，未重复提交' WHERE asset_id=?",(now,ident))
                 return None
-            if db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]>=DEFAULT_MAX_CONCURRENCY:return None
+            if not official.has_concurrency(db):
+                return None
             # A material job only uses an idle eligible account; normal dialogue has priority.
             if db.execute("SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued' LIMIT 1").fetchone():
                 return None

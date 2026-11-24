@@ -686,6 +686,7 @@ function syncVisiblePage(view, background) {
   }
   if (view === 'overview') {
     read('concurrency', refreshDispatchConcurrency);
+    read('geminiConcurrency', refreshGeminiConcurrency);
     read('serviceActivation', refreshServiceActivations);
     read('governance', refreshGovernanceCases);
   }
@@ -4732,6 +4733,74 @@ $('dispatchConcurrency').addEventListener('change', async () => {
     $('dispatchConcurrencyStatus').textContent = error.message || '保存状态未确认，请刷新核对。';
   } finally {
     dispatchConcurrencySaving = false;
+  }
+});
+const geminiConcurrencyInput = $('geminiConcurrency');
+const geminiConcurrencySave = $('geminiConcurrencySave');
+const geminiConcurrencyStatus = $('geminiConcurrencyStatus');
+let geminiConcurrencyMaximum = null;
+let geminiConcurrencySequence = 0;
+let geminiConcurrencySaving = false;
+let geminiConcurrencyDirty = false;
+
+function updateGeminiConcurrencyButton() {
+  geminiConcurrencySave.disabled = geminiConcurrencySaving || geminiConcurrencyInput.disabled ||
+    !geminiConcurrencyDirty || !geminiConcurrencyInput.validity.valid ||
+    Number(geminiConcurrencyInput.value) === geminiConcurrencyMaximum;
+}
+
+function showGeminiConcurrency(data, saved = false) {
+  if (data.available !== true || !Number.isInteger(data.maximum) ||
+      !Number.isInteger(data.ceiling) || data.maximum < 1 || data.maximum > data.ceiling ||
+      !Number.isInteger(data.active) || !Number.isInteger(data.queued)) throw new Error('Gemini 并发设置暂不可读取。');
+  geminiConcurrencyMaximum = data.maximum;
+  geminiConcurrencyInput.max = String(data.ceiling);
+  geminiConcurrencyInput.disabled = false;
+  if (!geminiConcurrencyDirty && (saved || document.activeElement !== geminiConcurrencyInput))
+    geminiConcurrencyInput.value = String(data.maximum);
+  geminiConcurrencyStatus.textContent = (data.paused ? '维护中 · ' : '') +
+    `占用 ${data.active} / ${data.maximum} · 排队 ${data.queued}` + (saved ? ' · 已保存' : '');
+  updateGeminiConcurrencyButton();
+}
+
+async function refreshGeminiConcurrency() {
+  if (!geminiConcurrencyInput || geminiConcurrencySaving) return;
+  const sequence = ++geminiConcurrencySequence;
+  try {
+    const data = await getJson('/api/gemini/concurrency', {timeoutMs:8000});
+    if (sequence === geminiConcurrencySequence && !geminiConcurrencySaving) showGeminiConcurrency(data);
+  } catch (_) {
+    if (sequence !== geminiConcurrencySequence || geminiConcurrencySaving) return;
+    if (geminiConcurrencyMaximum === null) geminiConcurrencyInput.disabled = true;
+    geminiConcurrencyStatus.textContent = 'Gemini 并发暂不可读取';
+    updateGeminiConcurrencyButton();
+  }
+}
+
+geminiConcurrencyInput?.addEventListener('input', () => {
+  geminiConcurrencyDirty = true;
+  updateGeminiConcurrencyButton();
+});
+
+$('geminiConcurrencyForm')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (geminiConcurrencySave.disabled) return;
+  geminiConcurrencySaving = true;
+  ++geminiConcurrencySequence;
+  geminiConcurrencyInput.disabled = true;
+  updateGeminiConcurrencyButton();
+  geminiConcurrencyStatus.textContent = '正在保存…';
+  try {
+    const data = await postJson('/api/gemini/concurrency', {maximum:Number(geminiConcurrencyInput.value)});
+    geminiConcurrencyDirty = false;
+    showGeminiConcurrency(data, true);
+  } catch (error) {
+    geminiConcurrencyDirty = true;
+    geminiConcurrencyStatus.textContent = error.message || '保存状态未确认，请稍后查看。';
+  } finally {
+    geminiConcurrencySaving = false;
+    geminiConcurrencyInput.disabled = false;
+    updateGeminiConcurrencyButton();
   }
 });
 $('overviewSchedule').addEventListener('click', () => {

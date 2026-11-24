@@ -51,6 +51,12 @@
                 <div data-service-slot="FLOW"><p class="dashboard-loading">正在读取 Flow…</p></div>
                 <div class="desk-dispatch"><label for="dispatchConcurrency">Flow 派发名额</label><select id="dispatchConcurrency" disabled><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select><span id="dispatchConcurrencyStatus" class="dispatch-concurrency-status" role="status" aria-live="polite">读取设置…</span></div>
                 <div data-service-slot="GEMINI"><p class="dashboard-loading">正在读取 Gemini…</p></div>
+                <form id="geminiConcurrencyForm" class="desk-dispatch desk-dispatch-gemini">
+                  <label for="geminiConcurrency">Gemini 总并发</label>
+                  <input id="geminiConcurrency" type="number" min="1" max="50" step="1" placeholder="50" required disabled>
+                  <button id="geminiConcurrencySave" class="button button-light" type="submit" disabled>保存</button>
+                  <span id="geminiConcurrencyStatus" class="dispatch-concurrency-status" role="status">读取设置…</span>
+                </form>
                 <div data-service-slot="MUSIC"><p class="dashboard-loading">正在读取 Music…</p></div>
               </div>
               <p data-governance-status role="status" class="sr-only"></p>
@@ -88,7 +94,7 @@
           <section class="account-pool" aria-labelledby="realAccountsHeading">
             <div class="account-pool-heading"><h2 id="realAccountsHeading">账号列表</h2><div class="account-heading-actions"><button id="activationScheduleToggle" class="button button-light" type="button" aria-expanded="false" aria-controls="activationSchedulePanel">通道与设置</button><button id="activateAccounts" hidden class="button button-primary" type="button" disabled>检查账号状态</button></div></div>
             <div id="realAccountsSummary" class="account-pool-summary">正在读取现有账号…</div>
-            <div id="activationSchedulePanel" class="activation-schedule" hidden><h3>官方调用 · 账号池</h3><p>新对话按号池优先顺序分配，多轮固定账号；Gemini CLI 默认总并发 20，与 Flow 独立。网页登录和网页保活不参与官方调用，暂停限制继续保留。</p><p id="retainedSettings">正在只读核对已保存的设置…</p><div hidden>
+            <div id="activationSchedulePanel" class="activation-schedule" hidden><h3>官方调用 · 账号池</h3><p>新对话按号池优先顺序分配，多轮固定账号；Gemini CLI 默认总并发 50，与 Flow 独立。网页登录和网页保活不参与官方调用，暂停限制继续保留。</p><p id="retainedSettings">正在只读核对已保存的设置…</p><div hidden>
               <form id="activationScheduleForm">
               <div class="activation-schedule-fields"><label><input id="activationScheduleEnabled" type="checkbox"> 启用每天定时检查</label><label>北京时间 <input id="activationScheduleTime" type="time" value="08:00" required></label><button class="button button-primary" type="submit">保存设置</button></div>
               <p id="activationScheduleStatus" class="panel-caption" role="status" aria-live="polite">正在读取定时设置…</p>
@@ -144,7 +150,7 @@
 
         <section id="conversationsView" class="view" aria-labelledby="conversationsHeading" hidden>
           <div class="page-heading"><div><h1 id="conversationsHeading">自定义对话</h1><p>使用官方调用与账号池，保留每轮问答、账号和耗时。</p><p id="chatCreateStatus" class="chat-create-status" role="status" aria-live="polite"></p></div><button id="chatNew" class="button button-primary" type="button">新建对话</button></div>
-          <div class="notice" role="note"><span class="notice-symbol">i</span><span>Gemini 无需网页常驻。新对话按号池优先顺序分配，续聊固定原账号；默认总并发 20，超出时排队，与 Flow 独立。单条新文字对话确认超时后，原账号最多重试三次；其他结果不明的请求待核对。</span></div>
+          <div class="notice" role="note"><span class="notice-symbol">i</span><span>Gemini 无需网页常驻。新对话按号池优先顺序分配，续聊固定原账号；默认总并发 50，超出时排队，与 Flow 独立。单条新文字对话确认超时后，原账号最多重试三次；其他结果不明的请求待核对。</span></div>
           <section class="conversation-filters" aria-label="对话筛选">
             <div class="conversation-filter-grid">
               <label>搜索<input id="chatFilterSearch" type="search" placeholder="搜索对话名称" maxlength="120"></label>

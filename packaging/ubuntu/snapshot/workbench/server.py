@@ -1629,10 +1629,14 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 return self.json_response(200, music_service_status())
             if project_actions and self.path == '/api/project-actions':
                 return self.json_response(200, project_actions.status())
-            if self.path == '/api/dispatch/concurrency':
+            if self.path in ('/api/dispatch/concurrency', '/api/gemini/concurrency'):
                 if not real_pool:
                     return self.json_response(503, {'error': '并发设置尚未接入。'})
-                result = real_pool.dispatch_limit.public_status()
+                try:
+                    result = (real_pool.official.concurrency_status() if self.path == '/api/gemini/concurrency'
+                              else real_pool.dispatch_limit.public_status())
+                except sqlite3.Error:
+                    return self.json_response(503, {'error':'并发设置暂不可读取。'})
                 return self.json_response(200 if result['available'] else 503, result)
             if api_keys and self.path == '/api/access-keys':
                 try:
@@ -2096,7 +2100,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(409,{'error':str(exc) or '操作未开始。'})
                 except (OSError,sqlite3.Error):
                     return self.json_response(503,{'error':'项目操作暂不可用。'})
-            if self.path == '/api/dispatch/concurrency':
+            if self.path in ('/api/dispatch/concurrency', '/api/gemini/concurrency'):
                 if not real_pool:
                     return self.json_response(503, {'error': '并发设置尚未接入。'})
                 if not self.valid(mutation=True):
@@ -2109,13 +2113,14 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     data = json.loads(self.rfile.read(int(length)).decode('utf-8'))
                     if not isinstance(data, dict) or set(data) != {'maximum'}:
                         raise ValueError('并发设置格式不正确。')
-                    result = real_pool.dispatch_limit.set_limit(data['maximum'])
+                    result = (real_pool.official.set_concurrency(data['maximum']) if self.path == '/api/gemini/concurrency'
+                              else real_pool.dispatch_limit.set_limit(data['maximum']))
                     return self.json_response(200, result)
                 except DispatchBusy as exc:
                     return self.json_response(409, {'error': str(exc)})
                 except (ValueError, UnicodeError) as exc:
                     return self.json_response(400, {'error': str(exc) or '并发设置格式不正确。'})
-                except OSError:
+                except (OSError, sqlite3.Error):
                     return self.json_response(503, {'error': '并发设置未能保存，请稍后操作。'})
             if api_keys and (self.path == '/api/access-keys' or re.fullmatch(r'/api/access-keys/[0-9a-f]{32}/(?:revoke|copy)', self.path)):
                 if not self.valid(mutation=True):

@@ -27,7 +27,8 @@ READINESS_RECOVERABLE_BLOCKS=('provider_error','provider_connection_failed','pro
 READINESS_REPLY='GEMINI_READY'
 READINESS_PROMPT='这是创作工作台的云端连通性检查。请只回复 GEMINI_READY，不要添加其他文字。'
 MAX_TIMEOUT_ATTEMPTS=4
-DEFAULT_MAX_CONCURRENCY=20
+DEFAULT_MAX_CONCURRENCY=50
+MAX_CONCURRENCY=50
 ACCOUNT_BLOCK_REASONS=(AUTH_UNSENT,'authorization_still_required','verification_required','quota_or_rate_limit')
 
 def account_quota_restriction(model,row,now):
@@ -54,6 +55,8 @@ class OfficialPool:
         self.stop=threading.Event();self.wake=threading.Event();self.threads=[]
         with pool.connection() as db:
             db.executescript('''
+              CREATE TABLE IF NOT EXISTS official_dispatch_settings(
+                id INTEGER PRIMARY KEY CHECK(id=1), maximum INTEGER NOT NULL CHECK(maximum BETWEEN 1 AND 50));
               CREATE TABLE IF NOT EXISTS official_jobs(
                 request_id TEXT PRIMARY KEY REFERENCES requests(request_id),conversation_id TEXT NOT NULL,
                 model TEXT NOT NULL,native_before TEXT,started REAL,queue_wait_ms REAL,reason TEXT);
@@ -109,7 +112,7 @@ class OfficialPool:
         self.threads.append(monitor);monitor.start()
         replies=threading.Thread(target=self.monitor_saved_replies,name='official-saved-replies',daemon=True)
         self.threads.append(replies);replies.start()
-        for i in range(DEFAULT_MAX_CONCURRENCY):
+        for i in range(MAX_CONCURRENCY):
             t=threading.Thread(target=self.worker,name='official-worker-'+str(i),daemon=True);self.threads.append(t);t.start()
 
     def close(self):
@@ -241,12 +244,45 @@ class OfficialPool:
             return tuple(row)
         return None
 
+    def concurrency_limit(self, db):
+        row = db.execute('SELECT maximum FROM official_dispatch_settings WHERE id=1').fetchone()
+        return row[0] if row else DEFAULT_MAX_CONCURRENCY
+
+    def has_concurrency(self, db):
+        active = db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]
+        return active < self.concurrency_limit(db)
+
+    def _concurrency_status(self, db):
+        counts = dict(db.execute("""SELECT r.status,count(*) FROM requests r JOIN official_jobs j USING(request_id)
+            WHERE r.status IN ('queued','dispatching') GROUP BY r.status"""))
+        return {'available': True, 'minimum': 1, 'ceiling': MAX_CONCURRENCY, 'maximum': self.concurrency_limit(db),
+                'active': counts.get('dispatching', 0), 'queued': counts.get('queued', 0),
+                'paused': self.pool.maintenance(), 'scope': 'gemini_pool'}
+
+    def concurrency_status(self):
+        with self.pool.connection() as db:
+            db.execute('BEGIN')
+            return self._concurrency_status(db)
+
+    def set_concurrency(self, maximum):
+        if type(maximum) is not int or not 1 <= maximum <= MAX_CONCURRENCY:
+            raise ValueError(f'Gemini 总并发必须是 1～{MAX_CONCURRENCY} 的整数。')
+        with self.pool.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute("""INSERT INTO official_dispatch_settings(id,maximum) VALUES(1,?)
+                          ON CONFLICT(id) DO UPDATE SET maximum=excluded.maximum""", (maximum,))
+            result = self._concurrency_status(db)
+            db.execute('COMMIT')
+        self.wake.set()
+        return result
+
     def public_status(self):
         available=self.runtime.inventory()
         text_models=self.runtime.text_models()
         quota=reader_for(self.runtime).cached_accounts(text_models) if text_models else {}
         now=time.time()
         with self.pool.connection() as db:
+            db.execute('BEGIN')
             blocks=dict(db.execute('SELECT account_key,reason FROM official_account_blocks'))
             result={key:{'authorization':'saved_verified_identity' if ready else 'not_ready',
                          'dispatch_eligible':self.reason(db,key,available) is None,
@@ -254,17 +290,15 @@ class OfficialPool:
                          'busy':busy_official(db,key),'advanced_text_models':sorted(text_models.get(key,())) if ready else [],
                          'advanced_quota_restriction':quota_restriction(quota.get(key,{}),now) if key in text_models else None}
                     for key,ready in available.items()}
-            queued=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued'").fetchone()[0]
-            active=db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]
+            account_dispatch = self._concurrency_status(db)
+            active, queued = account_dispatch['active'], account_dispatch['queued']
             model_ids=sorted(ADVANCED_MODELS)
             advanced_jobs=dict(db.execute(
                 "SELECT r.status,count(*) FROM requests r JOIN official_jobs j USING(request_id) "
                 "WHERE r.status IN ('queued','dispatching') AND j.model IN ("+','.join('?' for _ in model_ids)+") GROUP BY r.status",
                 model_ids))
-        account_dispatch={'available':True,'maximum':DEFAULT_MAX_CONCURRENCY,'active':active,
-                          'paused':self.pool.maintenance(),'queued':queued,'scope':'gemini_pool'}
         return {'available':any(available.values()),'channel':CHANNEL,'model':MODEL,'accounts':result,'queued':queued,'active':active,
-                'selection':'priority_order','max_concurrency':DEFAULT_MAX_CONCURRENCY,'retry':True,'failover':False,
+                'selection':'priority_order','max_concurrency':account_dispatch['maximum'],'retry':True,'failover':False,
                 'concurrency_scope':'gemini_pool','per_account_concurrency':None,
                 'advanced_pool':{'selection':'priority_order','configured_accounts':len(text_models),
                                  'ready_accounts':sum(bool(r['advanced_text_models']) and r['dispatch_eligible']
@@ -501,7 +535,7 @@ class OfficialPool:
             db.execute('BEGIN IMMEDIATE')
             try:
                 if self.pool.maintenance():db.execute('COMMIT');return None
-                if db.execute("SELECT count(*) FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='dispatching'").fetchone()[0]>=DEFAULT_MAX_CONCURRENCY:
+                if not self.has_concurrency(db):
                     db.execute('COMMIT');return None
                 rows=db.execute("""SELECT r.request_id,r.account_key,r.created,r.finished,j.reason AS job_reason,j.conversation_id,j.native_before,j.readiness_probe,j.no_retry,j.model,t.prompt,t.attachments,
                                   f.reason AS fallback_reason,

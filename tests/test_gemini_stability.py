@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot/workbench'
 sys.path.insert(0, str(ROOT))
 from gemini_execution import CallBudget, execution_limits
-from official_pool import OfficialPool
+from official_pool import OfficialPool, DEFAULT_MAX_CONCURRENCY
 from dispatch_limit import DispatchLimit
 from official_runtime import OfficialRuntime, MODEL, BAD_REPLY
 import material_vision
@@ -82,6 +82,7 @@ class ProbePriority(unittest.TestCase):
     def make_pool(self, dbpath):
         with sqlite3.connect(dbpath) as db:
             db.executescript('''
+              CREATE TABLE official_dispatch_settings(id INTEGER PRIMARY KEY,maximum INTEGER NOT NULL);
               CREATE TABLE requests(request_id TEXT PRIMARY KEY, account_key TEXT,created REAL,finished REAL,status TEXT,note TEXT);
               CREATE TABLE official_jobs(request_id TEXT PRIMARY KEY,reason TEXT,conversation_id TEXT,native_before TEXT,readiness_probe INTEGER,no_retry INTEGER,started REAL,queue_wait_ms REAL,model TEXT DEFAULT 'gemini-3.8-flash-medium');
               CREATE TABLE official_model_fallbacks(request_id TEXT PRIMARY KEY, requested_model TEXT, fallback_model TEXT, permitted_accounts TEXT, reason TEXT);
@@ -104,6 +105,7 @@ class ProbePriority(unittest.TestCase):
             return closing(db)
         pool = OfficialPool.__new__(OfficialPool)
         pool.pool = S(connection=connect, maintenance=lambda: False)
+        pool.wake = threading.Event()
         pool.runtime = S(inventory=lambda: {'a': True, 'b': True})
         pool.account_quotas = lambda _: {}
         pool.reason = lambda *args, **kwargs: None
@@ -135,11 +137,15 @@ class ProbePriority(unittest.TestCase):
             self.assertEqual(pool.queue_readiness_probes([], {}), [])
             pool.generate.assert_not_called()
 
-    def test_twenty_concurrent_claims_are_atomic_and_independent_of_flow(self):
+    def test_fifty_concurrent_claims_use_saved_limit_and_are_independent_of_flow(self):
         from concurrent.futures import ThreadPoolExecutor
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
             pool=self.make_pool(root/'queue.db')
+            self.assertEqual(pool.concurrency_status()['maximum'],50)
+            for bad in (0,51,True,1.5,'50'):
+                with self.assertRaises(ValueError):
+                    pool.set_concurrency(bad)
             limit=DispatchLimit(root/'dispatch');limit.set_limit(2)
             slots=[limit.try_acquire(),limit.try_acquire()]
             try:
@@ -147,18 +153,25 @@ class ProbePriority(unittest.TestCase):
                     db.execute("DELETE FROM requests")
                     db.execute("DELETE FROM official_jobs")
                     db.execute("DELETE FROM conversation_turns")
-                    for i in range(25):
+                    for i in range(55):
                         rid='job-'+str(i)
                         db.execute("INSERT INTO requests VALUES(?,'a',?,NULL,'queued',NULL)",(rid,i))
                         db.execute("INSERT INTO official_jobs(request_id,reason,conversation_id,native_before,readiness_probe,no_retry,started,queue_wait_ms) VALUES(?,NULL,?,NULL,0,1,NULL,NULL)",(rid,rid))
                         db.execute("INSERT INTO conversation_turns VALUES(?,'question','[]',?)",(rid,rid))
                         db.execute("INSERT INTO conversations VALUES(?,0,NULL)",(rid,))
-                with ThreadPoolExecutor(max_workers=25) as workers:
-                    claims=list(workers.map(lambda _:pool.claim(),range(25)))
-                self.assertEqual(sum(r is not None for r in claims),20)
-                self.assertEqual(len({r['request_id'] for r in claims if r}),20)
+                with ThreadPoolExecutor(max_workers=55) as workers:
+                    claims=list(workers.map(lambda _:pool.claim(),range(55)))
+                self.assertEqual(sum(r is not None for r in claims),DEFAULT_MAX_CONCURRENCY)
+                self.assertEqual(len({r['request_id'] for r in claims if r}),DEFAULT_MAX_CONCURRENCY)
                 self.assertIsNone(pool.claim())
+                status = pool.set_concurrency(2)
+                self.assertEqual((status['active'],status['queued'],status['maximum']), (50,5,2))
+                self.assertEqual(pool.concurrency_status()['maximum'],2)
+                self.assertIsNone(pool.claim())
+                with pool.pool.connection() as db:
+                    self.assertFalse(pool.has_concurrency(db))
                 self.assertEqual(limit.status()['active'],2)
+                pool.set_concurrency(50)
                 with sqlite3.connect(root/'queue.db') as db:
                     db.execute("UPDATE requests SET status='completed' WHERE request_id=?",(next(r['request_id'] for r in claims if r),))
                 self.assertIsNotNone(pool.claim())
