@@ -234,9 +234,9 @@ function flowWindowIssue(profile, snapshot) {
 
 function flowLoginNotice(page) {
   if (page === 'verification_required')
-    return {label:'需要用户登录', text:'Google 要求身份验证。请在这个账号的 Ubuntu 浏览器完成 Google 验证，再返回原 Flow 项目。'};
+    return {label:'需要用户登录', text:'请在这个账号的 Ubuntu 浏览器完成 Google 验证，回到原 Flow 项目，再点「Flow 一键就绪」。'};
   if (page === 'login' || page === 'flow_landing')
-    return {label:'需要用户登录', text:'请在这个账号的 Ubuntu 浏览器登录 Google，再返回原 Flow 项目。'};
+    return {label:'需要用户登录', text:'请在这个账号的 Ubuntu 浏览器重新登录 Google，回到原 Flow 项目，再点「Flow 一键就绪」。'};
   return null;
 }
 
@@ -246,8 +246,9 @@ function flowAccountReason(account, snapshot, row, pageState) {
     return {label:'Flow 停派原因', text:`${phase}时检测到异常活动提示，等待人工核查。`,
       screenshotMissing:!account.flow_page_incident.has_screenshot};
   }
-  const signIn = flowLoginNotice(pageState || row?.page);
-  if (signIn) return {...signIn, noScreenshot:true};
+  const page = pageState || row?.page;
+  const signIn = flowLoginNotice(page);
+  if (signIn) return {...signIn, showOnCard:true, noScreenshot:true};
   const checks = account.flow_preflight_reasons || [];
   if (checks.length && !account.flow_risk_paused && !account.flow_cooling) {
     const labels = {dispatch_locale_missing:'未配置此账号的语言和时区', dispatch_locale_invalid:'账号语言和时区配置无效',
@@ -291,7 +292,17 @@ function flowAccountReason(account, snapshot, row, pageState) {
       generated:'结果已生成，正在整理',downloading:'下载结果'}[window?.stage] || (current.status === 'queued' ? '排队中' : '处理中');
     return {label:'当前占用原因',text:`任务 ${current.source_id}：${stage}；尚未收到失败回执。`};
   }
-  if (pageState === 'busy') return {label:'暂不可用原因',text:'后台标记页面被占用，但未查到关联的进行中任务，需核对窗口状态。'};
+  if (page === 'busy') return {label:'暂不可用原因',text:'后台标记页面被占用，但未查到关联的进行中任务，需核对窗口状态。'};
+  if (!row?.review && !account.flow_risk_paused && !account.flow_cooling) {
+    const needsProject = ['binding','unique','project'].includes(page)
+      || (!page && row?.issues?.some(issue => issue.key === 'flow_binding'));
+    if (needsProject) return {label:'请打开原 Flow 项目',
+      text:'在这个账号的 Ubuntu 浏览器打开原 Flow 项目。如果 Google 显示登录页，请用这个账号重新登录。完成后点「Flow 一键就绪」。',
+      showOnCard:true,noScreenshot:true};
+    if (page === 'ok' && account.flow_balance_fresh === false) return {label:'请重新读取积分',
+      text:'原任务页已就绪。点「Flow 一键就绪」重新读取积分。',
+      showOnCard:true,noScreenshot:true};
+  }
   if (row?.issues?.length) return {label:'暂不可用原因',text:row.issues.map(i => i.title).join('；')};
   if (row?.status === 'blocked') return {label:'暂不可用原因',text:'就绪检查未通过，但后台未提供具体原因，待核对。'};
   return null;
@@ -2502,7 +2513,7 @@ function renderAccounts() {
       ? `<button class="button button-light" type="button" data-remove-gemini="${accountKey}" aria-label="从 Gemini 号池删除 ${esc(identity)}"${item.gemini_busy ? ' disabled title="该账号正在处理 Gemini 请求"' : ''}>删除 Gemini 账号</button>` : '';
     const flowNotice = flowAccountNoticeMarkup(flowReason, pageIncident ? pageIncident : state.snapshot?.flow_warning_screenshots?.[item.profile]);
     const diagnostics = [
-      flowNotice,
+      flowReason?.showOnCard ? '' : flowNotice,
       windowIssue && (flowPaused || cooling) ? `<p><strong>Flow：</strong>${esc(windowIssue.title)}</p>` : '',
       flowFallback ? `<p><strong>Flow：</strong>${esc(flowFallback)}</p>` : '',
       geminiIssues.map(issue => `<p><strong>Gemini · ${esc(issue.title)}</strong><br>${esc(issue.impact || '')} ${esc(issue.action || '')}</p>`).join(''),
@@ -2513,6 +2524,7 @@ function renderAccounts() {
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${item.gemini_removed ? '<p>Gemini 已从号池删除，历史对话可在算力中心查看。</p>' : officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
       <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(('Flow：' + flowStatusText))}" title="${esc(('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div title="${esc(flowBalanceTitle)}"><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账 ${esc(flowNextCredit || '待官方更新')}${flowNextCredit && !item.flow_balance_fresh ? '（上次读取）' : ''}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
       <div class="account-service account-service-gemini${geminiNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}" title="${esc('Gemini：'+geminiStatusText+(quotaView.message ? ' · '+quotaView.message : ''))}"><div class="account-service-heading"><span>Gemini</span><strong class="account-health${geminiReady && !geminiNeedsAttention ? '' : ' is-unknown'}">${esc(geminiStatusText)}</strong></div>${item.gemini_removed ? '' : `<div data-account-quota="${accountKey}">${quotaView.html}</div>`}</div></div>
+      ${flowReason?.showOnCard ? flowNotice : ''}
       ${geminiRow?.checking ? `<p class="account-check-status">Gemini · ${esc(geminiRow.note || '正在检查云端响应')}</p>` : ''}
       ${diagnostics ? `<details class="account-alert" data-account-fold="alert-${accountKey}"><summary><strong>${flowNeedsAttention || flowPaused || geminiNeedsAttention ? '异常详情' : '状态说明'}</strong><span>${[flowNotice || flowFallback || windowIssue && (flowPaused || cooling) ? 'Flow' : '', geminiIssues.length || geminiFallback ? 'Gemini' : ''].filter(Boolean).join(' · ')}</span></summary><div class="account-alert-body">${diagnostics}</div></details>` : ''}
       <div class="account-card-footer"><details class="account-retry" data-account-fold="retry-${accountKey}"><summary>切号备用项目</summary><p class="subtle">切号重试将在此账号选定的项目生成，可能消耗积分。未指定时不会用此账号切号。</p><select aria-label="切号备用项目" data-retry-project="${accountKey}"><option value="">不指定</option>${accountProjects.map(p => `<option value="${esc(p.key)}" ${p.key === selectedRetryProject ? 'selected' : ''}>${esc(p.title)} · ${esc(shortId(p.source_id))}</option>`).join('')}</select><button class="text-link" type="button" data-save-retry-project="${accountKey}">保存备用项目</button></details>

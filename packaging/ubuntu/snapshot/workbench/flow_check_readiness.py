@@ -6,7 +6,7 @@ import sys
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
-from flow_browser_state import _pages, focus_call
+from flow_browser_state import _live_browser, _pages, focus_call
 from task_window_registry import canonical_project_url, process_identity
 
 
@@ -89,7 +89,11 @@ async def inspect_page(account, binding):
     import websockets
     profile = account['profile']
     key = account['key'].removeprefix('flow-account-')
-    if binding.get('binding_state') != 'verified' or binding.get('account_key') != key:
+    if binding.get('account_key') != key:
+        return 'binding'
+    if binding.get('binding_state') == 'unconfirmed':
+        return await inspect_reopened_login(account, binding, key)
+    if binding.get('binding_state') != 'verified':
         return 'binding'
     pid, port = binding['browser_pid'], binding['port']
     if process_identity(pid, key, port) != (profile, binding['process_start']):
@@ -134,6 +138,32 @@ async def inspect_page(account, binding):
     if not state.get('origin') or 'https://flow.google.com' + state.get('path', '').rstrip('/') != project:
         return 'project'
     return page_verdict(state)
+
+
+async def inspect_reopened_login(account, binding, key):
+    """Report a confirmed Google sign-in after Chrome restarts without binding a new window."""
+    try:
+        project = canonical_project_url(binding['project_url'])
+        if project.rsplit('/', 1)[1] not in account['projects']:
+            return 'binding'
+        port = binding['port']
+        if type(port) is not int or not 1 <= port <= 65535:
+            return 'binding'
+        pid = await asyncio.to_thread(_live_browser, key, binding['browser_pid'], port)
+        pages = await asyncio.to_thread(_pages, key, pid, port, include_non_flow=True)
+        if len(pages) != 1:
+            return 'binding'
+        url = pages[0]['url']
+        login = google_login_page(url)
+        if not login:
+            return 'binding'
+        continuation = parse_qs(urlsplit(url).query, max_num_fields=32).get('continue', [])
+        if len(continuation) != 1 or canonical_project_url(continuation[0]) != project:
+            return 'binding'
+        windows = await asyncio.to_thread(focus_call, 'List', pid)
+        return login if len(windows) == 1 else 'binding'
+    except (OSError, KeyError, TypeError, ValueError):
+        return 'binding'
 
 
 async def probe(data):

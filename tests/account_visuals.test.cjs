@@ -127,6 +127,7 @@ test('Flow reports a verified Google challenge before stale balances and clears 
   assert.equal(row().status,'blocked');
   assert.match(vm.runInContext("flowAccountReason(account,snapshot,{},'verification_required').text",context), /Ubuntu 浏览器完成 Google 验证/);
   assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'login').label",context), '需要用户登录');
+  assert.match(vm.runInContext("flowAccountReason(account,snapshot,{},'login').text",context), /重新登录 Google.*再点「Flow 一键就绪」/);
   assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'flow_landing').label",context), '需要用户登录');
   assert.equal(vm.runInContext("flowLoginNotice('load_failed')",context),null);
   for (const loginPage of ['login', 'flow_landing']) {
@@ -142,6 +143,27 @@ test('Flow reports a verified Google challenge before stale balances and clears 
   account.flow_balance = 1050;
   account.flow_health = 'ready';
   assert.equal(row().status,'ready');
+});
+
+test('Flow card gives one direct next step for a missing binding or stale balance', () => {
+  const account = {profile:'a', flow_login:'verified', flow_balance_fresh:false};
+  const row = {status:'blocked', issues:[{key:'flow_binding',title:'任务窗口绑定待核对'},
+    {key:'flow_balance',title:'未找到该账号登记的 Flow 固定任务页，保留上次余额'}]};
+  const context = vm.createContext({account, row});
+  for (const name of ['esc','flowLoginNotice','flowAccountReason','flowAccountNoticeMarkup']) load(name,context);
+  for (const page of ['binding','project',null]) {
+    context.page = page;
+    const reason = vm.runInContext('flowAccountReason(account,{},row,page)',context);
+    assert.equal(reason.showOnCard,true);
+    assert.equal(reason.label,'请打开原 Flow 项目');
+    assert.match(reason.text,/如果 Google 显示登录页.*重新登录.*点「Flow 一键就绪」/);
+    assert.doesNotMatch(reason.text,/任务窗口绑定待核对|保留上次余额/);
+  }
+  const balance = vm.runInContext("flowAccountReason(account,{},row,'ok')",context);
+  assert.equal(balance.label,'请重新读取积分');
+  assert.doesNotMatch(balance.text,/登录/);
+  account.flow_risk_paused=true;
+  assert.notEqual(vm.runInContext("flowAccountReason(account,{},row,'binding').showOnCard",context),true);
 });
 
 test('overview renders one shared quota card with both time windows', () => {

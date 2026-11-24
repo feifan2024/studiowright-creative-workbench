@@ -15,6 +15,27 @@ STATE = dict(origin=True, account=True, path=PROJECT.removeprefix('https://flow.
 
 
 class FlowOverlayReload(unittest.IsolatedAsyncioTestCase):
+    async def test_reopened_browser_reports_login_only_for_the_accounts_original_project(self):
+        account = dict(profile='profile-a', key='flow-account-key', projects=[PROJECT.rsplit('/', 1)[1]])
+        binding = dict(binding_state='unconfirmed', account_key='key', browser_pid=100, port=9222,
+                       project_url=PROJECT)
+        cases = [
+            ([dict(url='https://accounts.google.com/v3/signin/confirmidentifier?continue='+PROJECT)], [{}], 'login'),
+            ([dict(url='https://accounts.google.com/v3/signin/challenge/totp?continue='+PROJECT)], [{}], 'verification_required'),
+            ([dict(url='https://accounts.google.com/v3/signin/identifier')], [{}], 'binding'),
+            ([dict(url='https://accounts.google.com/v3/signin/identifier?continue=https://flow.google.com/')], [{}], 'binding'),
+            ([dict(url='https://accounts.google.com/v3/signin/identifier?continue='+PROJECT)], [{}, {}], 'binding'),
+            ([dict(url='https://accounts.google.com/v3/signin/identifier?continue='+PROJECT), dict(url=PROJECT)], [{}], 'binding'),
+        ]
+        for pages, windows, expected in cases:
+            with self.subTest(expected=expected, pages=pages, windows=windows):
+                with patch.object(readiness, '_live_browser', return_value=101) as browser, \
+                        patch.object(readiness, '_pages', return_value=pages) as inventory, \
+                        patch.object(readiness, 'focus_call', return_value=windows):
+                    self.assertEqual(await readiness.inspect_page(account, binding), expected)
+                browser.assert_called_once_with('key', 100, 9222)
+                inventory.assert_called_once_with('key', 101, 9222, include_non_flow=True)
+
     async def test_closes_account_panel_on_verified_task_page_before_refresh(self):
         account = {'profile': 'profile-a', 'key': 'flow-account-key', 'email': 'test@example.com'}
         project_id = PROJECT.rsplit('/', 1)[1]
