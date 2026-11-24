@@ -64,6 +64,28 @@ class AccountOrderTest(unittest.TestCase):
             self.assertEqual(pool.priority_order(eligible), eligible)
             self.assertEqual(pool.saved_account_order(), [])
 
+    @unittest.skipUnless(os.name == 'posix', 'Workbench account pool requires Linux')
+    def test_text_without_flow_uses_registered_accounts_and_pause_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pool = RealPool(directory, directory)
+            try:
+                official = pool.official
+                accounts = {KEYS[0]: True, KEYS[1]: False}
+                official.runtime = SimpleNamespace(inventory=lambda: accounts, settings=lambda: {'accounts': accounts})
+                official.account_quotas = lambda _: {}
+                with self.assertRaises(ValueError):
+                    official.generate(KEYS[3], 'unregistered', str(uuid.uuid4()), None)
+                with pool.connection() as db:
+                    db.execute('INSERT INTO account_preferences(account_key,gemini_enabled) VALUES(?,0)', (KEYS[0],))
+                with self.assertRaises(ValueError):
+                    official.generate('auto', 'paused', str(uuid.uuid4()), None)
+                with pool.connection() as db:
+                    db.execute('UPDATE account_preferences SET gemini_enabled=1 WHERE account_key=?', (KEYS[0],))
+                accepted, _ = official.generate('auto', 'authorized', str(uuid.uuid4()), None)
+                self.assertEqual(accepted['account_key'], KEYS[0])
+            finally:
+                pool.close()
+
     def test_shared_order_can_include_an_account_outside_gemini(self):
         with tempfile.TemporaryDirectory() as directory:
             pool = bare_pool(directory, configured=KEYS[:3])

@@ -16,6 +16,32 @@ from test_flow_regressions import fixture_directory
 
 
 class VisionValidationHTTP(unittest.TestCase):
+    def test_text_dispatch_reads_its_own_pool_during_flow_unavailability(self):
+        with fixture_directory() as directory:
+            pool, sources = Mock(), Mock()
+            pool.path = directory / 'unused.sqlite3'
+            pool.maintenance.return_value = False
+            pool.generate.return_value = ({'status': 'queued'}, True)
+            sources.snapshot.return_value = {'real_accounts': {'available': False}}
+            server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(sources, real_pool=pool))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = 'http://127.0.0.1:' + str(server.server_port)
+            receipt = '00000000-0000-4000-8000-000000000000'
+            try:
+                request = Request(base + '/api/real-pool/chat',
+                    data=json.dumps({'account':'auto', 'prompt':'fixture'}).encode(),
+                    headers={'Origin':base, 'X-Workbench-Request':'1',
+                             'Content-Type':'application/json', 'Idempotency-Key':receipt})
+                with build_opener(ProxyHandler({})).open(request, timeout=3) as response:
+                    self.assertEqual(response.status, 201)
+                pool.generate.assert_called_once_with('auto', 'fixture', receipt, None)
+                sources.snapshot.assert_not_called()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
     def test_automatic_recovery_route_cannot_request_manual_hold_release(self):
         with fixture_directory() as directory:
             pool, sources = Mock(), Mock()

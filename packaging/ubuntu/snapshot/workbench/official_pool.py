@@ -362,7 +362,7 @@ class OfficialPool:
         elif attachments:raise ValueError('普通对话只收文字；请使用 Gemini 识图接口传图。')
         model=resolve(model,effort)
         if not isinstance(account,str):raise ValueError('请选择账号或按优先顺序分配。')
-        if account!='auto':self.pool.allowed(account,items)
+        if account!='auto' and items is not None:self.pool.allowed(account,items)
         advanced=model in ADVANCED_MODELS
         if fallback_model is not None:
             if account!='auto' or not advanced or image_analysis or readiness_probe or fallback_model not in (FLASH_FAMILY,*MODELS.values()):
@@ -380,6 +380,9 @@ class OfficialPool:
         if image_analysis:payload.update(channel=vision.CHANNEL,attachments=attachments)
         digest=hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
         now=time.time();available=self.runtime.inventory()
+        if items is None:
+            items=[{'key':'flow-account-'+key} for key in available]
+            if account!='auto':self.pool.allowed(account,items)
         quota=self.account_quotas(available) if not readiness_probe else {}
         selection='auto' if account=='auto' else 'manual'
         permitted=list(dict.fromkeys(i.get('key','').removeprefix('flow-account-') for i in items if isinstance(i,dict)))
