@@ -11,11 +11,38 @@ from unittest.mock import AsyncMock, patch
 ROOT = Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot'
 sys.path[:0] = [str(ROOT/'flow/console'), str(ROOT/'workbench')]
 from account_insights import FRESH_SECONDS, Insights
-from balance_reader import open_account_panel, BalancePanelUnavailable, BalanceReadDeferred, REVEAL_HEADER
+from balance_reader import fixed_flow_page, page_url, open_account_panel, BalancePanelUnavailable, BalanceReadDeferred, REVEAL_HEADER
 from console_store import Store
 
 
 class BalanceRecovery(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_playwright_url_uses_only_the_verified_target(self):
+        project = 'https://flow.google.com/project/11111111-1111-4111-8111-111111111111'
+        binding = dict(profile='a', binding_state='verified', browser_pid=120, port=9222,
+                       process_start='stamp', page_target='bound', project_url=project)
+        for target, observed, accepted in (('bound', project, True),
+                                           ('other', project, False),
+                                           ('bound', 'https://accounts.google.com/', False)):
+            with self.subTest(target=target, accepted=accepted, observed=observed):
+                session = S(send=AsyncMock(side_effect=[
+                    {'targetInfo': {'type': 'page', 'targetId': target, 'url': project}},
+                    {'result': {'value': {'url': observed}}},
+                    {'result': {'value': {'url': observed}}},
+                ]), detach=AsyncMock())
+                page = S(url='', context=S(new_cdp_session=AsyncMock(return_value=session)))
+                browser = S(contexts=[S(pages=[page])])
+                registry = S(get=lambda key: binding)
+                with patch('task_window_registry.TaskWindowRegistry', return_value=registry), \
+                        patch('task_window_registry.process_identity', return_value=('a', 'stamp')):
+                    async with AsyncExitStack() as sessions:
+                        if accepted:
+                            chosen = await fixed_flow_page(browser, 'a', 'a@example.test', sessions)
+                            self.assertEqual(await page_url(chosen), project)
+                        else:
+                            with self.assertRaisesRegex(ValueError, '现有浏览器没有 Flow 页面'):
+                                await fixed_flow_page(browser, 'a', 'a@example.test', sessions)
+                session.detach.assert_awaited_once()
+
     def make_fixture(self, *, available=True, stays_missing=False, identity='a@example.test', duplicate=False):
         page = S(url='https://flow.google.com/project/fixture', focused=False)
         state = dict(lease_entries=0, lease_exits=0)

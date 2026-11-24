@@ -9,6 +9,8 @@ from pathlib import Path
 import hashlib
 import re
 
+from balance_browser import FixedBalancePage
+
 ACCOUNT_PANEL = re.compile(r'^(账号详情|帐号详情|帳戶詳細資料|Account details|アカウントの詳細)$', re.I)
 CLOSE_PANEL = re.compile(r'^(关闭账号面板|Close account panel)$', re.I)
 REVEAL_HEADER = """() => {
@@ -32,6 +34,10 @@ class BalancePanelUnavailable(ValueError):
     """The verified Flow page did not expose the panel or its balance yet."""
 
 
+async def page_url(page):
+    return await page.current_url() if isinstance(page, FixedBalancePage) else page.url
+
+
 async def open_account_panel(page, panel, close, email, checked_url, foreground, restoration=None):
     from adapter import READ_STATE
     from playwright.async_api import TimeoutError as BrowserTimeout
@@ -44,7 +50,7 @@ async def open_account_panel(page, panel, close, email, checked_url, foreground,
             queue = ForegroundQueue(Path.home()/'.local/state/creative-unified-workbench/foreground-input')
             if not await foreground.enter_async_context(queue.try_acquire_async()):
                 raise BalanceReadDeferred('前台正在执行任务，稍后再读余额。')
-            if page.url != checked_url:
+            if await page_url(page) != checked_url:
                 raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
             await page.bring_to_front()
             try:
@@ -54,7 +60,7 @@ async def open_account_panel(page, panel, close, email, checked_url, foreground,
         verified = False
         count = 0
         for attempt in range(10):
-            if page.url != checked_url:
+            if await page_url(page) != checked_url:
                 raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
             verified = verify_identity(await page.evaluate(READ_STATE), email)
             if verified:
@@ -92,13 +98,29 @@ def parse_balance(text, branded_only=False):
         if len(values)==1:return values.pop()
     return None
 
-async def fixed_flow_page(browser, profile):
-    from task_window_registry import TaskWindowRegistry, canonical_project_url
+async def fixed_flow_page(browser, profile, email='', sessions=None):
+    from task_window_registry import TaskWindowRegistry, canonical_project_url, process_identity
 
-    pages = [p for cx in browser.contexts for p in cx.pages if p.url.startswith('https://flow.google.com/')]
+    attached = [p for cx in browser.contexts for p in cx.pages]
+    pages = [p for p in attached if p.url.startswith('https://flow.google.com/')]
+    key = hashlib.sha256(profile.encode('utf-8')).hexdigest()
+    binding = TaskWindowRegistry().get(key)
     if not pages:
+        if (sessions is not None and binding and binding['profile'] == profile
+                and binding['binding_state'] == 'verified'
+                and process_identity(binding['browser_pid'], key, binding['port']) == (profile, binding['process_start'])):
+            for candidate in (page for page in attached if not page.url):
+                session = await candidate.context.new_cdp_session(candidate)
+                sessions.push_async_callback(session.detach)
+                info = (await session.send('Target.getTargetInfo'))['targetInfo']
+                if info.get('type') != 'page' or info.get('targetId') != binding['page_target']:
+                    continue
+                direct = FixedBalancePage(candidate, session, info['url'])
+                url = await direct.current_url()
+                if url == info['url'] and canonical_project_url(url) == binding['project_url']:
+                    direct.expected_url, direct.email = url, email
+                    return direct
         raise ValueError('现有浏览器没有 Flow 页面，保留上次余额。')
-    binding = TaskWindowRegistry().get(hashlib.sha256(profile.encode('utf-8')).hexdigest())
     if not binding:
         if len(pages) == 1:
             return pages[0]
@@ -173,19 +195,19 @@ async def read_balance(account, playwright, include_details=False, *, incident_r
     try:
         # Do not call upstream attach/ensure_running: that could open a new window.
         browser=await playwright.chromium.connect_over_cdp('http://127.0.0.1:'+str(chrome.debug_port(account['profile'])),timeout=4000,no_defaults=True)
-        page=await fixed_flow_page(browser,account['profile'])
+        email=(account.get('email') or '').lower()
+        page=await fixed_flow_page(browser,account['profile'],email,foreground)
+        checked_url=await page_url(page)
         if incident_root is not None:
             from page_activity_guard import stop_on_page_warning
             await stop_on_page_warning(page, incident_root, account['profile'], 'browse')
-        checked_url=page.url
-        email=(account.get('email') or '').lower()
         panel=page.get_by_role('button',name=ACCOUNT_PANEL).filter(visible=True)
         close=page.get_by_role('button',name=CLOSE_PANEL).filter(visible=True)
         body=page.locator('body')
         opened,scroll_top=await open_account_panel(
             page,panel,close,email,checked_url,foreground,restoration)
         for _ in range(12):
-            if page.url!=checked_url:
+            if await page_url(page)!=checked_url:
                 raise ValueError('Flow 页面在读取时发生切换，保留上次余额。')
             if incident_root is not None:
                 await stop_on_page_warning(page, incident_root, account['profile'], 'browse')
@@ -203,23 +225,23 @@ async def read_balance(account, playwright, include_details=False, *, incident_r
                                 await asyncio.sleep(.15)
                         except BrowserTimeout:
                             pass
-                if not verify_identity(await page.evaluate(READ_STATE),email) or page.url!=checked_url:
+                if not verify_identity(await page.evaluate(READ_STATE),email) or await page_url(page)!=checked_url:
                     raise ValueError('Flow 页面或账号发生变化，未保存余额。')
                 return {"balance":value,"next_credit_date":parse_credit_renewal(panel_text)} if include_details else value
             await asyncio.sleep(.25)
-        if not verify_identity(await page.evaluate(READ_STATE), email) or page.url != checked_url:
+        if not verify_identity(await page.evaluate(READ_STATE), email) or await page_url(page) != checked_url:
             raise ValueError('Flow 页面或账号发生变化，未保存余额。')
         raise BalancePanelUnavailable('Flow 积分暂未显示，保留上次余额并稍后重读。')
     finally:
         opened = opened or restoration.get('opened', False)
         scroll_top = restoration.get('scroll_top', scroll_top)
         try:
-            if opened and page and not page.is_closed() and page.url==checked_url:
+            if opened and page and not page.is_closed() and await page_url(page)==checked_url:
                 if await close.count()==1:await close.click(timeout=750)
         except Exception:pass
         finally:
             try:
-                if scroll_top is not None and not page.is_closed() and page.url==checked_url:
+                if scroll_top is not None and not page.is_closed() and await page_url(page)==checked_url:
                     await page.evaluate(RESTORE_SCROLL,scroll_top)
             except Exception:pass
             finally:
