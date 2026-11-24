@@ -53,14 +53,14 @@ def trusted_flow(url):
         u=urlparse(url);return u.scheme=='https' and u.hostname=='flow.google.com' and not u.username and not u.password and u.port in (None,443)
     except (TypeError,ValueError):return False
 
-async def safe_page(session,page):
+async def safe_page(session,page,*,prepare=True):
     await session._safe_editor(page)
     flags=await page.evaluate(SAFETY_JS)
     for key in ('uploads','busy','dialog'):
         if flags.get(key):raise ValueError('flow_window_protected_'+key)
     # New accounts default to an empty creative-agent panel. Leave it only
     # after draft/attachment/busy/dialog guards have passed.
-    if '/project/' in page.url:
+    if prepare and '/project/' in page.url:
         from studiowright.flow.page import FlowPage
         await FlowPage(page, page.url.rsplit('/',1)[-1], session)._leave_agent_mode(5)
 
@@ -74,7 +74,8 @@ async def inventory(session):
 
 async def ensure_unique(session,profile,*,task_id=None):
     from task_coordinator import Coordinator,CoordinationBlocked,record
-    from flow_task_window import registration
+    from flow_task_window import registration, verified_task_binding
+    from task_window_registry import canonical_project_url
     from flow_browser_state import REGISTRY
     lifecycle=Lifecycle();coordinator=Coordinator();old=coordinator.window(profile)
     rows=await inventory(session);count=len({r['window'] for r in rows})
@@ -88,7 +89,7 @@ async def ensure_unique(session,profile,*,task_id=None):
     # Check every candidate before closing even one. A protected page means the
     # uniqueness requirement is visibly unmet, never "fixed" by opening another.
     for r in rows:
-        try:await safe_page(session,r['page'])
+        try:await safe_page(session,r['page'],prepare=False)
         except Exception:
             lifecycle.observe(profile,count,len(rows),1,'flow_window_protected')
             raise
@@ -103,16 +104,30 @@ async def ensure_unique(session,profile,*,task_id=None):
         else:
             page=await session._new_window()
         return page
+    binding=verified_task_binding(key,registered)
+    fixed=[r for r in rows if binding and r['target']==binding['page_target']]
     preferred=[r for r in rows if old and r['target']==old['target_id']]
     tagged=[r for r in rows if r['role']=='account-flow-task']
-    if preferred:keep=preferred[0]
+    if fixed:keep=fixed[0]
+    elif preferred:keep=preferred[0]
     elif len(tagged)==1:keep=tagged[0]
     elif len(tagged)>1:raise CoordinationBlocked('multiple_account_task_windows')
     else:keep=rows[0]  # Existing verified empty page, not a new window.
+    if len(rows)>1:
+        try:
+            project=canonical_project_url(keep['page'].url)
+            if any(canonical_project_url(r['page'].url)!=project for r in rows):
+                raise ValueError('different_flow_projects')
+        except ValueError:
+            lifecycle.observe(profile,count,len(rows),reason='flow_window_not_unique')
+            raise CoordinationBlocked('flow_window_not_unique') from None
     for r in rows:
         if r is keep:continue
-        await safe_page(session,keep['page']);await safe_page(session,r['page'])
+        await safe_page(session,keep['page'],prepare=False)
+        await safe_page(session,r['page'],prepare=False)
         if keep['page'].is_closed():raise CoordinationBlocked('task_window_identity_changed')
+        if canonical_project_url(keep['page'].url)!=project or canonical_project_url(r['page'].url)!=project:
+            raise CoordinationBlocked('task_window_identity_changed')
         await r['page'].close()
         lifecycle.event(profile,'duplicate_empty_flow_page_closed',target=r['target'],chrome_window=r['window'])
         record('duplicate_empty_flow_page_closed')
@@ -120,6 +135,7 @@ async def ensure_unique(session,profile,*,task_id=None):
     if len(final)!=1 or final[0]['target']!=keep['target']:
         lifecycle.observe(profile,len({r['window'] for r in final}),len(final),reason='flow_window_not_unique')
         raise CoordinationBlocked('flow_window_not_unique')
+    await safe_page(session,keep['page'])
     await keep['page'].evaluate('(name)=>{window.name=name}', 'sw-account-flow-task')
     # The old homepage registry must point at the retained Chrome window too.
     with closing(sqlite3.connect(REGISTRY,timeout=5)) as db,db:

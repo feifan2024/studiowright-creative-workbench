@@ -33,6 +33,18 @@ def _trusted(url):
         return False
 
 
+def verified_task_binding(account_key, registered):
+    from task_window_registry import TaskWindowRegistry, process_identity
+
+    binding = TaskWindowRegistry().get(account_key)
+    if (not binding or binding['binding_state'] != 'verified'
+            or binding['browser_pid'] != registered['pid'] or binding['port'] != registered['port']
+            or binding['page_target'] not in registered['targets']):
+        return None
+    identity = process_identity(registered['pid'], account_key, registered['port'])
+    return binding if identity == (binding['profile'], binding['process_start']) else None
+
+
 async def find_flow_page(*, context, account_key, desired_url, layout_call, preferred_page=None,
                          before_activation=None):
     from foreground_input import Target

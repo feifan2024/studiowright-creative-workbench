@@ -1,4 +1,5 @@
 """One-click repair preserves healthy, disabled, busy and unresolved accounts."""
+import json
 import sqlite3
 import sys
 import unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace as S
 from unittest.mock import Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'packaging/ubuntu/snapshot/workbench'))
-from server import readiness_repair_accounts
+from server import Sources, readiness_repair_accounts
 from official_pool import OfficialPool
 from gemini_authorization import GeminiAuthorization
 
@@ -80,5 +81,29 @@ class SelectiveReadiness(unittest.TestCase):
                     google_check='verification_required',login='login')
         self.assertEqual([a['profile'] for a in readiness_repair_accounts(payload,checks)],['broken'])
         self.assertEqual(len(payload['accounts']),8)
+
+    def test_auto_cleanup_refreshes_stale_credits_only_for_repaired_idle_account(self):
+        common=dict(email='fixture@example.invalid',flow_login='verified',
+                    flow_page_incident=None,flow_risk_known=True,flow_risk_paused=False,
+                    flow_pacing_known=True,flow_cooling=False,flow_balance_fresh=False)
+        accounts=[dict(common,profile=profile,key='flow-account-'+profile)
+                  for profile in ('cleaned','untouched')]
+        source=Sources()
+        source.read=Mock(return_value=({'tasks':[]},None))
+        source.refresh_flow_balances_once=Mock()
+        response=lambda data:S(stdout=json.dumps(data).encode())
+        with patch('server.account_rows',return_value=accounts), \
+             patch('server.project_rows',return_value=[]), \
+             patch('server.task_rows',return_value=[]), \
+             patch('server.Path',side_effect=[S(read_bytes=lambda:sys.executable.encode()),Path(sys.executable)]), \
+             patch('server.subprocess.check_output',return_value='123'), \
+             patch('server.subprocess.run',side_effect=[
+                 response({'cleaned':'unique','untouched':'ok'}),
+                 response({'cleaned':{'page':'ok','actions':['close_duplicate']}}),
+                 response({'cleaned':'ok','untouched':'ok'}),
+             ]):
+            result=source.flow_readiness(repair=True,automatic=True)
+        self.assertEqual(result['accounts'],{'cleaned':'ok','untouched':'ok'})
+        source.refresh_flow_balances_once.assert_called_once_with(['cleaned'])
 
 if __name__=='__main__':unittest.main()

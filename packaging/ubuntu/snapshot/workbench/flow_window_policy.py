@@ -68,7 +68,8 @@ async def inventory(session):
 
 async def ensure_unique(session,profile,*,task_id=None):
     from task_coordinator import Coordinator,CoordinationBlocked,record
-    from flow_task_window import registration
+    from flow_task_window import registration, verified_task_binding
+    from task_window_registry import canonical_project_url
     from flow_browser_state import REGISTRY
     lifecycle=Lifecycle();coordinator=Coordinator();old=coordinator.window(profile)
     rows=await inventory(session);count=len({r['window'] for r in rows})
@@ -97,16 +98,30 @@ async def ensure_unique(session,profile,*,task_id=None):
         else:
             page=await session._new_window()
         return page
+    binding=verified_task_binding(key,registered)
+    fixed=[r for r in rows if binding and r['target']==binding['page_target']]
     preferred=[r for r in rows if old and r['target']==old['target_id']]
     tagged=[r for r in rows if r['role']=='account-flow-task']
-    if preferred:keep=preferred[0]
+    if fixed:keep=fixed[0]
+    elif preferred:keep=preferred[0]
     elif len(tagged)==1:keep=tagged[0]
     elif len(tagged)>1:raise CoordinationBlocked('multiple_account_task_windows')
     else:keep=rows[0]  # Existing verified empty page, not a new window.
+    if len(rows)>1:
+        try:
+            project=canonical_project_url(keep['page'].url)
+            if any(canonical_project_url(r['page'].url)!=project for r in rows):
+                raise ValueError('different_flow_projects')
+        except ValueError:
+            lifecycle.observe(profile,count,len(rows),reason='flow_window_not_unique')
+            raise CoordinationBlocked('flow_window_not_unique') from None
     for r in rows:
         if r is keep:continue
-        await safe_page(session,keep['page']);await safe_page(session,r['page'])
+        await safe_page(session,keep['page'])
+        await safe_page(session,r['page'])
         if keep['page'].is_closed():raise CoordinationBlocked('task_window_identity_changed')
+        if canonical_project_url(keep['page'].url)!=project or canonical_project_url(r['page'].url)!=project:
+            raise CoordinationBlocked('task_window_identity_changed')
         await r['page'].close()
         lifecycle.event(profile,'duplicate_empty_flow_page_closed',target=r['target'],chrome_window=r['window'])
         record('duplicate_empty_flow_page_closed')

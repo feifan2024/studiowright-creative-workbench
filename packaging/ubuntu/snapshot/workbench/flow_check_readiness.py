@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import sqlite3
 import sys
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, build_opener
@@ -30,8 +31,9 @@ def composer_expression(email):
       return {origin:true,path:location.pathname,account,login,loadFailed,
         busy:[...document.querySelectorAll('[role=progressbar],[aria-busy=true]')].some(visible),
         overlay:[...document.querySelectorAll('[role=dialog],[aria-modal=true],flow-change-log-modal')].some(visible),
-        draft:boxes.some(e=>(e.innerText||'').trim()) ||
-          !!document.querySelector('flow-prompt-box button.chip-container img,flow-prompt-box .mention-chip') ||
+        draft:[...document.querySelectorAll('flow-prompt-box [contenteditable=true],flow-base-prompt-box [contenteditable=true]')]
+          .some(e=>(e.textContent||'').trim() || (e.innerText||'').trim()) ||
+          !!document.querySelector('flow-prompt-box button.chip-container img,flow-prompt-box .mention-chip,flow-base-prompt-box button.chip-container img,flow-base-prompt-box .mention-chip') ||
           [...document.querySelectorAll('input[type=file]')].some(e=>e.files?.length),
         editor:boxes.filter(e=>visible(e) && e.getAttribute('aria-disabled')!=='true').length===1 &&
           [...document.querySelectorAll('flow-prompt-box button mat-icon')].some(i=>i.textContent.trim()==='arrow_forward'&&visible(i))};
@@ -98,8 +100,8 @@ async def inspect_page(account, binding):
     pid, port = binding['browser_pid'], binding['port']
     if process_identity(pid, key, port) != (profile, binding['process_start']):
         return 'binding'
-    pages = await asyncio.to_thread(_pages, key, pid, port, include_non_flow=True)
-    pages = [page for page in pages if page.get('id') == binding['page_target']]
+    tabs = await asyncio.to_thread(_pages, key, pid, port, include_non_flow=True)
+    pages = [page for page in tabs if page.get('id') == binding['page_target']]
     if len(pages) != 1:
         return 'binding'
     page = pages[0]
@@ -137,7 +139,10 @@ async def inspect_page(account, binding):
         state = json.loads(await ws.recv()).get('result', {}).get('result', {}).get('value', {})
     if not state.get('origin') or 'https://flow.google.com' + state.get('path', '').rstrip('/') != project:
         return 'project'
-    return page_verdict(state)
+    verdict = page_verdict(state)
+    if verdict == 'ok' and sum(p.get('url', '').startswith('https://flow.google.com/') for p in tabs) > 1:
+        return 'unique'
+    return verdict
 
 
 async def inspect_reopened_login(account, binding, key):
@@ -167,15 +172,25 @@ async def inspect_reopened_login(account, binding, key):
 
 
 async def probe(data):
+    from flow_window_policy import Lifecycle
+
     bindings = {b['profile']: b for b in data['bindings']}
     busy = set(data['busy'])
+    try:
+        unique = {row['profile'] for row in Lifecycle().status() if row['unique_ok'] == 1}
+    except (OSError, ValueError, sqlite3.Error):
+        unique = None
+
     async def check(account):
         profile = account['profile']
         if profile in busy:
             return profile, 'busy'
         try:
             async with asyncio.timeout(6):
-                return profile, await inspect_page(account, bindings.get(profile, {}))
+                verdict = await inspect_page(account, bindings.get(profile, {}))
+                if verdict == 'ok' and unique is not None and profile not in unique:
+                    return profile, 'unique'
+                return profile, verdict
         except Exception:
             return profile, 'unconfirmed'
     return dict(await asyncio.gather(*(check(a) for a in data['accounts'])))

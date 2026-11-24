@@ -1083,8 +1083,9 @@ class Sources:
                         if account['repairable'] and not account['review_task']}
             eligible.difference_update(payload['busy'])
             if automatic:
+                balance_refresh_actions = {'reload', 'close_duplicate', 'recheck_window'}
                 eligible.intersection_update(profile for profile, item in repairs.items()
-                                             if 'reload' in item.get('actions', ()))
+                                             if balance_refresh_actions.intersection(item.get('actions', ())))
             stale = [a['profile'] for a in account_rows(state) if a['profile'] in eligible
                      and checks.get(a['profile']) == 'ok' and not a['flow_balance_fresh']
                      and a['flow_login'] == 'verified' and not a['flow_page_incident']

@@ -255,6 +255,88 @@ async def evaluate(ws, expression):
     return raw.get('result',{}).get('value',{})
 
 
+async def check_duplicate(account, binding, page, remaining=None):
+    """Inspect a same-project copy and close it only after the live guards pass."""
+    import websockets
+
+    port = binding['port']
+    target = page['id']
+    endpoint = f'ws://127.0.0.1:{port}/devtools/page/{target}'
+    if page.get('webSocketDebuggerUrl') != endpoint or target == binding['page_target']:
+        return False
+    async with websockets.connect(endpoint, open_timeout=2, close_timeout=1, max_size=65536) as ws:
+        if remaining is not None:
+            await asyncio.to_thread(guard_live, account)
+            if TaskWindowRegistry().get(binding['account_key']) != binding:
+                return False
+            tabs = await asyncio.to_thread(_pages, binding['account_key'], binding['browser_pid'], port)
+            if {p['id']: p['url'] for p in tabs} != remaining:
+                return False
+            if await inspect_page(account, binding) != 'unique':
+                return False
+        state = await evaluate(ws, composer_expression(account['email']))
+        if (not state or not state.get('origin') or page_verdict(state) != 'ok'
+                or state.get('path', '').rstrip('/') != urlsplit(binding['project_url']).path):
+            return False
+        if remaining is not None:
+            await command(ws, 'Page.close')
+    return True
+
+
+async def reconcile_fixed_window(account, binding, actions):
+    """Keep the verified binding, remove empty copies, and record a fresh count."""
+    from flow_window_policy import Lifecycle
+    from task_coordinator import Coordinator
+
+    await asyncio.to_thread(guard_live, account)
+    if TaskWindowRegistry().get(binding['account_key']) != binding:
+        return 'binding'
+    verdict = await inspect_page(account, binding)
+    if verdict not in ('ok', 'unique'):
+        return verdict
+    key, pid, port = binding['account_key'], binding['browser_pid'], binding['port']
+    tabs = await asyncio.to_thread(_pages, key, pid, port)
+    fixed = binding['page_target']
+    if fixed not in {p['id'] for p in tabs}:
+        return 'binding'
+    try:
+        if any(canonical_project_url(p['url']) != binding['project_url'] for p in tabs):
+            return 'unique'
+    except ValueError:
+        return 'unique'
+    duplicates = [page for page in tabs if page['id'] != fixed]
+    for page in duplicates:
+        if not await check_duplicate(account, binding, page):
+            return 'unique'
+
+    remaining = {page['id']: page['url'] for page in tabs}
+    for page in duplicates:
+        if not await check_duplicate(account, binding, page, remaining):
+            return 'unique'
+        remaining.pop(page['id'])
+        for _ in range(15):
+            current = await asyncio.to_thread(_pages, key, pid, port)
+            if {p['id']: p['url'] for p in current} == remaining:
+                break
+            await asyncio.sleep(.1)
+        else:
+            return 'unique'
+        if 'close_duplicate' not in actions:
+            actions.append('close_duplicate')
+
+    verdict = await inspect_page(account, binding)
+    if verdict != 'ok':
+        return verdict
+    await asyncio.to_thread(guard_live, account)
+    if TaskWindowRegistry().get(key) != binding:
+        return 'binding'
+    Lifecycle().observe(account['profile'], 1, 1)
+    if not duplicates:
+        actions.append('recheck_window')
+    Coordinator().event(account['profile'], None, 'readiness_recovered', actions=actions)
+    return 'ok'
+
+
 async def close_account_panel(ws, account, expected, project, before, actions):
     await asyncio.to_thread(guard_live, account)
     project_path = json.dumps(urlsplit(project).path)
@@ -313,32 +395,6 @@ def restart_managed(binding, allow_responsive=False):
                 or windows[0].get('id')!=binding['window_id']):
             raise ValueError('restart_not_safe')
     subprocess.run(systemctl+['restart',unit],check=True,capture_output=True,timeout=12)
-
-
-def _rebuild_standard(account):
-    """Recreate the account's standard FLOW+ project after deletion or rename
-    loss, then register it so guard_live and the switch worker can find it."""
-    import secrets
-    profile = account['profile']
-    key = account['key'].removeprefix('flow-account-')
-    script = Path(__file__).resolve().parent / 'create_flow_project.py'
-    process = subprocess.run([sys.executable, '-B', str(script)],
-                             input=json.dumps({'profile': profile}).encode(),
-                             capture_output=True, timeout=150)
-    if process.returncode or len(process.stdout) > 4096:
-        raise ValueError('project_create_unconfirmed')
-    result = json.loads(process.stdout)
-    project = result.get('project') if isinstance(result, dict) else None
-    if not isinstance(project, str) or len(project) != 36:
-        raise ValueError('project_create_unconfirmed')
-    request = urllib.request.Request('http://127.0.0.1:18888/api/projects',
-        data=json.dumps({'profile': profile, 'id': project,
-                         'title': 'FLOW+' + account['email'].split('@', 1)[0]}).encode(),
-        method='POST', headers={'Content-Type': 'application/json', 'X-Console-Request': '1'})
-    with build_opener(ProxyHandler({})).open(request, timeout=8) as response:
-        if response.status != 200:
-            raise ValueError('project_register_failed')
-    return project
 
 
 async def reload_failed_project(ws, account, expected, project, actions):
@@ -458,9 +514,7 @@ async def repair(account, initial, actions, safe_only=False):
             if safe_only and (not before.get('origin') or not before.get('account') or before.get('busy')):
                 return page_verdict(before),None
             if before.get('draft'):
-                if account.get('operator_dispatch_paused'):
-                    return 'draft',None
-                initial = 'draft'
+                return 'draft',None
             if (not before.get('origin') or not before.get('account')) and not navigated_once:
                 # Auto-navigation: a stray interstitial (Google bar, account picker)
                 # is brought back to the canonical project once per pass.
@@ -477,61 +531,18 @@ async def repair(account, initial, actions, safe_only=False):
                 before = await evaluate(ws,expected)
             if not before.get('origin') or not before.get('account'):
                 return page_verdict(before),None
-            # Refresh drafts only on the account's verified fixed task page.
-            if initial == 'draft' and before.get('draft'):
-                if not same:
-                    return 'project',None
-                if (not old or old.get('binding_state') != 'verified' or old.get('project_url') != project
-                        or any(old.get(k)!=v for k,v in current.items())):
-                    await asyncio.to_thread(guard_live,account)
-                    TaskWindowRegistry().bind(**current,project_url=project)
-                    actions.append('rebind')
-                if before.get('busy'):
-                    return 'busy',None
-                live_projects, _ = await asyncio.to_thread(guard_live,account)
-                if project is None or project.rsplit('/',1)[1] not in live_projects:
-                    # The standard project can be deleted or lose its name; rebuild
-                    # it on the open window instead of stranding the account.
-                    await asyncio.to_thread(_rebuild_standard, account)
-                    live_projects, standard = await asyncio.to_thread(guard_live,account)
-                    if len(standard) == 0:
-                        return 'project',None
-                    if len(standard) > 1:
-                        return 'duplicate_projects',None
-                    frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
-                    project = canonical_project_url('https://flow.google.com/project/'+next(iter(standard)))
-                    await command(ws,'Page.navigate',{'url':project,'frameId':frame['id']})
-                    await asyncio.sleep(3)
-                frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
-                latest = await evaluate(ws,expected)
-                if (canonical_project_url(frame['url']) != project or not latest.get('origin')
-                        or not latest.get('account') or latest.get('busy')
-                        or latest.get('path') != urlsplit(frame['url']).path):
-                    return 'unconfirmed',None
-                if latest.get('draft'):
-                    actions.append('reload')
-                    await asyncio.wait_for(command(ws,'Page.reload',{'loaderId':frame['loaderId']}),timeout=3)
-                    for _ in range(12):
-                        await asyncio.sleep(.25)
-                        loaded = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
-                        if loaded['loaderId'] != frame['loaderId']:
-                            if canonical_project_url(loaded['url']) != project:
-                                return 'project',None
-                            break
-                    else:
-                        return 'unconfirmed',None
-            elif before.get('draft'):
+            if before.get('draft'):
                 return 'draft',None
-            if (initial != 'draft' and before.get('overlay') and not before.get('busy')
+            if (before.get('overlay') and not before.get('busy')
                     and same and old and old.get('binding_state') == 'verified'
                     and old.get('project_url') == project and all(old.get(k) == v for k,v in current.items())):
                 before = await close_account_panel(ws, account, expected, project, before, actions)
-            if initial != 'draft' and same and before.get('overlay') and not before.get('busy') and 'reload' not in actions:
+            if same and before.get('overlay') and not before.get('busy') and 'reload' not in actions:
                 before = await reload_overlay(ws, account, expected, project, actions)
                 navigated_once = navigated_once or 'reload' in actions
                 if not before:
                     return 'unconfirmed',None
-            if initial != 'draft' and before.get('overlay') and not before.get('busy'):
+            if before.get('overlay') and not before.get('busy'):
                 await asyncio.to_thread(guard_live,account)
                 latest = await evaluate(ws,expected)
                 if (latest.get('account') and latest.get('path')==before.get('path') and not latest.get('draft')
@@ -539,7 +550,11 @@ async def repair(account, initial, actions, safe_only=False):
                     actions.append('dismiss_update')
                     await asyncio.sleep(.3)
                     before = await evaluate(ws,expected)
-            if initial != 'draft' and (before.get('overlay') or before.get('busy')):
+            if before.get('draft'):
+                return 'draft',None
+            if before.get('busy'):
+                return 'busy',None
+            if before.get('overlay'):
                 if not navigated_once:
                     navigated_once = True
                     await asyncio.to_thread(guard_live,account)
@@ -549,9 +564,9 @@ async def repair(account, initial, actions, safe_only=False):
                     before = await evaluate(ws,expected)
                 if before.get('overlay') or before.get('busy'):
                     return ('overlay' if before.get('overlay') else 'busy'),None
-            if initial != 'draft' and (not before.get('account') or before.get('draft')):
+            if not before.get('account') or before.get('draft') or before.get('busy'):
                 return page_verdict(before),None
-            if initial != 'draft' and (not same or not before.get('editor')):
+            if not same or not before.get('editor'):
                 if same and (initial == 'after_restart' or 'reload' in actions):
                     return 'editor',None
                 await asyncio.to_thread(guard_live,account)
@@ -615,14 +630,14 @@ async def repair(account, initial, actions, safe_only=False):
                 if (now.get('account') and 'https://flow.google.com'+now.get('path','').rstrip('/')==desired
                         and not now.get('draft') and not now.get('busy') and await evaluate(ws,DISMISS_UPDATE) is True):
                     actions.append('dismiss_update')
-    if (verdict in {'draft','editor','project','binding','unconfirmed'} and 'restart' not in actions
+    if (verdict in {'editor','project','binding','unconfirmed'} and 'restart' not in actions
             and any(action in actions for action in ('reload','open_project'))):
         # The operator authorized refresh/restart of this exact idle task window.
         # Recheck the live account and page before escalating beyond a refresh.
         await asyncio.to_thread(guard_live,account)
         async with websockets.connect(endpoint,open_timeout=2,close_timeout=1,max_size=65536) as ws:
             last = await evaluate(ws,expected)
-        if not last.get('account') or not last.get('origin') or last.get('busy'):
+        if not last.get('account') or not last.get('origin') or last.get('busy') or last.get('draft'):
             return verdict,None
         await asyncio.to_thread(restart_managed,current,allow_responsive=True)
         actions.append('restart')
@@ -685,7 +700,7 @@ async def recover(payload):
                 unit = 'studiowright-browser-'+p+'.service'
                 status = subprocess.check_output(['systemctl','--user','show',unit,'-p','ActiveState','--value'],
                                                  text=True,timeout=3).strip()
-                if status in {'inactive','failed'}:
+                if status in {'inactive','failed'} and await asyncio.to_thread(_discover_chrome, p) is None:
                     await asyncio.to_thread(guard_live,account)
                     from activation_browser import main as open_flow
                     try:
@@ -704,16 +719,16 @@ async def recover(payload):
                         continue
                 if not account['repairable']:
                     continue
+                binding = bindings.get(p, {})
                 try:
-                    before = await asyncio.wait_for(inspect_page(account,bindings.get(p,{})),timeout=5)
+                    before = await asyncio.wait_for(inspect_page(account,binding),timeout=5)
                 except (OSError,ValueError,TimeoutError):
                     before = 'binding'
                 old_draft = before == 'ok' and (Coordinator().window(p) or {}).get('state') == 'blocked_draft'
-                if payload.get('safe_only') and before not in {'binding','project','editor','overlay','draft','load_failed','flow_landing'} and not old_draft:
-                    out[p] = {'page':before,'actions':[]}
-                    continue
-                if (before in {'binding','project','editor','overlay','draft','load_failed','flow_landing'} or old_draft or
-                        (before == 'ok' and lifecycle.get(p,{}).get('unique_ok') != 1)):
+                if before == 'unique' or (before == 'ok' and not old_draft and lifecycle.get(p,{}).get('unique_ok') != 1):
+                    verdict = await asyncio.wait_for(reconcile_fixed_window(account,binding,actions),
+                        timeout=min(45,max(1,deadline-asyncio.get_running_loop().time())))
+                elif before in {'binding','project','editor','overlay','load_failed','flow_landing'} or old_draft:
                     verdict,_ = await asyncio.wait_for(repair(account,before,actions,safe_only=payload.get('safe_only') is True),
                         timeout=min(45,max(1,deadline-asyncio.get_running_loop().time())))
                 else:

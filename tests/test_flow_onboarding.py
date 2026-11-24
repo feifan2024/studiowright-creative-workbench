@@ -1,10 +1,12 @@
 import ast
 import asyncio
+from contextlib import closing
+import hashlib
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as S
-from unittest.mock import AsyncMock,Mock,patch
+from unittest.mock import AsyncMock,MagicMock,Mock,patch
 root=Path(__file__).resolve().parents[1]/'packaging/ubuntu/snapshot/flow/console'
 def method(file,name):
     tree=ast.parse((root/file).read_text(encoding='utf-8'))
@@ -41,3 +43,27 @@ class Onboarding(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await fn(session,'https://flow.google.com/'),flow)
         session._new_window.assert_not_awaited()
         self.assertTrue(all(call.args[0] is flow for call in session._safe_editor.call_args_list))
+
+    async def test_dispatch_prefers_bound_window_over_stale_coordinator_target(self):
+        fn,ns=method('flow_window_policy.py','ensure_unique')
+        project='https://flow.google.com/project/11111111-1111-4111-8111-111111111111'
+        fixed=S(url=project,is_closed=lambda:False,close=AsyncMock(),evaluate=AsyncMock())
+        duplicate=S(url=project,is_closed=lambda:False,close=AsyncMock(),evaluate=AsyncMock())
+        keep=dict(page=fixed,role='other',target='fixed',window=1)
+        copy=dict(page=duplicate,role='account-flow-task',target='old',window=2)
+        coordinator=S(window=Mock(return_value={'state':'idle','target_id':'old'}),bind=Mock())
+        registry=S(registration=Mock(return_value={'pid':7,'port':9222,'targets':{'fixed','old'}}),
+                   verified_task_binding=Mock(return_value={'page_target':'fixed'}))
+        modules={
+            'task_coordinator':S(Coordinator=lambda:coordinator,CoordinationBlocked=ValueError,record=Mock()),
+            'flow_task_window':registry,
+            'task_window_registry':S(canonical_project_url=lambda url:url),
+            'flow_browser_state':S(REGISTRY='fake')
+        }
+        ns.update(Lifecycle=MagicMock(),inventory=AsyncMock(side_effect=[[copy,keep],[keep]]),
+                  safe_page=AsyncMock(),hashlib=hashlib,closing=closing,sqlite3=S(connect=MagicMock()))
+        with patch.dict(sys.modules,modules):
+            self.assertIs(await fn(S(port=9222),'fixture',task_id='new-task'),fixed)
+        duplicate.close.assert_awaited_once()
+        fixed.close.assert_not_awaited()
+        coordinator.bind.assert_called_once_with('fixture','new-task','fixed')

@@ -45,13 +45,45 @@ class AutomaticRecoverySafety(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['fixture']['page'],'unconfirmed')
         action.assert_not_awaited()
 
-    async def test_task_drafts_are_repaired_but_login_challenges_are_not_bypassed(self):
+    async def test_task_drafts_and_login_challenges_are_left_in_place(self):
         result,action=await self.run_case(page='draft')
-        self.assertEqual(result['fixture']['page'],'ok')
-        self.assertTrue(action.await_args.kwargs['safe_only'])
+        self.assertEqual(result['fixture']['page'],'draft')
+        action.assert_not_awaited()
         result,action=await self.run_case(page='login')
         self.assertEqual(result['fixture']['page'],'login')
         action.assert_not_awaited()
+
+    async def test_duplicate_cleanup_retains_binding_and_requires_empty_project_pages(self):
+        project='https://flow.google.com/project/11111111-1111-4111-8111-111111111111'
+        account=dict(profile='fixture',key='flow-account-'+'a'*64,email='fixture@example.invalid')
+        binding=dict(account_key='a'*64,browser_pid=123,port=9222,page_target='fixed',project_url=project)
+        endpoint='ws://127.0.0.1:9222/devtools/page/copy'
+        fixed=dict(id='fixed',url=project)
+        copy=dict(id='copy',url=project,webSocketDebuggerUrl=endpoint)
+        empty=dict(origin=True,account=True,editor=True,path=project.removeprefix('https://flow.google.com'))
+        for state, expected in ((empty,'ok'), (dict(empty,draft=True),'unique'), (dict(empty,busy=True),'unique')):
+            with self.subTest(expected=expected, state=state):
+                fake_websockets=types.SimpleNamespace(connect=Mock(return_value=AsyncMock()))
+                with patch.dict(sys.modules,websockets=fake_websockets), \
+                     patch('flow_window_policy.Lifecycle') as lifecycle, \
+                     patch('task_coordinator.Coordinator'), \
+                     patch.object(recovery,'guard_live'), \
+                     patch.object(recovery,'TaskWindowRegistry') as registry, \
+                     patch.object(recovery,'inspect_page',AsyncMock(side_effect=['unique','unique','ok'])), \
+                     patch.object(recovery,'_pages',side_effect=[[fixed,copy],[fixed,copy],[fixed]]), \
+                     patch.object(recovery,'evaluate',AsyncMock(return_value=state)), \
+                     patch.object(recovery,'command',AsyncMock()) as command:
+                    registry.return_value.get.return_value=binding
+                    actions=[]
+                    self.assertEqual(await recovery.reconcile_fixed_window(account,binding,actions),expected)
+                if expected=='ok':
+                    self.assertEqual(actions,['close_duplicate'])
+                    self.assertEqual(command.await_args.args[1:],('Page.close',))
+                    lifecycle.return_value.observe.assert_called_once_with('fixture',1,1)
+                else:
+                    self.assertEqual(actions,[])
+                    command.assert_not_awaited()
+                    lifecycle.return_value.observe.assert_not_called()
 
     async def test_multiple_windows_reuse_exact_registered_task_target(self):
         account=dict(profile='fixture',key='flow-account-'+'a'*64)
