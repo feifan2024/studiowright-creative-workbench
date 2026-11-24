@@ -168,6 +168,9 @@ test('Flow card gives one direct next step for a missing binding or stale balanc
 
 test('overview renders one shared quota card with both time windows', () => {
   const now = 1800000000;
+  const flow = {};
+  const shared = {};
+  const breakdown = {};
   const target = {
     querySelector: selector => selector === 'details[open]' ? null : {addEventListener() {}},
     querySelectorAll: () => [],
@@ -175,7 +178,7 @@ test('overview renders one shared quota card with both time windows', () => {
     setAttribute() {}
   };
   const context = vm.createContext({
-    $: () => target,
+    $: id => ({geminiQuotaOverview:target, flowSuccessOverview:flow, geminiSharedQuota:shared, geminiQuotaBreakdown:breakdown})[id],
     document: {},
     state: {},
     Date: {now: () => now * 1000},
@@ -197,11 +200,13 @@ test('overview renders one shared quota card with both time windows', () => {
   });
   for (const name of ['esc', 'savedQuotaValue', 'savedQuotaSummary', 'renderOfficialQuota']) load(name, context);
   vm.runInContext('renderOfficialQuota()', context);
-  assert.equal((target.innerHTML.match(/class="quota-shared-card"/g) || []).length, 1);
-  assert.match(target.innerHTML, /Hydrogen \/ Neon 共用/);
-  assert.match(target.innerHTML, /5 小时额度<\/span><strong>87\.50%[^]*?aria-valuenow="87\.5"[^]*?>2 \/ 3 个账号已读/);
-  assert.match(target.innerHTML, /每周额度<\/span><strong>60%[^]*?aria-valuenow="60"[^]*?>1 \/ 3 个账号已读/);
-  assert.doesNotMatch(target.innerHTML, /175%|120%/);
+  assert.match(flow.innerHTML, /FLOW · 图片 \/ 视频成功率/);
+  assert.equal((shared.innerHTML.match(/class="quota-shared-card"/g) || []).length, 1);
+  assert.match(shared.innerHTML, /Hydrogen \/ Neon 共用/);
+  assert.match(shared.innerHTML, /5 小时额度<\/span><strong>87\.50%[^]*?aria-valuenow="87\.5"[^]*?>2 \/ 3 个账号已读/);
+  assert.match(shared.innerHTML, /每周额度<\/span><strong>60%[^]*?aria-valuenow="60"[^]*?>1 \/ 3 个账号已读/);
+  assert.doesNotMatch(shared.innerHTML, /175%|120%/);
+  assert.match(breakdown.innerHTML, /账号与普通 Gemini 额度明细/);
 });
 
 test('account avatars mark only enabled advanced Gemini model choices', () => {

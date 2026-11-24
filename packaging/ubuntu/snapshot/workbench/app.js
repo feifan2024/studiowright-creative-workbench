@@ -4750,6 +4750,8 @@ $('dispatchConcurrency').addEventListener('change', async () => {
 const geminiConcurrencyInput = $('geminiConcurrency');
 const geminiConcurrencySave = $('geminiConcurrencySave');
 const geminiConcurrencyStatus = $('geminiConcurrencyStatus');
+const geminiConcurrencyMeter = $('geminiConcurrencyMeter');
+const geminiConcurrencyUsageText = $('geminiConcurrencyUsageText');
 let geminiConcurrencyMaximum = null;
 let geminiConcurrencySequence = 0;
 let geminiConcurrencySaving = false;
@@ -4761,17 +4763,36 @@ function updateGeminiConcurrencyButton() {
     Number(geminiConcurrencyInput.value) === geminiConcurrencyMaximum;
 }
 
+function showGeminiConcurrencyUsage(data) {
+  geminiConcurrencyMeter.classList.toggle('is-unknown', !data);
+  const fill = geminiConcurrencyMeter.firstElementChild;
+  if (!data) {
+    geminiConcurrencyMeter.removeAttribute('aria-valuenow');
+    geminiConcurrencyMeter.removeAttribute('aria-valuemax');
+    geminiConcurrencyUsageText.textContent = '并发暂不可读取';
+    fill.style.width = '0%';
+    return;
+  }
+  const occupied = Math.min(data.active, data.maximum);
+  const usage = (data.paused ? '维护中 · ' : '') + `占用 ${data.active} / ${data.maximum} · 排队 ${data.queued}`;
+  geminiConcurrencyMeter.setAttribute('aria-valuenow', String(occupied));
+  geminiConcurrencyMeter.setAttribute('aria-valuemax', String(data.maximum));
+  if (geminiConcurrencyUsageText.textContent !== usage) geminiConcurrencyUsageText.textContent = usage;
+  fill.style.width = `${occupied / data.maximum * 100}%`;
+}
+
 function showGeminiConcurrency(data, saved = false) {
   if (data.available !== true || !Number.isInteger(data.maximum) ||
       !Number.isInteger(data.ceiling) || data.maximum < 1 || data.maximum > data.ceiling ||
-      !Number.isInteger(data.active) || !Number.isInteger(data.queued)) throw new Error('Gemini 并发设置暂不可读取。');
+      !Number.isInteger(data.active) || data.active < 0 ||
+      !Number.isInteger(data.queued) || data.queued < 0) throw new Error('Gemini 并发设置暂不可读取。');
   geminiConcurrencyMaximum = data.maximum;
   geminiConcurrencyInput.max = String(data.ceiling);
   geminiConcurrencyInput.disabled = false;
   if (!geminiConcurrencyDirty && (saved || document.activeElement !== geminiConcurrencyInput))
     geminiConcurrencyInput.value = String(data.maximum);
-  geminiConcurrencyStatus.textContent = (data.paused ? '维护中 · ' : '') +
-    `占用 ${data.active} / ${data.maximum} · 排队 ${data.queued}` + (saved ? ' · 已保存' : '');
+  showGeminiConcurrencyUsage(data);
+  geminiConcurrencyStatus.textContent = saved ? '已保存' : '';
   updateGeminiConcurrencyButton();
 }
 
@@ -4784,7 +4805,8 @@ async function refreshGeminiConcurrency() {
   } catch (_) {
     if (sequence !== geminiConcurrencySequence || geminiConcurrencySaving) return;
     if (geminiConcurrencyMaximum === null) geminiConcurrencyInput.disabled = true;
-    geminiConcurrencyStatus.textContent = 'Gemini 并发暂不可读取';
+    showGeminiConcurrencyUsage(null);
+    if (geminiConcurrencyMaximum === null) geminiConcurrencyStatus.textContent = '设置暂不可读取';
     updateGeminiConcurrencyButton();
   }
 }
@@ -5190,7 +5212,7 @@ function renderOfficialQuota() {
   const completed = tasks.filter(t=>t.status==='succeeded').length;
   const failed = tasks.filter(t=>t.status==='failed').length;
   const success = completed+failed ? Math.round(completed/(completed+failed)*100) : null;
-  const flowMarkup = `<div class="quota-window quota-window-flow"><div class="quota-window-label"><span>FLOW · 图片 / 视频成功率</span><strong>${success == null ? '—' : success+'%'}<small> 任务成功率</small></strong></div><div class="quota-track ${success == null ? 'is-unknown' : ''}" ${success == null ? 'role="img" aria-label="Flow 任务成功率未知"' : `role="progressbar" aria-label="Flow 图片与视频任务成功率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${success}"`}><i data-quota-fill="${success ?? 0}"></i></div><span class="quota-reset">${taskKnown ? `${completed} 成功 · ${failed} 失败 · 含任务下载阶段` : '任务记录暂未读取'}</span></div>`;
+  $('flowSuccessOverview').innerHTML = `<div class="quota-window-label"><span>FLOW · 图片 / 视频成功率</span><strong>${success == null ? '—' : success+'%'}<small> 任务成功率</small></strong></div><div class="quota-track ${success == null ? 'is-unknown' : ''}" ${success == null ? 'role="img" aria-label="Flow 任务成功率未知"' : `role="progressbar" aria-label="Flow 图片与视频任务成功率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${success}"`}><i data-quota-fill="${success ?? 0}"></i></div><span class="quota-reset">${taskKnown ? `${completed} 成功 · ${failed} 失败 · 含任务下载阶段` : '任务记录暂未读取'}</span>`;
   const accounts = state.snapshot?.real_accounts?.items || [];
   const names = new Map(accounts.map(a=>[a.key.replace(/^flow-account-/,''),a.email || a.label || a.profile]));
   const rows = Object.entries(data?.accounts || {});
@@ -5246,7 +5268,8 @@ function renderOfficialQuota() {
     </div>` : '';
   const coverage = refreshing ? `正在读取 ${known} / ${total} 个账号` : known ? `已保存 ${known} / ${total} 个账号${known<total ? ' · 汇总仅含已读账号' : ''}` : '额度暂未获取';
   target.setAttribute('aria-busy',String(refreshing));
-  target.innerHTML = `<div class="quota-main">${flowMarkup}${sharedTopMarkup}</div><div class="quota-footer"><div class="quota-source"><span>Gemini Models：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>上方显示 Hydrogen 与 Neon 共用的 Gemini 总账池额度，账号明细和普通 Gemini 额度请展开查看。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaRequest ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">账号与普通 Gemini 额度明细<span>查看账号剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || `<tr><td colspan="4">${refreshing ? '正在读取额度…' : '额度暂未获取'}</td></tr>`}</tbody></table></div></details>`;
+  $('geminiSharedQuota').innerHTML = sharedTopMarkup;
+  $('geminiQuotaBreakdown').innerHTML = `<div class="quota-footer"><div class="quota-source"><span>Gemini Models：${esc(coverage)}${checked.length ? ` · 更新于 ${esc(dateTime(Math.max(...checked)))}` : ''}</span><span>上方显示 Hydrogen 与 Neon 共用的 Gemini 总账池额度，账号明细和普通 Gemini 额度请展开查看。</span></div><button type="button" class="quota-refresh" data-quota-action="refresh" ${refreshing || officialQuotaRequest ? 'disabled' : ''}>${refreshing ? '额度读取中…' : '刷新 Gemini 额度'}</button></div><details class="quota-details" ${opened ? 'open' : ''}><summary data-quota-action="details">账号与普通 Gemini 额度明细<span>查看账号剩余与恢复时间</span></summary>${advancedQuotaMarkup}<div class="quota-table-wrap"><table><thead><tr><th>账号</th><th>5 小时剩余</th><th>每周剩余</th><th>状态 / 最近恢复</th></tr></thead><tbody>${rowMarkup || `<tr><td colspan="4">${refreshing ? '正在读取额度…' : '额度暂未获取'}</td></tr>`}</tbody></table></div></details>`;
   target.querySelectorAll('[data-quota-fill]').forEach(meter=>{meter.style.width=Number(meter.dataset.quotaFill)+'%';});
   target.querySelector('[data-quota-action="refresh"]').addEventListener('click',()=>refreshOfficialQuota(true));
   if (focused) target.querySelector(`[data-quota-action="${focused}"]`)?.focus({preventScroll:true});
