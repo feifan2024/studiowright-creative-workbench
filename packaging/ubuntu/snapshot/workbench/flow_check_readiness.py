@@ -17,7 +17,7 @@ def composer_expression(email):
       const w=window.WIZ_global_data||{};
       const valid=v=>typeof v==='string' && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(v.trim());
       const emails=[...new Set((valid(w.oPEP7c)?[w.oPEP7c]:Object.values(w).filter(valid)).map(v=>v.trim().toLowerCase()))];
-      const boxes=[...document.querySelectorAll("flow-prompt-box [contenteditable='true']")];
+      const boxes=[...document.querySelectorAll("flow-prompt-box [contenteditable='true'], flow-base-prompt-box [contenteditable='true']")];
       const visible=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility==='visible';
       const account=emails.length===1 && emails[0]===EXPECTED && !!(w.SNlM0e&&w.FdrFJe);
       const login=!account && [...document.querySelectorAll('a,button')].some(e=>visible(e) &&
@@ -36,7 +36,7 @@ def composer_expression(email):
           !!document.querySelector('flow-prompt-box button.chip-container img,flow-prompt-box .mention-chip,flow-base-prompt-box button.chip-container img,flow-base-prompt-box .mention-chip') ||
           [...document.querySelectorAll('input[type=file]')].some(e=>e.files?.length),
         editor:boxes.filter(e=>visible(e) && e.getAttribute('aria-disabled')!=='true').length===1 &&
-          [...document.querySelectorAll('flow-prompt-box button mat-icon')].some(i=>i.textContent.trim()==='arrow_forward'&&visible(i))};
+          [...document.querySelectorAll('flow-prompt-box button mat-icon,flow-base-prompt-box button mat-icon,button.generate-icon-button mat-icon')].some(i=>i.textContent.trim()==='arrow_forward'&&visible(i))};
     })()""".replace('EXPECTED', json.dumps(email.lower()))
 
 
