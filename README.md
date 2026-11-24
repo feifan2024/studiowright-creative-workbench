@@ -8,6 +8,8 @@
 
 Windows 和 Ubuntu 安装包在本仓库的「Releases」下载。见 [安装说明](docs/安装说明.md) 与 [API 接入说明](docs/API.md)。Ubuntu 可复用已运行的服务，Windows 安装时可选择创建桌面快捷方式。
 
+[Windows 与 Ubuntu 部署手册](docs/DEPLOYMENT.md)包含源码目录、环境准备、账号接入、打包、验收和升级回退方法。
+
 Windows、Ubuntu、统一 API、账号治理、Gemini、Flow 与素材库的关系见 [全项目工作拓扑](docs/WORKFLOW.md)，含调度、恢复及内容交接分图。
 
 ## 项目内容

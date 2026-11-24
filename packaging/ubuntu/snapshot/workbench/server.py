@@ -2314,7 +2314,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(400, {"error": str(exc)})
                 except Exception:
                     return self.json_response(500, {"error": "暂时无法找回，请核对原任务。"})
-            if self.path in {"/api/real-pool/check", "/api/real-pool/recover-account", "/api/real-pool/chat", "/api/real-pool/image-analysis", "/api/real-pool/image-analysis-validate", "/api/real-pool/flow", "/api/real-pool/flow-validate", "/api/real-pool/enabled", "/api/real-pool/keepalive-enabled", "/api/real-pool/dispatch-policy", "/api/real-pool/flow-risk-resume", "/api/real-pool/flow-retry-project"}:
+            if self.path in {"/api/real-pool/chat", "/api/real-pool/image-analysis", "/api/real-pool/image-analysis-validate", "/api/real-pool/flow", "/api/real-pool/flow-validate", "/api/real-pool/enabled", "/api/real-pool/keepalive-enabled", "/api/real-pool/dispatch-policy", "/api/real-pool/flow-risk-resume", "/api/real-pool/flow-retry-project"}:
                 if not real_pool:
                     return self.json_response(503, {"error": "真实账号接入暂不可用。"})
                 if getattr(real_pool, 'maintenance', lambda: False)():
@@ -2403,14 +2403,6 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         kwargs = {'validate_only': True} if self.path.endswith('/flow-validate') else {}
                         record, created = real_pool.submit_flow(data, self.headers.get('Idempotency-Key', ''), snapshot, **kwargs)
                         return self.json_response(201 if created else 200, record)
-                    if self.path.endswith('/check'):
-                        if set(data) != {"account"}:
-                            raise ValueError("请求内容格式不正确。")
-                        return self.json_response(200, real_pool.check(data['account'], account_data['items']))
-                    if self.path.endswith('/recover-account'):
-                        if set(data) != {'account'}:
-                            raise ValueError('请求内容格式不正确。')
-                        return self.json_response(200, real_pool.recover_account(data['account'], account_data['items']))
                     if self.path.endswith('/keepalive-enabled'):
                         if set(data) != {'account', 'enabled'}:
                             raise ValueError('请求内容格式不正确。')
@@ -2550,9 +2542,7 @@ def main():
             while not stop_monitor.is_set():
                 try:
                     real_pool.purge_stale_uploads()
-                    account_data = sources.snapshot().get('real_accounts', {})
-                    if account_data.get('available'):
-                        real_pool.monitor_once(account_data.get('items', []))
+                    if sources.snapshot().get('real_accounts', {}).get('available'):
                         real_pool.monitor_heartbeat.update(last_completed=time.time(), last_error=None)
                     else:
                         real_pool.monitor_heartbeat['last_error'] = 'accounts_unavailable'

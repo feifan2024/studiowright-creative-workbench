@@ -12,7 +12,7 @@ import signal
 import sqlite3
 import subprocess
 import threading
-from dispatch_limit import DispatchLimit, limited
+from dispatch_limit import DispatchLimit
 import time
 import uuid
 from urllib.parse import urlparse
@@ -597,63 +597,6 @@ class RealPool:
     def _execute(self, operation, account, prompt=None, files=None, conversation=None):
         return {'result':'legacy_transport_removed','submitted':False,'message':'已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'}
 
-    def _reserve_account_check(self, account, items, owner_request_id=None):
-        self.allowed(account, items)
-        with self.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT status FROM account_monitor WHERE account_key=?', (account,)).fetchone()
-            if owner_request_id is not None:
-                owner = db.execute("""SELECT 1 FROM requests r JOIN pooldesk_attempts p USING(request_id)
-                                      WHERE r.request_id=? AND r.account_key=? AND r.status='dispatching'
-                                        AND r.selection='auto' AND p.account_key=r.account_key AND p.stage='preflight'""",
-                                   (owner_request_id, account)).fetchone()
-                if not owner:
-                    db.execute('ROLLBACK')
-                    return False
-            active = db.execute("SELECT 1 FROM requests WHERE account_key=? AND status='dispatching' AND request_id!=?",
-                                (account, owner_request_id or '')).fetchone()
-            if self.maintenance() or active or (row and row['status'] == 'dispatching'):
-                db.execute('ROLLBACK')
-                return False
-            db.execute("INSERT INTO account_monitor(account_key,status,last_attempt) VALUES(?,'dispatching',?) ON CONFLICT(account_key) DO UPDATE SET status='dispatching',last_attempt=excluded.last_attempt", (account, time.time()))
-            db.execute('COMMIT')
-            return True
-
-    @limited
-    def check(self, account, items, operation='check', owner_request_id=None):
-        return {'verified':False,'reason':'legacy_transport_removed','submitted':False,'message':'已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'}
-
-    @limited
-    def recover_account(self, account, items):
-        return {'verified':False,'recovered':False,'reason':'legacy_transport_removed','submitted':False,'message':'已移除 Gemini 网页和 SDK 调用；当前仅保留官方 CLI 独立调用，工作台发送入口尚未接入。'}
-
-    @limited
-    def monitor_once(self, items, now=None):
-        return None  # Browser cookie renewal was removed; never contact Google here.
-
-    def _finish_keepalive(self, account, result, now):
-        reason, keepalive = result.get('reason'), result.get('keepalive')
-        if result.get('verified') and keepalive in ('renewed', 'accepted'):
-            status, due = 'ready', now + 3600
-            note = ('会话已续期' if keepalive == 'renewed' else '保活请求已受理') + ('，额度已更新' if result.get('quota_available') else '，额度暂未知')
-        elif result.get('verified'):
-            details = {'timeout': '保活连接超时', 'tls_error': '保活安全连接失败', 'connection_error': '保活连接失败',
-                       'unexpected_redirect': '保活页面跳转未确认', 'unexpected_response': '保活服务响应未确认',
-                       'cookie_unconfirmed': '续期后会话未确认'}
-            status, due = 'paused', None
-            note = '登录已核对；' + details.get(result.get('keepalive_reason'), '保活暂未确认') + '，请手动核对'
-        elif reason == 'account_busy':
-            status, due, note = 'ready', now + 300, '账号正在使用，稍后再检查'
-        elif reason == 'browser_unavailable':
-            status, due, note = 'paused', None, '账号浏览器未确认运行，登录状态未改变；请先检查账号'
-        elif reason in ('tls_error', 'connection_error'):
-            status, due = 'paused', None
-            note = ('安全连接失败，账号状态未改变' if reason == 'tls_error' else '连接失败，账号状态未改变') + '；请手动核对'
-        else:
-            status, due, note = 'paused', None, '登录或保活未确认，请手动核对'
-        with self.connection() as db:
-            db.execute("UPDATE account_monitor SET status=?,next_due=?,last_note=? WHERE account_key=? AND status='dispatching'", (status, due, note, account))
-
     def get(self, request_id):
         with self.connection() as db:
             db.execute('BEGIN')
@@ -973,9 +916,6 @@ class RealPool:
                 db.execute('INSERT OR IGNORE INTO auto_material_jobs(asset_id,status,added,updated,note) VALUES(?,?,?,?,?)',
                            (ident, state, added, time.time(), note))
             db.execute('COMMIT')
-
-    def claim_auto_material(self, items):
-        return None  # No retired provider may claim a new analysis job.
 
     def finish_auto_material(self, request):
         self.conversation_id(request)

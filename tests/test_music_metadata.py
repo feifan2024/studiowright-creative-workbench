@@ -142,10 +142,17 @@ class MusicMetadata(unittest.TestCase):
         from unified_keys import UnifiedKeys
         with fixture_directory() as d:
             pool=Mock();pool.state_dir=d;pool.path=d/'unused.db';pool.maintenance.return_value=False
+            account_key = 'b' * 64
+            pool.official.priority_order.return_value = [account_key]
             generated=Mock(return_value={'clips':[{'title':'test'}]})
             ingested=Mock(return_value={'ingested':[{'ok':True,'asset_id':'a'*64,'path':'/api/library/'+('a'*64)+'/file'}]})
             with patch('server.music_generate',generated),patch('server.music_library_ingest',ingested),patch('music_recovery.recover',return_value=None):
                 sources=Mock()
+                sources.snapshot.return_value = {
+                    'real_accounts': {'available': True, 'items': [
+                        {'key': 'flow-account-' + account_key, 'email': 'music@example.com'},
+                    ]},
+                }
                 work=ThreadingHTTPServer(('127.0.0.1',0),make_handler(sources,real_pool=pool))
                 store=UnifiedKeys(d/'keys.db');key=store.create('fixture')['key']
                 api=ThreadingHTTPServer(('127.0.0.1',0),handler_for(store,work.server_port))
@@ -168,7 +175,7 @@ class MusicMetadata(unittest.TestCase):
                     self.assertEqual(job['status'],'completed')
                     self.assertEqual(job['style_id'],' S-1 ')
                     self.assertEqual(job['result']['clips'][0]['tags'],[' Exact '])
-                    generated.assert_called_once()
+                    generated.assert_called_once_with('轻快钢琴', 'lyria-fast', account_order=['music@example.com'])
                     import io
                     from email.message import Message
                     def media(*args,**kwargs):
