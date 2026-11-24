@@ -1554,7 +1554,7 @@ let governanceService = 'gemini', governanceCases = null, governanceRead = null,
 let governanceError = '';
 const governanceAudits = {flow:null,gemini:null};
 const governanceAuditLabels = {ready:'可立即派发',queue:'需排队',blocked:'暂不可用',unknown:'待确认'};
-const flowRecoveryLabels = {rebind:'重新绑定原窗口',open_project:'进入原账号项目',return_to_project:'尝试返回原任务页',reload:'刷新原页面',restart:'重启该账号浏览器',dismiss_update:'关闭 Flow 更新提示',release_review:'已核对原任务，解除限制'};
+const flowRecoveryLabels = {rebind:'重新绑定原窗口',open_project:'进入原账号项目',return_to_project:'尝试返回原任务页',reload:'刷新原页面',restart:'重启该账号浏览器',dismiss_update:'关闭 Flow 更新提示',dismiss_account_panel:'关闭 Flow 账号面板',release_review:'已核对原任务，解除限制'};
 
 function flowOccupiedSlots(dispatch) {
   return dispatch?.occupied_slots ?? dispatch?.active;

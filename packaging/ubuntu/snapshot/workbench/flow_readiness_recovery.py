@@ -31,6 +31,19 @@ DISMISS_UPDATE = r"""(() => {
   buttons[0].click();
   return true;
 })()"""
+DISMISS_ACCOUNT_PANEL = r"""((state, path) => {
+  if (!state.origin || !state.account || !state.overlay || state.busy || state.draft ||
+      location.origin !== 'https://flow.google.com' || location.pathname.replace(/\/$/, '') !== path) return false;
+  const visible = e => !!e.getClientRects().length && getComputedStyle(e).visibility === 'visible';
+  const dialogs = [...document.querySelectorAll('[role=dialog],[aria-modal=true]')].filter(visible);
+  if (dialogs.length !== 1) return false;
+  const controls = [...dialogs[0].querySelectorAll('button[aria-label]')].filter(button =>
+    visible(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
+    /^(?:关闭账号面板|Close account panel)$/i.test(button.getAttribute('aria-label').trim()));
+  if (controls.length !== 1) return false;
+  controls[0].click();
+  return true;
+})"""
 
 
 def generation_evidence(tasks, windows, now):
@@ -240,6 +253,16 @@ async def command(ws, method, params=None):
 async def evaluate(ws, expression):
     raw = await command(ws,'Runtime.evaluate',{'expression':expression,'returnByValue':True})
     return raw.get('result',{}).get('value',{})
+
+
+async def close_account_panel(ws, account, expected, project, before, actions):
+    await asyncio.to_thread(guard_live, account)
+    project_path = json.dumps(urlsplit(project).path)
+    if await evaluate(ws, f'{DISMISS_ACCOUNT_PANEL}({expected}, {project_path})') is not True:
+        return before
+    actions.append('dismiss_account_panel')
+    await asyncio.sleep(.3)
+    return await evaluate(ws, expected)
 
 
 async def reload_overlay(ws, account, expected, project, actions):
@@ -499,6 +522,10 @@ async def repair(account, initial, actions, safe_only=False):
                         return 'unconfirmed',None
             elif before.get('draft'):
                 return 'draft',None
+            if (initial != 'draft' and before.get('overlay') and not before.get('busy')
+                    and same and old and old.get('binding_state') == 'verified'
+                    and old.get('project_url') == project and all(old.get(k) == v for k,v in current.items())):
+                before = await close_account_panel(ws, account, expected, project, before, actions)
             if initial != 'draft' and same and before.get('overlay') and not before.get('busy') and 'reload' not in actions:
                 before = await reload_overlay(ws, account, expected, project, actions)
                 navigated_once = navigated_once or 'reload' in actions

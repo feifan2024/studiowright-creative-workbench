@@ -15,6 +15,46 @@ STATE = dict(origin=True, account=True, path=PROJECT.removeprefix('https://flow.
 
 
 class FlowOverlayReload(unittest.IsolatedAsyncioTestCase):
+    async def test_closes_account_panel_on_verified_task_page_before_refresh(self):
+        account = {'profile': 'profile-a', 'key': 'flow-account-key', 'email': 'test@example.com'}
+        project_id = PROJECT.rsplit('/', 1)[1]
+        current = dict(account_key='key', profile='profile-a', browser_pid=100, process_start='stamp',
+                       port=9222, page_target='fixed', window_id=12, workspace=0)
+        binding = dict(current, chrome_window=34, project_url=PROJECT, binding_state='verified')
+        editor = dict(STATE, overlay=False, editor=True)
+        registry, lifecycle, coordinator = MagicMock(), MagicMock(), MagicMock()
+        registry.get.return_value = binding
+        session = MagicMock()
+        fake_websockets = SimpleNamespace(connect=MagicMock(return_value=session))
+        endpoint = 'ws://127.0.0.1:9222/devtools/page/fixed'
+        with patch.dict(sys.modules, websockets=fake_websockets), \
+                patch.object(recovery, 'guard_live', return_value=({project_id}, {project_id})), \
+                patch.object(recovery, 'candidate', AsyncMock(return_value=(current, {'url': PROJECT}, endpoint))), \
+                patch.object(recovery, 'TaskWindowRegistry', return_value=registry), \
+                patch('flow_window_policy.Lifecycle', return_value=lifecycle), \
+                patch('task_coordinator.Coordinator', return_value=coordinator), \
+                patch.object(recovery, 'command', AsyncMock(return_value={'windowId': 34})) as command, \
+                patch.object(recovery, 'evaluate', AsyncMock(side_effect=[STATE, True, editor])) as evaluate, \
+                patch.object(recovery, 'inspect_page', AsyncMock(return_value='ok')) as inspect, \
+                patch.object(recovery.asyncio, 'sleep', AsyncMock()):
+            actions = []
+            verdict, confirmed = await recovery.repair(account, 'overlay', actions, safe_only=True)
+        self.assertEqual((verdict, confirmed), ('ok', binding))
+        self.assertEqual(actions, ['dismiss_account_panel'])
+        self.assertIn(recovery.DISMISS_ACCOUNT_PANEL, evaluate.await_args_list[1].args[1])
+        self.assertEqual([call.args[1] for call in command.await_args_list], ['Browser.getWindowForTarget'])
+        inspect.assert_awaited_once()
+        registry.bind.assert_called_once()
+
+    async def test_unrecognized_modal_is_left_for_existing_refresh(self):
+        actions = []
+        with patch.object(recovery, 'guard_live'), \
+                patch.object(recovery, 'evaluate', AsyncMock(return_value=False)) as evaluate:
+            state = await recovery.close_account_panel(None, {}, 'readPage()', PROJECT, STATE, actions)
+        self.assertIs(state, STATE)
+        self.assertEqual(actions, [])
+        evaluate.assert_awaited_once()
+
     async def test_bound_google_challenge_is_reported_without_reading_login_page(self):
         account = dict(profile='profile-a', key='flow-account-key', projects=[PROJECT.rsplit('/', 1)[1]])
         binding = dict(binding_state='verified', account_key='key', browser_pid=100, port=9222,
