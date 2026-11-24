@@ -25,7 +25,8 @@ class ComputeCenterBranding(unittest.TestCase):
         main = PRODUCT_FILES[0].read_text(encoding='utf-8')
         api = PRODUCT_FILES[2].read_text(encoding='utf-8')
         self.assertIn('<title>算力中心</title>', main)
-        self.assertIn('COMPUTE CENTER OVERVIEW', main)
+        self.assertIn('<h1 id="overviewHeading">操作台</h1>', main)
+        self.assertIn('<strong id="breadcrumb">操作台</strong>', main)
         self.assertIn('算力中心 API 调用说明', PRODUCT_FILES[1].read_text(encoding='utf-8'))
         self.assertIn('算力中心', api)
 

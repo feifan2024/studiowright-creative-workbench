@@ -506,7 +506,7 @@ function setView(view) {
   if (view === 'tasks' && state.view !== 'tasks') $('taskWindowsPanel').open = false;
   state.view = view;
   for (const name of ["overview", "accounts", "projects", "tasks", "records", "music", "conversations", "library", "api"]) $(name + "View").hidden = name !== view;
-  const display = { overview: "总览", accounts: "账号", projects: "项目", tasks: "任务", records: "任务记录", music: "音乐生成", conversations: "对话", library: "素材库", api: "API 文档" };
+  const display = { overview: "操作台", accounts: "账号", projects: "项目", tasks: "任务", records: "任务记录", music: "音乐生成", conversations: "对话", library: "素材库", api: "API 文档" };
   const inWork = workViews.has(view);
   if (inWork) lastWorkView = view;
   $("workBar").hidden = !inWork;
@@ -786,20 +786,16 @@ function renderOverview() {
   $("sourceNotice").textContent = dataNotice + (snapshot?.flow_state?.skipped_projects || snapshot?.flow_state?.skipped_tasks ? " 有格式异常的记录未显示，请在原后台查看。" : "");
   const readable = snapshot?.flow_state?.available === true;
   const projects = readable ? snapshot.projects : [];
-  const tasks = readable ? snapshot.tasks.filter(item => !schedulerTaskKinds.has(item.kind)) : [];
-  const library = snapshot?.library;
   $("projectCount").textContent = readable ? projects.length.toLocaleString("zh-CN") : "—";
-  $("taskCount").textContent = readable ? tasks.length.toLocaleString("zh-CN") : "—";
-  $("materialCount").textContent = library?.available && Number.isInteger(library.counts?.total) ? library.counts.total.toLocaleString("zh-CN") : "—";
-  $("materialBreakdown").textContent = library?.available && library.counts ? `图片 ${library.counts.images ?? "未知"} · 视频 ${library.counts.videos ?? "未知"}` : (library?.message || "暂时无法读取素材库");
 }
 
-function overviewDistribution(target, title, caption, parts) {
+function overviewDistribution(target, title, caption, parts, displayedTotal = null) {
   const known = parts.every(part => Number.isInteger(part.value) && part.value >= 0);
   const total = known ? parts.reduce((sum, part) => sum + part.value, 0) : 0;
   const list = known ? parts.map(part => `<div><span><i class="chart-dot ${part.color}" aria-hidden="true"></i>${esc(part.label)}</span><strong>${part.value.toLocaleString('zh-CN')}</strong></div>`).join('') : '<p class="chart-unavailable">暂时无法读取数据</p>';
   const bar = total ? parts.map(part => `<i class="${part.color}" data-chart-width="${(part.value / total * 100).toFixed(2)}%"></i>`).join('') : '';
-  target.innerHTML = `<div class="overview-chart-header"><div><span class="section-kicker">${esc(title === '任务分布' ? 'TASKS' : 'LIBRARY')}</span><h2>${esc(title)}</h2></div><strong>${known ? total.toLocaleString('zh-CN') : '—'}</strong></div><p>${esc(caption)}</p><div class="overview-chart-track ${total ? '' : 'is-empty'}" aria-hidden="true">${bar}</div><div class="overview-chart-legend">${list}</div>`;
+  const count = displayedTotal ?? (known ? total : null);
+  target.innerHTML = `<div class="overview-chart-header"><h3>${esc(title)}</h3><strong>${count?.toLocaleString('zh-CN') ?? '—'}</strong></div><p>${esc(caption)}</p><div class="overview-chart-track" aria-hidden="true">${bar}</div><div class="overview-chart-legend">${list}</div>`;
   for (const segment of target.querySelectorAll('[data-chart-width]')) {
     segment.style.width = segment.dataset.chartWidth;
   }
@@ -808,18 +804,18 @@ function overviewDistribution(target, title, caption, parts) {
 function renderOverviewCharts(snapshot) {
   const available = snapshot?.flow_state?.available === true && Array.isArray(snapshot?.tasks);
   const tasks = available ? snapshot.tasks.filter(item => !schedulerTaskKinds.has(item.kind)) : [];
-  overviewDistribution($('overviewTaskChart'), '任务分布', '创作任务最近记录；后台检查见调度中心。', [
+  overviewDistribution($('overviewTaskChart'), '任务分布', '最多显示最近 150 条创作任务', [
     {label:'已完成', color:'chart-green', value: available ? tasks.filter(x => x.status === 'succeeded').length : null},
     {label:'失败', color:'chart-rust', value: available ? tasks.filter(x => x.status === 'failed').length : null},
     {label:'其他状态', color:'chart-slate', value: available ? tasks.filter(x => !['succeeded','failed'].includes(x.status)).length : null},
   ]);
   const counts = snapshot?.library?.available ? snapshot.library.counts : null;
   const complete = counts && Number.isInteger(counts.total) && Number.isInteger(counts.images) && Number.isInteger(counts.videos) && counts.total >= counts.images + counts.videos;
-  overviewDistribution($('overviewMaterialChart'), '素材分布', '现有素材库中的已登记素材。', [
+  overviewDistribution($('overviewMaterialChart'), '素材分布', counts ? '素材库中已登记的文件' : (snapshot?.library?.message || '暂时无法读取素材库'), [
     {label:'图片', color:'chart-green', value: complete ? counts.images : null},
     {label:'视频', color:'chart-blue', value: complete ? counts.videos : null},
     {label:'其他', color:'chart-slate', value: complete ? counts.total - counts.images - counts.videos : null},
-  ]);
+  ], Number.isInteger(counts?.total) ? counts.total : null);
 }
 
 async function loadProjectMaterialCounts() {
@@ -1394,6 +1390,7 @@ function renderAccountInsights(snapshot, target) {
   const expandedResults = [...scope.querySelectorAll('[data-activation-feedback] details[open]')].map(d=>d.closest('[data-activation-feedback]').dataset.activationFeedback);
   const focused = scope.contains(document.activeElement) ? document.activeElement : null;
   const focusSelector = focused?.hasAttribute('data-governance') ? `[data-governance="${focused.dataset.governance}"]`
+    : focused?.hasAttribute('data-music-readiness') ? '[data-music-readiness]'
     : focused?.hasAttribute('data-insight-accounts') ? '[data-insight-accounts]'
     : focused?.hasAttribute('data-insight-conversations') ? '[data-insight-conversations]'
     : focused?.matches('[data-dashboard-running] > summary') ? '[data-dashboard-running] > summary'
@@ -1417,25 +1414,41 @@ function renderAccountInsights(snapshot, target) {
     : `${yesterday.completed ?? '—'} 个完成 · ${yesterday.unpriced ?? '—'} 个未记价格${yesterday.unresolved ? ` · ${yesterday.unresolved} 个待确认` : ''}${yesterday.coverage==='partial' ? ' · 数据不完整' : ''}`;
   const dispatch = state.channelStatus?.dispatch;
   const {ready:eligible,total:geminiTotal,blocked:geminiBlocked,verify:geminiVerifyCount,pending:geminiPending}=geminiReadiness(snapshot);
-  const ring = (service,ready,override)=>{
-    const total=service==='GEMINI' ? geminiTotal : accounts.length;
-    const known=ready!=null && (total>0 || service==='GEMINI');
-    const rest=known ? total-ready : null;
-    const label=override ?? (rest==null ? '状态待核对' : rest>0 ? `${amount(rest)} 个未就绪` : '');
+  const readinessCard = ({name, service, ready, total, known, label = ''}) => {
     const key = service.toLowerCase();
-    const name = key === 'flow' ? 'Flow' : 'Gemini';
-    const description = known ? `就绪 ${amount(ready)} / ${total}` : '状态待核对';
-    return `<button type="button" class="dashboard-ring-item governance-entry" data-governance="${key}" aria-label="${name} 一键就绪，${description}" title="${name} 一键就绪"><span>${service}</span><span class="insight-ring ${service==='GEMINI' ? 'insight-ring--gemini' : ''} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}"><span class="governance-ring-center"><strong>${known ? amount(ready) : '—'}<small> / ${known || total ? total : '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="${service.toLowerCase()}" ${label ? '' : 'hidden'}>${label}</span></button>`;
+    const action = service === 'MUSIC' ? 'data-music-readiness' : `data-governance="${key}"`;
+    const count = known ? amount(ready) : '—';
+    const capacity = known || total ? total : '—';
+    const description = known ? `就绪 ${count} / ${capacity}` : '状态待核对';
+    const ringClass = service === 'FLOW' ? '' : `insight-ring--${key}`;
+    return `<button type="button" class="dashboard-ring-item governance-entry" ${action} aria-label="${name} 一键就绪，${description}${label && label !== description ? `，${esc(label)}` : ''}">
+      <span class="desk-service-name">${name}</span>
+      <span class="desk-service-total"><strong>${count}<small> / ${capacity}</small></strong><span>就绪账号</span></span>
+      <span class="insight-ring ${ringClass} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}" aria-hidden="true"><span class="governance-ring-center"></span></span>
+      <span class="desk-service-action">一键就绪 <span aria-hidden="true">→</span></span>
+      <span class="governance-alert" ${label ? '' : 'hidden'}>${esc(label)}</span>
+    </button>`;
   };
-  // 音乐账号池圆环：就绪（令牌未过期）账号数 / 池内账号数，只修复未就绪账号。
   const musicAccounts = musicServiceStatus?.accounts || [];
   const musicTotal = musicAccounts.length;
   const musicReady = musicAccounts.filter(a => a.ready).length;
   const musicKnown = musicServiceStatus?.available === true && musicTotal > 0;
   const musicLabel = !musicServiceStatus?.available ? (musicServiceStatus?.reason || '音乐服务暂不可用')
     : musicTotal === 0 ? '账号池为空' : musicReady < musicTotal ? `${musicTotal - musicReady} 个未就绪` : '';
-  const musicRingMarkup = `<button type="button" class="dashboard-ring-item governance-entry" data-music-readiness aria-label="音乐一键就绪，${musicKnown ? `就绪 ${amount(musicReady)} / ${musicTotal}` : '状态待读取'}"><span>MUSIC</span><span class="insight-ring insight-ring--music ${musicKnown ? '' : 'is-unknown'}" data-dashboard-ring="MUSIC"><span class="governance-ring-center"><strong>${musicKnown ? amount(musicReady) : '—'}<small> / ${musicTotal || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="music" ${musicLabel ? '' : 'hidden'}>${esc(musicLabel)}</span></button>`;
-  target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验` : (geminiPending || geminiBlocked ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ') : null))}${musicRingMarkup}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${geminiTotal} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
+  const flowKnown = flowReady != null && accounts.length > 0;
+  const flowLabel = flowStale ? '同步暂缓 · 上次结果'
+    : !flowKnown ? '状态待核对' : flowReady < accounts.length ? `${amount(accounts.length - flowReady)} 个未就绪` : '';
+  const geminiLabel = geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验`
+    : (geminiPending || geminiBlocked) ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ')
+    : eligible == null ? '状态待核对' : eligible < geminiTotal ? `${amount(geminiTotal - eligible)} 个未就绪` : '';
+  const cards = [
+    {name:'Flow', service:'FLOW', ready:flowReady, total:accounts.length, known:flowKnown, label:flowLabel},
+    {name:'Gemini', service:'GEMINI', ready:eligible, total:geminiTotal, known:eligible!=null, label:geminiLabel},
+    {name:'Music', service:'MUSIC', ready:musicReady, total:musicTotal, known:musicKnown, label:musicLabel},
+  ];
+  target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${cards.map(readinessCard).join('')}</div>
+    <div class="desk-service-metrics"><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>全账号总余额 ${amount(flow?.pool_balance)}</small></div>
+    <div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>每账号取最近一次成功记录</small></div></div></div>
   <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话按号池优先顺序分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
   scope.querySelector('.dashboard-metrics').insertAdjacentHTML('afterend',
     '<p data-governance-status role="status" class="sr-only"></p>');
@@ -4904,16 +4917,6 @@ try {
   page('libraryHeading');
 
   page('apiHeading');
-
-  document.querySelectorAll('#overviewView .summary-card').forEach(card => {
-
-    const caption = card.querySelector(':scope > p:not([id])');
-
-    const label = card.querySelector('.metric-label');
-
-    attach(label, [caption], label?.textContent.trim() || '统计');
-
-  });
 
   attach(one('#realAccountsHeading'), [one('#accountsView section[aria-labelledby="realAccountsHeading"] > p.panel-caption:not([id])')], '通道状态');
 
