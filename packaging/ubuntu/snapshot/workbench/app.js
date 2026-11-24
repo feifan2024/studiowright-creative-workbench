@@ -1422,19 +1422,22 @@ function renderAccountInsights(snapshot, target) {
     : `${yesterday.completed ?? '—'} 个完成 · ${yesterday.unpriced ?? '—'} 个未记价格${yesterday.unresolved ? ` · ${yesterday.unresolved} 个待确认` : ''}${yesterday.coverage==='partial' ? ' · 数据不完整' : ''}`;
   const dispatch = state.channelStatus?.dispatch;
   const {ready:eligible,total:geminiTotal,blocked:geminiBlocked,verify:geminiVerifyCount,pending:geminiPending}=geminiReadiness(snapshot);
-  const readinessCard = ({name, service, ready, total, known, label = ''}) => {
+  const readinessCard = ({name, service, ready, total, known, label = '', metric}) => {
     const key = service.toLowerCase();
     const action = service === 'MUSIC' ? 'data-music-readiness' : `data-governance="${key}"`;
     const count = known ? amount(ready) : '—';
     const capacity = known || total ? total : '—';
     const description = known ? `就绪 ${count} / ${capacity}` : '状态待核对';
     const ringClass = service === 'FLOW' ? '' : `insight-ring--${key}`;
-    return `<button type="button" class="dashboard-ring-item governance-entry" ${action} aria-label="${name} 一键就绪，${description}${label && label !== description ? `，${esc(label)}` : ''}">
-      <span class="desk-service-name">${name}</span>
-      <span class="desk-service-total"><strong>${count}<small> / ${capacity}</small></strong><span>就绪账号</span></span>
-      <span class="insight-ring ${ringClass} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}" aria-hidden="true"><span class="governance-ring-center"></span></span>
-      <span class="desk-service-action">一键就绪 <span aria-hidden="true">→</span></span>
-      <span class="governance-alert" ${label ? '' : 'hidden'}>${esc(label)}</span>
+    const readiness = `<strong>${count}<small> / ${capacity}</small></strong>`;
+    const center = metric ? `<strong>${esc(metric.value)}${metric.unit ? `<small> ${esc(metric.unit)}</small>` : ''}</strong><span>${esc(metric.label)}</span>`
+      : readiness + '<span>就绪账号</span>';
+    const accessibleName = [name + ' 一键就绪', description, label && label !== description ? label : '',
+      metric && `${metric.label} ${metric.value}${metric.unit || ''}`, metric?.note].filter(Boolean).join('，');
+    return `<button type="button" class="dashboard-ring-item governance-entry" ${action} aria-label="${esc(accessibleName)}">
+      <span class="desk-service-body"><span class="desk-service-name">${name}</span>${metric ? `<span class="desk-service-total">${readiness}<span>就绪账号</span></span><span class="desk-service-note">${esc(metric.note)}</span>` : ''}</span>
+      <span class="insight-ring ${ringClass} ${known ? '' : 'is-unknown'}" data-dashboard-ring="${service}" aria-hidden="true"><span class="governance-ring-center">${center}</span></span>
+      <span class="desk-service-footer"><span class="desk-service-action">一键就绪 <span aria-hidden="true">→</span></span><span class="governance-alert" ${label ? '' : 'hidden'}>${esc(label)}</span></span>
     </button>`;
   };
   const musicAccounts = musicServiceStatus?.accounts || [];
@@ -1452,15 +1455,15 @@ function renderAccountInsights(snapshot, target) {
     : (geminiPending || geminiBlocked) ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ')
     : eligible == null ? '状态待核对' : eligible < geminiTotal ? `${amount(geminiTotal - eligible)} 个未就绪` : '';
   const cards = [
-    {name:'Flow', service:'FLOW', ready:flowReady, total:accounts.length, known:flowKnown, label:flowLabel},
-    {name:'Gemini', service:'GEMINI', ready:eligible, total:geminiTotal, known:eligible!=null, label:geminiLabel},
+    {name:'Flow', service:'FLOW', ready:flowReady, total:accounts.length, known:flowKnown, label:flowLabel,
+      metric:{value:amount(usableBalance), label:'就绪积分', note:`全池总余额 ${amount(flow?.pool_balance)}`}},
+    {name:'Gemini', service:'GEMINI', ready:eligible, total:geminiTotal, known:eligible!=null, label:geminiLabel,
+      metric:{value:latency, unit:latency==='—' ? '' : '秒', label:'平均耗时', note:'每账号取最近一次成功记录'}},
     {name:'Music', service:'MUSIC', ready:musicReady, total:musicTotal, known:musicKnown, label:musicLabel},
   ];
-  target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${cards.map(readinessCard).join('')}</div>
-    <div class="desk-service-metrics"><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>全账号总余额 ${amount(flow?.pool_balance)}</small></div>
-    <div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>每账号取最近一次成功记录</small></div></div></div>
+  target.innerHTML = `<div class="dashboard-rings">${cards.map(readinessCard).join('')}</div>
   <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话按号池优先顺序分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
-  scope.querySelector('.dashboard-metrics').insertAdjacentHTML('afterend',
+  scope.querySelector('.dashboard-rings').insertAdjacentHTML('afterend',
     '<p data-governance-status role="status" class="sr-only"></p>');
   $('dashboardRuntime').replaceChildren(scope.querySelector('[data-dashboard-running]'));
   scope.querySelector('[data-dashboard-ring="FLOW"]').style.setProperty('--fill',`${health ?? 0}%`);
