@@ -20,7 +20,7 @@ class FlowOverlayReload(unittest.IsolatedAsyncioTestCase):
         binding = dict(binding_state='verified', account_key='key', browser_pid=100, port=9222,
                        process_start='stamp', page_target='fixed', project_url=PROJECT,
                        window_id=12, workspace=0, chrome_window=34)
-        target = dict(id='fixed', url='https://accounts.google.com/v3/signin/challenge/pwd',
+        target = dict(id='fixed', url='https://accounts.google.com/v3/signin/challenge/totp',
                       webSocketDebuggerUrl='ws://127.0.0.1:9222/devtools/page/fixed')
         unrelated = dict(target, id='other')
         for pages, window_id, expected in (([target, unrelated], 34, 'verification_required'),
@@ -47,6 +47,49 @@ class FlowOverlayReload(unittest.IsolatedAsyncioTestCase):
         for url in ('https://accounts.google.com.example.org/signin/challenge',
                     'https://accounts.google.com/ManageAccount?next=/signin/challenge', PROJECT):
             self.assertIsNone(readiness.google_login_page(url))
+
+    def test_intro_return_is_limited_to_the_original_project(self):
+        path = '/project/' + PROJECT.rsplit('/', 1)[1]
+        url = 'https://flow.google.com/about?returnUrl=' + path
+        self.assertTrue(readiness.flow_project_redirect(url, PROJECT))
+        self.assertFalse(readiness.flow_project_redirect(url + '&returnUrl=' + path, PROJECT))
+        self.assertFalse(readiness.flow_project_redirect(url.replace('flow.google.com', 'other.invalid'), PROJECT))
+        self.assertFalse(readiness.flow_project_redirect(url.replace(path, PROJECT), PROJECT))
+        self.assertEqual(readiness.google_login_page('https://accounts.google.com/v3/signin/challenge/pwd'), 'login')
+
+    async def test_intro_reopens_original_project_once_and_leaves_google_verification(self):
+        original = dict(id='frame', loaderId='old', url='https://flow.google.com/about?returnUrl=' + STATE['path'])
+        for path, expected in [
+            (PROJECT, 'ok'),
+            (original['url'], 'flow_landing'),
+            ('https://accounts.google.com/v3/signin/identifier', 'login'),
+            ('https://accounts.google.com/v3/signin/challenge/totp', 'verification_required'),
+        ]:
+            with self.subTest(expected=expected):
+                before = {'frameTree': {'frame': original}}
+                after = {'frameTree': {'frame': dict(original, loaderId='new', url=path)}}
+                actions = []
+                with patch.object(recovery, 'guard_live'), \
+                        patch.object(recovery, 'command', AsyncMock(side_effect=[before, before, {}, after])) as command, \
+                        patch.object(recovery, 'evaluate', AsyncMock(side_effect=[
+                            dict(origin=True), dict(STATE, overlay=False, editor=True)])), \
+                        patch.object(recovery.asyncio, 'sleep', AsyncMock()):
+                    state = await recovery.reopen_redirected_project(None, {}, '', PROJECT, actions)
+                self.assertEqual(recovery.page_verdict(state), expected)
+                self.assertEqual(actions, ['return_to_project'])
+                self.assertEqual([call.args[2] for call in command.await_args_list if call.args[1]=='Page.navigate'],
+                                 [{'url': PROJECT, 'frameId': 'frame'}])
+
+    async def test_intro_with_a_draft_does_not_navigate(self):
+        frame = {'frameTree': {'frame': {'url':'https://flow.google.com/about?returnUrl=' + STATE['path']}}}
+        actions = []
+        with patch.object(recovery, 'guard_live'), \
+                patch.object(recovery, 'command', AsyncMock(return_value=frame)) as command, \
+                patch.object(recovery, 'evaluate', AsyncMock(return_value=dict(origin=True, draft=True))):
+            result = await recovery.reopen_redirected_project(None, {}, '', PROJECT, actions)
+        self.assertEqual(recovery.page_verdict(result), 'draft')
+        command.assert_awaited_once()
+        self.assertEqual(actions, [])
 
     async def test_refreshes_same_project_and_checks_new_document(self):
         loaded = dict(STATE, overlay=False, editor=True)

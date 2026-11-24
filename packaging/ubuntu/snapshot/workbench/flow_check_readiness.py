@@ -3,7 +3,7 @@ import asyncio
 import json
 import re
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from flow_browser_state import _pages, focus_call
@@ -44,7 +44,9 @@ def page_verdict(state):
     if state.get('draft'):
         return 'draft'
     if state.get('login'):
-        return 'login'
+        return 'verification_required' if state.get('verification') else 'login'
+    if state.get('flow_landing'):
+        return 'flow_landing'
     if state.get('loadFailed'):
         return 'load_failed'
     if not state.get('account'):
@@ -60,10 +62,27 @@ def google_login_page(url):
         return None
     path = location.path.lower().strip('/').split('/')
     if 'signin' in path:
-        return 'verification_required' if 'challenge' in path else 'login'
+        if 'challenge' in path:
+            step = path[path.index('challenge') + 1:]
+            if step and step[0] not in ('pwd', 'password'):
+                return 'verification_required'
+        return 'login'
     if path[0] in ('servicelogin', 'accountchooser'):
         return 'login'
     return None
+
+
+def flow_project_redirect(url, project):
+    """Only accept a relative return path for the already owned project."""
+    try:
+        location = urlsplit(url)
+        if (location.scheme, location.netloc, location.path.rstrip('/'), location.fragment) != (
+                'https', 'flow.google.com', '/about', ''):
+            return False
+        params = parse_qs(location.query, keep_blank_values=True, max_num_fields=32)
+        return params.get('returnUrl') == [urlsplit(canonical_project_url(project)).path]
+    except (TypeError, ValueError):
+        return False
 
 
 async def inspect_page(account, binding):
@@ -84,7 +103,8 @@ async def inspect_page(account, binding):
     if project.rsplit('/', 1)[1] not in account['projects']:
         return 'project'
     login_page = google_login_page(page['url'])
-    if not login_page:
+    redirected = flow_project_redirect(page['url'], project)
+    if not login_page and not redirected:
         try:
             if canonical_project_url(page['url']) != project:
                 return 'project'
@@ -102,9 +122,11 @@ async def inspect_page(account, binding):
         window = json.loads(await ws.recv()).get('result', {}).get('windowId')
         if window != binding['chrome_window']:
             return 'binding'
+        # Return flags only. Do not return prompt text or account credentials.
         if login_page:
             return login_page
-        # Return flags only. Do not return prompt text or account credentials.
+        if redirected:
+            return 'flow_landing'
         expression = composer_expression(account['email'])
         await ws.send(json.dumps({'id': 2, 'method': 'Runtime.evaluate',
                                   'params': {'expression': expression, 'returnByValue': True}}))

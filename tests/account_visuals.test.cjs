@@ -123,9 +123,11 @@ test('Flow reports a verified Google challenge before stale balances and clears 
   const context = vm.createContext({account,snapshot,checks,flowReadinessObservation:null,flowWindowIssue:()=>null});
   for (const name of ['accountIssues','flowGovernance','auditFlowAccounts','flowAccountReason','flowOccupiedSlots']) load(name,context);
   const row = () => vm.runInContext('auditFlowAccounts(snapshot,{available:true,active:0,maximum:1},checks,1)[0]',context);
-  assert.equal(row().issues[0].title,'Google 要求重新验证');
+  assert.equal(row().issues[0].title,'需要 Google 验证');
   assert.equal(row().status,'blocked');
   assert.match(vm.runInContext("flowAccountReason(account,snapshot,{},'verification_required').text",context), /Ubuntu 浏览器完成 Google 验证/);
+  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'login').label",context), 'Flow 需要重新登录');
+  assert.equal(vm.runInContext("flowAccountReason(account,snapshot,{},'flow_landing').label",context), 'Flow 返回了介绍页');
   checks.accounts.a = 'ok';
   assert.equal(row().issues.length,1);
   assert.equal(row().issues[0].title,'任务页已就绪，积分待核对');

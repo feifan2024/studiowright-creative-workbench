@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from flow_browser_state import _pages, focus_call
-from flow_check_readiness import composer_expression, inspect_page, page_verdict
+from flow_check_readiness import composer_expression, flow_project_redirect, google_login_page, inspect_page, page_verdict
 from flow_task_window import registration
 from task_window_registry import TaskWindowRegistry, canonical_project_url, process_identity
 
@@ -333,10 +333,11 @@ async def reload_failed_project(ws, account, expected, project, actions):
     for _ in range(20):
         await asyncio.sleep(.4)
         loaded = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
-        url = urlsplit(loaded['url'])
-        if (url.scheme == 'https' and url.netloc == 'accounts.google.com'
-                and re.search(r'/(?:signin|servicelogin)(?:/|$)', url.path, re.I)):
-            return {'login': True}
+        login = google_login_page(loaded['url'])
+        if login:
+            return {'login': True, 'verification': login == 'verification_required'}
+        if flow_project_redirect(loaded['url'], project):
+            return {'flow_landing': True}
         if canonical_project_url(loaded['url']) != project:
             return {}
         if loaded['loaderId'] == frame['loaderId']:
@@ -346,6 +347,43 @@ async def reload_failed_project(ws, account, expected, project, actions):
             return {}
         if page_verdict(state) not in ('load_failed', 'unconfirmed', 'editor'):
             return state
+    return state
+
+
+async def reopen_redirected_project(ws, account, expected, project, actions):
+    await asyncio.to_thread(guard_live, account)
+    frame = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
+    if not flow_project_redirect(frame['url'], project):
+        return {}
+    state = await evaluate(ws, expected)
+    if not state.get('origin') or state.get('busy') or state.get('draft'):
+        return state
+    current = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
+    if current.get('loaderId') != frame.get('loaderId') or current['url'] != frame['url']:
+        return {}
+    result = await command(ws, 'Page.navigate', {'url': project, 'frameId': frame['id']})
+    actions.append('return_to_project')
+    if result.get('errorText'):
+        return {'loadFailed': True}
+    for _ in range(16):
+        await asyncio.sleep(.5)
+        loaded = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
+        if loaded.get('loaderId') == frame.get('loaderId'):
+            continue
+        login = google_login_page(loaded['url'])
+        if login:
+            return {'login': True, 'verification': login == 'verification_required'}
+        if flow_project_redirect(loaded['url'], project):
+            return {'flow_landing': True}
+        try:
+            if canonical_project_url(loaded['url']) != project:
+                return {}
+        except ValueError:
+            return {}
+        state = await evaluate(ws, expected)
+        if state.get('origin') and state.get('path', '').rstrip('/') == urlsplit(project).path:
+            if page_verdict(state) not in ('unconfirmed', 'editor'):
+                return state
     return state
 
 
@@ -361,6 +399,11 @@ async def repair(account, initial, actions, safe_only=False):
     except ValueError:
         project = None
     old = TaskWindowRegistry().get(current['account_key'])
+    redirected = bool(old and old.get('binding_state') == 'verified'
+                      and old.get('project_url', '').rsplit('/', 1)[-1] in projects
+                      and flow_project_redirect(page['url'], old['project_url']))
+    if redirected:
+        project = old['project_url']
     same = project and project.rsplit('/',1)[1] in projects
     if not same and len(standard) != 1:
         return 'project',None
@@ -370,9 +413,15 @@ async def repair(account, initial, actions, safe_only=False):
     try:
         async with websockets.connect(endpoint,open_timeout=2,close_timeout=1,max_size=65536) as ws:
             current['chrome_window'] = (await command(ws,'Browser.getWindowForTarget',{'targetId':current['page_target']}))['windowId']
-            before = await evaluate(ws,expected)
+            if redirected:
+                if any(old.get(key) != value for key, value in current.items()):
+                    return 'binding', None
+                before = await reopen_redirected_project(ws, account, expected, desired, actions)
+                navigated_once = 'return_to_project' in actions
+            else:
+                before = await evaluate(ws,expected)
             verdict = page_verdict(before)
-            if verdict == 'login':
+            if verdict in ('login', 'verification_required', 'flow_landing') or (redirected and verdict != 'ok'):
                 return verdict,None
             if verdict == 'load_failed':
                 if (not same or not old or old.get('binding_state') != 'verified'
@@ -633,10 +682,10 @@ async def recover(payload):
                 except (OSError,ValueError,TimeoutError):
                     before = 'binding'
                 old_draft = before == 'ok' and (Coordinator().window(p) or {}).get('state') == 'blocked_draft'
-                if payload.get('safe_only') and before not in {'binding','project','editor','overlay','draft','load_failed'} and not old_draft:
+                if payload.get('safe_only') and before not in {'binding','project','editor','overlay','draft','load_failed','flow_landing'} and not old_draft:
                     out[p] = {'page':before,'actions':[]}
                     continue
-                if (before in {'binding','project','editor','overlay','draft','load_failed'} or old_draft or
+                if (before in {'binding','project','editor','overlay','draft','load_failed','flow_landing'} or old_draft or
                         (before == 'ok' and lifecycle.get(p,{}).get('unique_ok') != 1)):
                     verdict,_ = await asyncio.wait_for(repair(account,before,actions,safe_only=payload.get('safe_only') is True),
                         timeout=min(45,max(1,deadline-asyncio.get_running_loop().time())))
