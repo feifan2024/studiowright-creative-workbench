@@ -30,6 +30,16 @@ MAX_TIMEOUT_ATTEMPTS=4
 DEFAULT_MAX_CONCURRENCY=20
 ACCOUNT_BLOCK_REASONS=(AUTH_UNSENT,'authorization_still_required','verification_required','quota_or_rate_limit')
 
+def account_quota_restriction(model,row,now):
+    restriction=quota_restriction(row,now)
+    # A quota query can need additional authorization even when ordinary Flash calls work.
+    return restriction if model in ADVANCED_MODELS or restriction=='quota_exhausted' else None
+
+def model_candidates(eligible,model,models,quota,now):
+    return [key for key in eligible
+            if (model not in ADVANCED_MODELS or model in models.get(key,()))
+            and not account_quota_restriction(model,quota.get(key,{}),now)]
+
 def unresolved_official(db,key):
     return db.execute("SELECT 1 FROM requests r WHERE r.account_key=? AND r.status='unknown' AND "+OFFICIAL_REQUEST_SQL+" AND NOT EXISTS(SELECT 1 FROM official_jobs p WHERE p.request_id=r.request_id AND p.readiness_probe=1) AND NOT EXISTS(SELECT 1 FROM account_unknown_release x WHERE x.request_id=r.request_id)",(key,)).fetchone() is not None
 
@@ -47,8 +57,8 @@ class OfficialPool:
               CREATE TABLE IF NOT EXISTS official_jobs(
                 request_id TEXT PRIMARY KEY REFERENCES requests(request_id),conversation_id TEXT NOT NULL,
                 model TEXT NOT NULL,native_before TEXT,started REAL,queue_wait_ms REAL,reason TEXT);
-              CREATE TABLE IF NOT EXISTS official_pool_cursor(id INTEGER PRIMARY KEY CHECK(id=1),last_account TEXT);
-              CREATE TABLE IF NOT EXISTS official_advanced_pool_cursor(id INTEGER PRIMARY KEY CHECK(id=1),last_account TEXT);
+              CREATE TABLE IF NOT EXISTS official_auto_accounts(
+                request_id TEXT PRIMARY KEY REFERENCES official_jobs(request_id), permitted_accounts TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS official_model_fallbacks(
                 request_id TEXT PRIMARY KEY REFERENCES official_jobs(request_id), requested_model TEXT NOT NULL,
                 fallback_model TEXT NOT NULL, permitted_accounts TEXT NOT NULL, reason TEXT);
@@ -254,9 +264,9 @@ class OfficialPool:
         account_dispatch={'available':True,'maximum':DEFAULT_MAX_CONCURRENCY,'active':active,
                           'paused':self.pool.maintenance(),'queued':queued,'scope':'gemini_pool'}
         return {'available':any(available.values()),'channel':CHANNEL,'model':MODEL,'accounts':result,'queued':queued,'active':active,
-                'selection':'round_robin','max_concurrency':DEFAULT_MAX_CONCURRENCY,'retry':True,'failover':False,
+                'selection':'priority_order','max_concurrency':DEFAULT_MAX_CONCURRENCY,'retry':True,'failover':False,
                 'concurrency_scope':'gemini_pool','per_account_concurrency':None,
-                'advanced_pool':{'selection':'round_robin','configured_accounts':len(text_models),
+                'advanced_pool':{'selection':'priority_order','configured_accounts':len(text_models),
                                  'ready_accounts':sum(bool(r['advanced_text_models']) and r['dispatch_eligible']
                                                       and not r['advanced_quota_restriction'] for r in result.values()),
                                  'active':advanced_jobs.get('dispatching',0),'queued':advanced_jobs.get('queued',0)},
@@ -283,13 +293,13 @@ class OfficialPool:
             return [k for k in order if isinstance(k,str) and re.fullmatch(r'[0-9a-f]{64}',k)]
         except (OSError,ValueError):return []
 
-    def save_account_order(self,order):
-        """Persist the panel's drag order; must be a permutation of configured accounts."""
+    def save_account_order(self,order,*,visible_accounts=None):
+        """Persist the shared card order, using the current panel inventory when provided."""
         if not isinstance(order,list) or not order:raise ValueError('账号顺序格式不正确。')
         if any(not isinstance(k,str) or not re.fullmatch(r'[0-9a-f]{64}',k) for k in order) \
                 or len(set(order))!=len(order):
             raise ValueError('账号顺序包含无效或重复的编号。')
-        try:configured=set((self.runtime.settings() or {}).get('accounts',{}))
+        try:configured=set((self.runtime.settings() or {}).get('accounts',{})) if visible_accounts is None else set(visible_accounts)
         except (OSError,ValueError,TypeError):configured=None
         if configured is None:raise ValueError('账号列表暂不可读取，稍后再试。')
         if set(order)!=configured:raise ValueError('账号顺序与当前账号列表不一致；请刷新页面后重试。')
@@ -300,8 +310,8 @@ class OfficialPool:
         temporary.replace(path)
         return order
 
-    def circle_order(self,eligible):
-        """Rotation circle: the saved panel order first, then any other eligible key."""
+    def priority_order(self,eligible):
+        """The saved panel order comes first, then accounts absent from it."""
         saved=self.saved_account_order()
         if not saved:return list(eligible)
         chosen=set(saved)
@@ -337,23 +347,8 @@ class OfficialPool:
             queued.append({'request_id':record['request_id'],'account_key':key,'new':new})
         return queued
 
-    def rotate_account(self, db, eligible, advanced):
-        cursor='official_advanced_pool_cursor' if advanced else 'official_pool_cursor'
-        row=db.execute(f'SELECT last_account FROM {cursor} WHERE id=1').fetchone()
-        last=row[0] if row else ''
-        candidates=set(eligible)
-        # Keep the previous position in the circle even when that account is temporarily unavailable.
-        circle=self.circle_order(sorted(candidates | {last}) if last else eligible)
-        start=circle.index(last)+1 if last in circle else 0
-        account=next(key for key in circle[start:]+circle[:start] if key in candidates)
-        db.execute(f'INSERT INTO {cursor}(id,last_account) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_account=excluded.last_account',(account,))
-        return account
-
-    def flash_candidates(self, eligible, now):
-        if not eligible:
-            return []
-        quota=reader_for(self.runtime).cached_accounts(eligible)
-        return [k for k in eligible if not quota_restriction(quota.get(k,{}),now)]
+    def account_quotas(self, keys):
+        return reader_for(self.runtime).cached_accounts(keys) if keys else {}
 
     def generate(self,account,prompt,request_id,items,attachments=None,conversation_id=None,model=None,*,image_analysis=False,readiness_probe=False,retry_policy=None,effort=None,fallback_model=None):
         if retry_policy not in (None, "never"):raise ValueError("Invalid retry policy")
@@ -366,7 +361,7 @@ class OfficialPool:
             attachments=vision.normalized_attachments(attachments)
         elif attachments:raise ValueError('普通对话只收文字；请使用 Gemini 识图接口传图。')
         model=resolve(model,effort)
-        if not isinstance(account,str):raise ValueError('请选择账号或自动轮询。')
+        if not isinstance(account,str):raise ValueError('请选择账号或按优先顺序分配。')
         if account!='auto':self.pool.allowed(account,items)
         advanced=model in ADVANCED_MODELS
         if fallback_model is not None:
@@ -378,7 +373,6 @@ class OfficialPool:
         models=self.runtime.text_models() if advanced else {}
         if advanced and account!='auto' and model not in models.get(account,()):
             raise ValueError('所选账号未开通该模型和思考等级。')
-        quota=reader_for(self.runtime).cached_accounts(models) if models else {}
         if conversation_id:self.pool.conversation_id(conversation_id)
         payload={'account':account,'prompt':prompt,'conversation_id':conversation_id,'model':model or MODEL}
         if fallback_model:payload['fallback_model']=fallback_model
@@ -386,8 +380,9 @@ class OfficialPool:
         if image_analysis:payload.update(channel=vision.CHANNEL,attachments=attachments)
         digest=hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
         now=time.time();available=self.runtime.inventory()
+        quota=self.account_quotas(available) if not readiness_probe else {}
         selection='auto' if account=='auto' else 'manual'
-        permitted={i.get('key','').removeprefix('flow-account-') for i in items if isinstance(i,dict)}
+        permitted=list(dict.fromkeys(i.get('key','').removeprefix('flow-account-') for i in items if isinstance(i,dict)))
         with self.pool.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             try:
@@ -427,31 +422,26 @@ class OfficialPool:
                         selection='manual'
                         if not native:raise Conflict('原生上下文尚未确认，不能重新提交。')
                     if db.execute("SELECT 1 FROM conversation_turns t JOIN requests r USING(request_id) WHERE t.conversation_id=? AND r.status IN ('queued','dispatching')",(conversation_id,)).fetchone():raise Conflict('该对话还有一轮正在等待或执行，请等待完成。')
-                eligible=sorted(k for k in available if k in permitted and self.reason(
+                eligible=[k for k in permitted if self.reason(
                     db,k,available,self.readiness_block(db,k) if readiness_probe and k==account else None,
-                    readiness_probe=readiness_probe and k==account) is None)
+                    readiness_probe=readiness_probe and k==account) is None]
                 requested_model=model
                 fallback_reason=None
-                if advanced:
-                    if account!='auto' and model not in models.get(account,()):
-                        raise ValueError('原对话账号未开通该模型和思考等级。')
-                    if account!='auto' and quota_restriction(quota.get(account,{}),now):
-                        raise DispatchBusy('原账号需要验证或额度恢复，本次未发送。')
-                    advanced_eligible=[k for k in eligible if model in models.get(k,())
-                                       and not quota_restriction(quota.get(k,{}),now)]
-                    if not advanced_eligible and account=='auto' and fallback_model:
-                        eligible=self.flash_candidates(eligible,now)
-                        if not eligible:
-                            raise DispatchBusy('高级模型与 Flash 均无可用账号，本次未发送。')
-                        model,advanced,fallback_reason=fallback_model,False,'advanced_pool_unavailable'
-                    else:
-                        eligible=advanced_eligible
-                    if account=='auto' and not eligible:
-                        raise DispatchBusy('没有可用的高级模型账号，本次未发送。')
+                if advanced and account!='auto' and model not in models.get(account,()):
+                    raise ValueError('原对话账号未开通该模型和思考等级。')
                 if account=='auto':
-                    if not eligible:raise Conflict('没有允许派发且授权就绪的账号；暂停和未确认限制均保留。')
-                    account=self.rotate_account(db,eligible,advanced)
-                elif account not in eligible:raise Conflict('该账号授权未就绪、已暂停或存在未确认结果，消息未发送。')
+                    candidates=model_candidates(eligible,model,models,quota,now)
+                    if not candidates and fallback_model:
+                        candidates=model_candidates(eligible,fallback_model,models,quota,now)
+                        if candidates:
+                            model,fallback_reason=fallback_model,'advanced_pool_unavailable'
+                    if not candidates:
+                        raise DispatchBusy('没有额度可用且授权就绪的账号，消息未发送。')
+                    account=self.priority_order(candidates)[0]
+                else:
+                    if account not in eligible:raise Conflict('该账号授权未就绪、已暂停或存在未确认结果，消息未发送。')
+                    if account_quota_restriction(model,quota.get(account,{}),now):
+                        raise DispatchBusy('原账号需要验证或额度恢复，本次未发送。')
                 if not conv:
                     conversation_id=str(uuid.uuid4())
                     title='Gemini 云端验活' if readiness_probe else ('识图 · ' if image_analysis else '')+prompt.strip()[:36]
@@ -463,6 +453,8 @@ class OfficialPool:
                 db.execute('INSERT INTO conversation_attempt_models(request_id,model) VALUES(?,?)',(request_id,model))
                 db.execute('INSERT INTO official_jobs(request_id,conversation_id,model,native_before,readiness_probe,no_retry) VALUES(?,?,?,?,?,?)',
                            (request_id,conversation_id,model,native,int(readiness_probe),int(retry_policy=='never')))
+                if selection=='auto':
+                    db.execute('INSERT INTO official_auto_accounts VALUES(?,?)',(request_id,json.dumps(permitted)))
                 if fallback_model:
                     db.execute('INSERT INTO official_model_fallbacks VALUES(?,?,?,?,?)',
                                (request_id,requested_model,fallback_model,json.dumps(sorted(permitted)),fallback_reason))
@@ -473,24 +465,29 @@ class OfficialPool:
 
     def reroute_unsent(self, db, row, reason, available, models, quota):
         request_id=row['request_id']
-        policy=db.execute('SELECT * FROM official_model_fallbacks WHERE request_id=?',(request_id,)).fetchone()
-        if (not policy or policy['reason'] or row['model']!=policy['requested_model'] or row['hidden']
-                or row['native_before'] is not None or row['attachments']!='[]'
+        if (row['hidden'] or row['native_before'] is not None
                 or db.execute('SELECT 1 FROM official_attempts WHERE request_id=?',(request_id,)).fetchone()):
             return None
-        eligible=sorted(key for key in json.loads(policy['permitted_accounts'])
-                        if key!=row['account_key'] and not self.reason(db,key,available))
+        auto=db.execute('SELECT permitted_accounts FROM official_auto_accounts WHERE request_id=?',(request_id,)).fetchone()
+        policy=db.execute('SELECT * FROM official_model_fallbacks WHERE request_id=?',(request_id,)).fetchone()
+        scope=auto or policy  # Older queued requests can still carry their original explicit fallback policy.
+        if not scope:
+            return None
+        eligible=[key for key in json.loads(scope['permitted_accounts'])
+                  if key!=row['account_key'] and self.reason(db,key,available) is None]
         now=time.time()
-        advanced=[key for key in eligible if row['model'] in models.get(key,())
-                  and not quota_restriction(quota.get(key,{}),now)]
-        candidates=advanced or self.flash_candidates(eligible,now)
+        model=row['model']
+        candidates=model_candidates(eligible,model,models,quota,now)
+        if not candidates and policy and not policy['reason'] and model==policy['requested_model']:
+            model=policy['fallback_model']
+            candidates=model_candidates(eligible,model,models,quota,now)
+            if candidates:
+                db.execute('UPDATE official_model_fallbacks SET reason=? WHERE request_id=?',(reason,request_id))
         if not candidates:
             return None
-        account=self.rotate_account(db,candidates,bool(advanced))
-        model=row['model'] if advanced else policy['fallback_model']
-        if not advanced:
-            db.execute('UPDATE official_model_fallbacks SET reason=? WHERE request_id=?',(reason,request_id))
-        native=json.dumps({'channel':CHANNEL,'model':model,'official_conversation_id':None})
+        account=self.priority_order(candidates)[0]
+        native=json.dumps({'channel':vision.CHANNEL if row['attachments']!='[]' else CHANNEL,
+                           'model':model,'official_conversation_id':None})
         db.execute('UPDATE conversations SET account_key=?,native_json=?,updated=? WHERE id=?',
                    (account,native,now,row['conversation_id']))
         db.execute('UPDATE requests SET account_key=? WHERE request_id=?',(account,request_id))
@@ -514,7 +511,7 @@ class OfficialPool:
                                   LEFT JOIN official_reauth a USING(request_id) LEFT JOIN official_model_fallbacks f USING(request_id)
                                   WHERE r.status='queued' ORDER BY j.readiness_probe,r.created,r.rowid""").fetchall()
                 models=self.runtime.text_models() if any(r['model'] in ADVANCED_MODELS for r in rows) else {}
-                quota=reader_for(self.runtime).cached_accounts(models) if models else {}
+                quota=self.account_quotas(available) if rows else {}
                 for row in rows:
                     if probe_only is not None and bool(row['readiness_probe']) != probe_only:continue
                     if row['readiness_probe'] and db.execute(
@@ -528,13 +525,11 @@ class OfficialPool:
                     reason=self.reason(db,row['account_key'],available,
                                        (row['block_reason'],row['block_created']) if resumed else timeout_block or recovery,
                                        readiness_probe=bool(row['readiness_probe']))
-                    if row['model'] in ADVANCED_MODELS and not reason:
-                        if row['model'] not in models.get(row['account_key'],()):
+                    if not reason and not row['readiness_probe']:
+                        if row['model'] in ADVANCED_MODELS and row['model'] not in models.get(row['account_key'],()):
                             reason='model_account_unavailable'
                         else:
-                            reason=quota_restriction(quota.get(row['account_key'],{}),time.time())
-                    if row['fallback_reason'] and not reason and not self.flash_candidates([row['account_key']],time.time()):
-                        reason='fallback_account_unavailable'
+                            reason=account_quota_restriction(row['model'],quota.get(row['account_key'],{}),time.time())
                     if timed_out:
                         previous=db.execute("""SELECT ordinal,status,reason,submitted FROM official_attempts
                             WHERE request_id=? ORDER BY ordinal DESC LIMIT 1""",(row['request_id'],)).fetchone()

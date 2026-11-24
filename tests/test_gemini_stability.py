@@ -105,6 +105,7 @@ class ProbePriority(unittest.TestCase):
         pool = OfficialPool.__new__(OfficialPool)
         pool.pool = S(connection=connect, maintenance=lambda: False)
         pool.runtime = S(inventory=lambda: {'a': True, 'b': True})
+        pool.account_quotas = lambda _: {}
         pool.reason = lambda *args, **kwargs: None
         pool.readiness_block = lambda *args: None
         return pool

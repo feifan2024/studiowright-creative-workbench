@@ -39,3 +39,17 @@ python3 /path/to/workbench/packaging/music/apply_session_renewal.py /path/to/Flo
 只修复启用中、会话已过期的账号。已经就绪的账号不调用续期或认证接口；手动停用账号保持停用。
 检测到音乐任务运行或任务状态不可读取时停止账号修改。每次修改前重新读取账号状态。
 修复仅续期并验证服务认证，不创建音乐、不自动启用账号、不重复失败操作。连续点击复用当前检查。
+
+## 音乐账号优先顺序
+
+工作台按账号页顺序调用音乐服务。音乐后端用每个候选账号的实时额度判断是否可用。未出现在账号页的音乐账号按登记先后排在后面。生成前收到明确拒绝才会换号，已接收结果继续查原单。
+
+在基线源码或已应用上述会话续期补丁的隔离副本中验证两项补丁：
+
+```sh
+python3 /path/to/workbench/packaging/music/apply_session_renewal.py /path/to/FlowMusic2API --priority-dispatch
+python3 /path/to/workbench/packaging/music/apply_session_renewal.py /path/to/FlowMusic2API --priority-dispatch --apply
+go test ./...
+```
+
+工作台通过新端点 `/v1/audio/generations/priority` 使用优先顺序。上线时先验证音乐镜像提供该端点，再切换工作台，原有音乐 API 入口继续沿用原逻辑。

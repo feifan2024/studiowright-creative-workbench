@@ -1,0 +1,461 @@
+diff --git a/internal/httpapi/handlers.go b/internal/httpapi/handlers.go
+index 5022574..d51eeb3 100644
+--- a/internal/httpapi/handlers.go
++++ b/internal/httpapi/handlers.go
+@@ -631,11 +631,20 @@ func (s *Server) handleGuestAudioGenerations(w http.ResponseWriter, r *http.Requ
+ }
+ 
+ func (s *Server) handleAudioGenerations(w http.ResponseWriter, r *http.Request) {
++	s.handleAudioGeneration(w, r, false)
++}
++
++func (s *Server) handlePriorityAudioGenerations(w http.ResponseWriter, r *http.Request) {
++	s.handleAudioGeneration(w, r, true)
++}
++
++func (s *Server) handleAudioGeneration(w http.ResponseWriter, r *http.Request, priority bool) {
+ 	var req struct {
+-		Model    string        `json:"model"`
+-		Prompt   string        `json:"prompt"`
+-		Input    string        `json:"input"`
+-		Messages []chatMessage `json:"messages"`
++		Model        string        `json:"model"`
++		Prompt       string        `json:"prompt"`
++		Input        string        `json:"input"`
++		Messages     []chatMessage `json:"messages"`
++		AccountOrder []string      `json:"account_order"`
+ 	}
+ 	if err := readJSON(r, &req); err != nil {
+ 		writeOpenAIError(w, http.StatusBadRequest, err)
+@@ -651,7 +660,16 @@ func (s *Server) handleAudioGenerations(w http.ResponseWriter, r *http.Request)
+ 		writeOpenAIError(w, http.StatusBadRequest, err)
+ 		return
+ 	}
+-	out, err := s.generation.Generate(r.Context(), prompt, model)
++	var out svc.GenerationOutput
++	if priority {
++		if len(req.AccountOrder) > 100 {
++			writeOpenAIError(w, http.StatusBadRequest, fmt.Errorf("too many priority accounts"))
++			return
++		}
++		out, err = s.generation.GenerateInAccountOrder(r.Context(), prompt, model, req.AccountOrder)
++	} else {
++		out, err = s.generation.Generate(r.Context(), prompt, model)
++	}
+ 	if err != nil {
+ 		writeOpenAIError(w, http.StatusBadGateway, err)
+ 		return
+diff --git a/internal/httpapi/server.go b/internal/httpapi/server.go
+index 81ee55f..cc38448 100644
+--- a/internal/httpapi/server.go
++++ b/internal/httpapi/server.go
+@@ -115,6 +115,7 @@ func (s *Server) Handler() http.Handler {
+ 		pr.Get("/v1/models/{modelID}", s.handleGetModel)
+ 		pr.Post("/v1/chat/completions", s.handleChatCompletions)
+ 		pr.Post("/v1/audio/generations", s.handleAudioGenerations)
++		pr.Post("/v1/audio/generations/priority", s.handlePriorityAudioGenerations)
+ 		pr.Post("/v1/audio/results", s.handleMusicResults)
+ 		pr.Post("/v1/music/generations", s.handleAudioGenerations)
+ 		pr.Post("/v1/audio/speech", s.handleAudioGenerations)
+diff --git a/internal/service/accounts.go b/internal/service/accounts.go
+index 2f92648..314e074 100644
+--- a/internal/service/accounts.go
++++ b/internal/service/accounts.go
+@@ -180,10 +180,14 @@ func (s *AccountService) Acquire(ctx context.Context) (*domain.Account, error) {
+ }
+ 
+ func (s *AccountService) AcquireExcluding(ctx context.Context, excluded map[int64]struct{}) (*domain.Account, error) {
+-	return s.acquireExcluding(ctx, excluded)
++	return s.acquireExcluding(ctx, excluded, nil)
+ }
+ 
+ func (s *AccountService) AcquireLeaseExcluding(ctx context.Context, excluded map[int64]struct{}, leaseTTL time.Duration) (*domain.Account, func(), error) {
++	return s.acquireLeaseExcluding(ctx, excluded, leaseTTL, nil)
++}
++
++func (s *AccountService) acquireLeaseExcluding(ctx context.Context, excluded map[int64]struct{}, leaseTTL time.Duration, priority accountPriority) (*domain.Account, func(), error) {
+ 	if leaseTTL <= 0 {
+ 		leaseTTL = s.cfg.GenerationTimeout
+ 	}
+@@ -197,7 +201,7 @@ func (s *AccountService) AcquireLeaseExcluding(ctx context.Context, excluded map
+ 		for id := range activeLeases {
+ 			mergedExcluded[id] = struct{}{}
+ 		}
+-		account, err := s.acquireExcluding(ctx, mergedExcluded)
++		account, err := s.acquireExcluding(ctx, mergedExcluded, priority)
+ 		if err != nil {
+ 			if len(activeLeases) == 0 {
+ 				return nil, func() {}, err
+@@ -222,12 +226,16 @@ func (s *AccountService) AcquireLeaseExcluding(ctx context.Context, excluded map
+ 	}
+ }
+ 
+-func (s *AccountService) acquireExcluding(ctx context.Context, excluded map[int64]struct{}) (*domain.Account, error) {
++func (s *AccountService) acquireExcluding(ctx context.Context, excluded map[int64]struct{}, priority accountPriority) (*domain.Account, error) {
+ 	accounts, err := s.db.GetActiveAccounts(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	accounts = s.orderAccountsForCallMode(ctx, accounts)
++	if priority == nil {
++		accounts = s.orderAccountsForCallMode(ctx, accounts)
++	} else {
++		priority.sort(accounts)
++	}
+ 	refreshEnabled, refreshLead := s.tokenRefreshPolicy(ctx)
+ 	var lastErr error
+ 	now := time.Now().UTC()
+diff --git a/internal/service/generation.go b/internal/service/generation.go
+index 5c097d9..bcd80cb 100644
+--- a/internal/service/generation.go
++++ b/internal/service/generation.go
+@@ -73,6 +73,10 @@ func (s *GenerationService) Generate(ctx context.Context, prompt, model string)
+ }
+ 
+ func (s *GenerationService) GenerateWithProgress(ctx context.Context, prompt, model string, onProgress ProgressFunc) (GenerationOutput, error) {
++	return s.generateWithProgress(ctx, prompt, model, onProgress, nil)
++}
++
++func (s *GenerationService) generateWithProgress(ctx context.Context, prompt, model string, onProgress ProgressFunc, priority accountPriority) (GenerationOutput, error) {
+ 	var output GenerationOutput
+ 	emit := func(stage, message string, progress int) {
+ 		if onProgress == nil || strings.TrimSpace(message) == "" {
+@@ -88,29 +92,60 @@ func (s *GenerationService) GenerateWithProgress(ctx context.Context, prompt, mo
+ 	}
+ 	emit("started", "音乐生成任务已启动", 0)
+ 	excludedAccounts := map[int64]struct{}{}
+-	var lastAuthErr error
++	var lastAccountError error
++	var priorityLogID int64
+ 	for {
+ 		output = GenerationOutput{}
+ 		emit("account_selecting", "选择可用 FlowMusic 账号...", 3)
+-		account, releaseAccount, err := s.accounts.AcquireLeaseExcluding(ctx, excludedAccounts, runtime.Timeout)
++		account, releaseAccount, err := s.accounts.acquireLeaseExcluding(ctx, excludedAccounts, runtime.Timeout, priority)
+ 		if err != nil {
+-			if lastAuthErr != nil {
+-				return output, fmt.Errorf("no fallback FlowMusic account after authentication failure: %w", lastAuthErr)
++			if lastAccountError != nil && ctx.Err() == nil {
++				if priority == nil {
++					return output, fmt.Errorf("no fallback FlowMusic account after authentication failure: %w", lastAccountError)
++				}
++				return output, fmt.Errorf("no remaining eligible FlowMusic account: %w", lastAccountError)
+ 			}
+ 			return output, err
+ 		}
+ 		defer releaseAccount()
++		if priority != nil {
++			remaining, err := s.client.availableMusicCredits(ctx, *account)
++			if err != nil || remaining <= 0 {
++				if ctx.Err() != nil {
++					return output, ctx.Err()
++				}
++				lastAccountError = err
++				if err == nil {
++					lastAccountError = errors.New("FlowMusic account has no remaining generation credits")
++				}
++				excludedAccounts[account.ID] = struct{}{}
++				releaseAccount()
++				continue
++			}
++		}
+ 		output.AccountID = account.ID
+ 		start := time.Now()
+ 		reqPayload, _ := json.Marshal(map[string]any{"prompt": prompt, "model": model})
+-		logID, _ := s.db.CreateRequestLog(ctx, domain.RequestLog{
++		entry := domain.RequestLog{
+ 			AccountID:   &account.ID,
+ 			Operation:   "music.generate",
+ 			RequestBody: string(reqPayload),
+ 			StatusCode:  102,
+ 			StatusText:  "running",
+ 			Progress:    1,
+-		})
++		}
++		logID := priorityLogID
++		if logID == 0 {
++			logID, err = s.db.CreateRequestLog(ctx, entry)
++		} else {
++			err = s.db.UpdateRequestLog(ctx, logID, entry)
++		}
++		if priority != nil {
++			if err != nil {
++				return output, fmt.Errorf("record music request before submission: %w", err)
++			}
++			priorityLogID = logID
++		}
+ 
+ 		shouldFallback := func(err error) bool {
+ 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+@@ -123,18 +158,26 @@ func (s *GenerationService) GenerateWithProgress(ctx context.Context, prompt, mo
+ 			s.failLog(ctx, logID, account.ID, reqPayload, start, err)
+ 			s.recordFailure(ctx, account.ID)
+ 			_ = s.db.TouchAccountUsed(context.Background(), account.ID)
+-			if !isAuthFailure(err) {
++			if priority != nil {
++				if output.JobID != "" || !isPriorityAccountRejection(err) {
++					return false
++				}
++			} else if !isAuthFailure(err) {
+ 				return false
+ 			}
+-			emit("account_fallback", "认证失败，切换下一个账号重试...", 5)
+-			lastAuthErr = err
++			emit("account_fallback", "账号不可用，切换下一个账号...", 5)
++			lastAccountError = err
+ 			excludedAccounts[account.ID] = struct{}{}
+ 			releaseAccount()
+ 			return true
+ 		}
+ 
+ 		emit("conversation_starting", "提交 FlowMusic 音乐生成请求...", 10)
+-		convResult, err := retryValueUnless(ctx, runtime.MaxAttempts, isAuthFailure, func() (ConversationResult, error) {
++		submitAttempts := runtime.MaxAttempts
++		if priority != nil {
++			submitAttempts = 1
++		}
++		convResult, err := retryValueUnless(ctx, submitAttempts, isAuthFailure, func() (ConversationResult, error) {
+ 			return s.client.StartConversation(ctx, *account, prompt, model)
+ 		})
+ 		if err != nil {
+@@ -173,7 +216,7 @@ func (s *GenerationService) GenerateWithProgress(ctx context.Context, prompt, mo
+ 		output.OperationIDs = append(output.OperationIDs, stream.OperationIDs...)
+ 		output.ClipIDs = append(output.ClipIDs, stream.ClipIDs...)
+ 		_ = s.db.UpdateRequestLog(ctx, logID, domain.RequestLog{
+-			AccountID: &account.ID, StatusCode: 102, StatusText: "generating", Progress: 50,
++			AccountID: &account.ID, RequestBody: string(reqPayload), StatusCode: 102, StatusText: "generating", Progress: 50,
+ 		})
+ 		if len(output.ClipIDs) == 0 {
+ 			pollIDs := uniqueStrings(append(convResult.OperationIDs, stream.OperationIDs...))
+@@ -214,7 +257,7 @@ func (s *GenerationService) GenerateWithProgress(ctx context.Context, prompt, mo
+ 			}
+ 		}
+ 		_ = s.db.UpdateRequestLog(ctx, logID, domain.RequestLog{
+-			AccountID: &account.ID, StatusCode: 102, StatusText: "processing", Progress: 70,
++			AccountID: &account.ID, RequestBody: string(reqPayload), StatusCode: 102, StatusText: "processing", Progress: 70,
+ 		})
+ 		emit("clips_loading", "获取歌曲素材信息...", 70)
+ 		clips, err := retryValueUnless(ctx, runtime.MaxAttempts, isAuthFailure, func() ([]ClipResult, error) {
+diff --git a/internal/service/priority.go b/internal/service/priority.go
+new file mode 100644
+index 0000000..4bbe25a
+--- /dev/null
++++ b/internal/service/priority.go
+@@ -0,0 +1,75 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"math"
++	"net/http"
++	"sort"
++	"strings"
++
++	"flowmusic2api/internal/domain"
++)
++
++type accountPriority map[string]int
++
++func (s *GenerationService) GenerateInAccountOrder(ctx context.Context, prompt, model string, emails []string) (GenerationOutput, error) {
++	priority := make(accountPriority, len(emails))
++	for _, email := range emails {
++		key := strings.ToLower(strings.TrimSpace(email))
++		if _, exists := priority[key]; key != "" && !exists {
++			priority[key] = len(priority)
++		}
++	}
++	return s.generateWithProgress(ctx, prompt, model, nil, priority)
++}
++
++func (priority accountPriority) sort(accounts []domain.Account) {
++	sort.SliceStable(accounts, func(i, j int) bool {
++		left, right := accounts[i], accounts[j]
++		a, knownA := priority[strings.ToLower(strings.TrimSpace(left.Email))]
++		b, knownB := priority[strings.ToLower(strings.TrimSpace(right.Email))]
++		if knownA != knownB {
++			return knownA
++		}
++		if knownA && a != b {
++			return a < b
++		}
++		return left.ID < right.ID
++	})
++}
++
++func (c *FlowMusicClient) availableMusicCredits(ctx context.Context, account domain.Account) (float64, error) {
++	var payload struct {
++		Data map[string]any `json:"data"`
++	}
++	if err := c.doJSON(ctx, account.ProxyURL, http.MethodGet, c.cfg.FlowMusicBaseURL+"/__api/billing/credits", &account, nil, &payload, nil); err != nil {
++		return 0, err
++	}
++	raw, _ := directValue(payload.Data, "credits_remaining")
++	remaining, ok := numericValue(raw)
++	if !ok || math.IsNaN(remaining) || math.IsInf(remaining, 0) || remaining < 0 {
++		return 0, fmt.Errorf("remaining music credits are unavailable")
++	}
++	return remaining, nil
++}
++
++// A verified rejection of the initial POST permits moving to another account.
++// A timeout or a failed stream can leave a billable job behind.
++func isPriorityAccountRejection(err error) bool {
++	var upstream *upstreamHTTPError
++	if !errors.As(err, &upstream) {
++		return false
++	}
++	switch upstream.StatusCode {
++	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired, http.StatusTooManyRequests:
++		return true
++	case http.StatusBadRequest, http.StatusUnprocessableEntity:
++		body := strings.ToLower(upstream.Body)
++		return strings.Contains(body, "insufficient credits") || strings.Contains(body, "insufficient_credits") ||
++			strings.Contains(body, "credits_exhausted") || strings.Contains(body, "not enough credits")
++	default:
++		return false
++	}
++}
+diff --git a/internal/service/priority_test.go b/internal/service/priority_test.go
+new file mode 100644
+index 0000000..3ddacc5
+--- /dev/null
++++ b/internal/service/priority_test.go
+@@ -0,0 +1,136 @@
++package service
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"reflect"
++	"sync"
++	"testing"
++	"time"
++
++	"flowmusic2api/internal/config"
++	"flowmusic2api/internal/domain"
++	"flowmusic2api/internal/storage"
++	"flowmusic2api/internal/store"
++)
++
++func TestMusicPriorityGeneration(t *testing.T) {
++	tests := []struct {
++		name         string
++		firstCredits int
++		disabled     bool
++		rejection    int
++		streamError  int
++		requests     int
++		wantAttempts []string
++		wantLogs     int
++		wantError    bool
++	}{
++		{name: "reuse the first account", firstCredits: 12, requests: 2, wantAttempts: []string{"first", "first"}, wantLogs: 2},
++		{name: "skip exhausted account", firstCredits: 0, requests: 1, wantAttempts: []string{"next"}, wantLogs: 1},
++		{name: "skip disabled account", firstCredits: 12, disabled: true, requests: 1, wantAttempts: []string{"next"}, wantLogs: 1},
++		{name: "move after explicit quota rejection", firstCredits: 12, rejection: 429, requests: 1, wantAttempts: []string{"first", "next"}, wantLogs: 1},
++		{name: "move after explicit authorization rejection", firstCredits: 12, rejection: 403, requests: 1, wantAttempts: []string{"first", "next"}, wantLogs: 1},
++		{name: "stop on ambiguous submit failure", firstCredits: 12, rejection: 503, requests: 1, wantAttempts: []string{"first"}, wantLogs: 1, wantError: true},
++		{name: "keep accepted job on its account", firstCredits: 12, streamError: 403, requests: 1, wantAttempts: []string{"first"}, wantLogs: 1, wantError: true},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			ctx := context.Background()
++			var mu sync.Mutex
++			var attempts []string
++			const clipID = "11111111-1111-1111-1111-111111111111"
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				auth := r.Header.Get("Authorization")
++				switch r.URL.Path {
++				case "/__api/billing/credits":
++					credits := 12
++					if auth == "Bearer first" {
++						credits = test.firstCredits
++					}
++					writeTestJSON(t, w, map[string]any{"data": map[string]int{"credits_remaining": credits}})
++				case "/__api/conversation":
++					account := "next"
++					if auth == "Bearer first" {
++						account = "first"
++					}
++					mu.Lock()
++					attempts = append(attempts, account)
++					mu.Unlock()
++					if account == "first" && test.rejection != 0 {
++						http.Error(w, "test rejection", test.rejection)
++						return
++					}
++					writeTestJSON(t, w, map[string]string{"job_id": "fixture"})
++				case "/__api/messages/fixture/stream":
++					if test.streamError != 0 {
++						http.Error(w, "test stream failure", test.streamError)
++						return
++					}
++					w.Header().Set("Content-Type", "text/event-stream")
++					_, _ = fmt.Fprintf(w, "data: {\"clip_id\":%q}\n\ndata: [DONE]\n\n", clipID)
++				case "/__api/clips":
++					writeTestJSON(t, w, map[string]any{"clips": map[string]any{
++						clipID: map[string]string{"id": clipID, "audio_url": "https://example.test/test.mp3"},
++					}})
++				default:
++					t.Errorf("unexpected local upstream path: %s", r.URL.Path)
++					w.WriteHeader(http.StatusNotFound)
++				}
++			}))
++			defer upstream.Close()
++			dir := t.TempDir()
++			cfg := config.Config{
++				DataDir: dir, CacheDir: dir, DatabaseDriver: "sqlite", DatabaseURL: filepath.Join(dir, "music.db"),
++				FlowMusicBaseURL: upstream.URL, UpstreamTimeout: 3 * time.Second, GenerationTimeout: 3 * time.Second,
++			}
++			db, err := store.New(ctx, cfg)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer db.Close()
++			if err := db.Migrate(ctx); err != nil {
++				t.Fatal(err)
++			}
++			if err := db.EnsureDefaults(ctx); err != nil {
++				t.Fatal(err)
++			}
++			for _, name := range []string{"next", "first"} {
++				id, err := db.CreateAccount(ctx, domain.Account{Email: name + "@example.test", ProtocolMode: "bearer", FlowBearer: name})
++				if err != nil {
++					t.Fatal(err)
++				}
++				if test.disabled && name == "first" {
++					if err := db.SetAccountActive(ctx, id, false); err != nil {
++						t.Fatal(err)
++					}
++				}
++			}
++			client := NewFlowMusicClient(cfg)
++			cache := storage.NewCache(cfg, db, NewHTTPClient(cfg, ""))
++			generation := NewGenerationService(cfg, db, NewAccountService(cfg, db, client), client, cache)
++			for i := 0; i < test.requests; i++ {
++				out, err := generation.GenerateInAccountOrder(ctx, "fixture prompt", "flowmusic-producer-standard",
++					[]string{"FIRST@example.test", "next@example.test"})
++				if (err != nil) != test.wantError {
++					t.Fatalf("generation error = %v, wanted error: %v", err, test.wantError)
++				}
++				if err == nil && (out.JobID == "" || len(out.Clips) != 1) {
++					t.Fatalf("incomplete result: %+v", out)
++				}
++			}
++			mu.Lock()
++			if !reflect.DeepEqual(attempts, test.wantAttempts) {
++				t.Errorf("submission attempts = %v; want %v", attempts, test.wantAttempts)
++			}
++			mu.Unlock()
++			logs, err := db.GetLogs(ctx, 20)
++			if err != nil || len(logs) != test.wantLogs {
++				t.Fatalf("logs = %v; err = %v; want %d record(s)", logs, err, test.wantLogs)
++			}
++		})
++	}
++}

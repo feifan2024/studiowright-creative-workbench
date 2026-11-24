@@ -27,6 +27,7 @@ class GeminiAuthorizationTest(unittest.TestCase):
                 items = [{'key': 'flow-account-' + key}]
                 official = pool.official
                 official.runtime = SimpleNamespace(inventory=lambda: {key: True})
+                official.account_quotas = lambda _: {}
                 original = str(uuid.uuid4())
                 official.generate(key, 'original user message', original, items)
                 job = official.claim()

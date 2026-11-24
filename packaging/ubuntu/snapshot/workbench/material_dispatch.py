@@ -8,7 +8,7 @@ from pathlib import Path
 
 from material_backfill import has_labels
 from material_vision import analyze, read_media, PROMPT, SHOT_PROMPT, clean_shot_notes
-from official_pool import busy_official, DEFAULT_MAX_CONCURRENCY
+from official_pool import account_quota_restriction, busy_official, DEFAULT_MAX_CONCURRENCY
 from official_runtime import MODEL
 
 
@@ -53,6 +53,7 @@ def claim(pool, auto):
     official=pool.official
     available=official.runtime.inventory()
     if not any(available.values()):return None
+    quota=official.account_quotas(available)
     table='auto_material_jobs' if auto else 'material_backfill_jobs'
     with pool.connection() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -80,9 +81,10 @@ def claim(pool, auto):
             # A material job only uses an idle eligible account; normal dialogue has priority.
             if db.execute("SELECT 1 FROM requests r JOIN official_jobs j USING(request_id) WHERE r.status='queued' LIMIT 1").fetchone():
                 return None
-            eligible=sorted(k for k in available if official.reason(db,k,available) is None and not busy_official(db,k))
+            eligible=sorted(k for k in available if official.reason(db,k,available) is None
+                            and not busy_official(db,k) and not account_quota_restriction(MODEL,quota.get(k,{}),now))
             if not eligible:return None
-            key=official.rotate_account(db,eligible,advanced=False)
+            key=official.priority_order(eligible)[0]
             request_id=str(uuid.uuid4())
             db.execute("INSERT INTO requests(request_id,account_key,prompt_digest,status,created,note,selection) VALUES(?,?,?,'dispatching',?,?,?)",
                        (request_id,key,hashlib.sha256(((SHOT_PROMPT if shot else PROMPT)+ident).encode()).hexdigest(),now,'正在分析素材；固定账号，不会自动重试。','auto'))

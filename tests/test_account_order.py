@@ -1,9 +1,8 @@
-from contextlib import closing
 import json
 import os
-import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -12,6 +11,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot/workbench'))
 from official_pool import OfficialPool
 from live_pool import RealPool
+from dispatch_limit import DispatchBusy
 from material_dispatch import claim as claim_material
 
 KEYS = [f'{i:064x}' for i in range(1, 5)]
@@ -34,10 +34,10 @@ class AccountOrderTest(unittest.TestCase):
             saved = json.loads((Path(tmp) / 'account-order.json').read_text(encoding='utf-8'))
             self.assertEqual(saved, {'schema_version': 1, 'order': order})
             self.assertEqual(pool.saved_account_order(), order)
-            self.assertEqual(pool.circle_order(sorted(KEYS)), order)
+            self.assertEqual(pool.priority_order(sorted(KEYS)), order)
             # Eligible keys missing from the saved order join at the end.
             partial = [KEYS[2], KEYS[1]]
-            self.assertEqual(pool.circle_order(partial), [KEYS[2], KEYS[1]])
+            self.assertEqual(pool.priority_order(partial), [KEYS[2], KEYS[1]])
 
     def test_save_rejects_duplicates_and_foreign_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -57,29 +57,19 @@ class AccountOrderTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 pool.save_account_order(KEYS[:3])  # one key missing
 
-    def test_circle_falls_back_to_sorted_without_saved_order(self):
+    def test_priority_follows_visible_order_without_saved_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = bare_pool(tmp)
             eligible = sorted(KEYS, reverse=True)
-            self.assertEqual(pool.circle_order(eligible), eligible)
+            self.assertEqual(pool.priority_order(eligible), eligible)
             self.assertEqual(pool.saved_account_order(), [])
 
-    def test_rotation_continues_after_the_last_account_becomes_unavailable(self):
-        with tempfile.TemporaryDirectory() as directory, closing(sqlite3.connect(':memory:')) as db:
-            pool = bare_pool(directory)
-            pool.save_account_order([KEYS[2], KEYS[0], KEYS[3], KEYS[1]])
-            db.executescript("""
-                CREATE TABLE official_pool_cursor(id INTEGER PRIMARY KEY,last_account TEXT);
-                CREATE TABLE official_advanced_pool_cursor(id INTEGER PRIMARY KEY,last_account TEXT);
-            """)
-
-            self.assertEqual(pool.rotate_account(db, KEYS, advanced=False), KEYS[2])
-            self.assertEqual(pool.rotate_account(db, KEYS, advanced=False), KEYS[0])
-            self.assertEqual(pool.rotate_account(db, [KEYS[1], KEYS[3]], advanced=True), KEYS[3])
-            still_available = [KEYS[1], KEYS[2], KEYS[3]]
-            self.assertEqual(pool.rotate_account(db, still_available, advanced=False), KEYS[3])
-            self.assertEqual(pool.rotate_account(db, KEYS, advanced=False), KEYS[1])
-            self.assertEqual(pool.rotate_account(db, [KEYS[1], KEYS[3]], advanced=True), KEYS[1])
+    def test_shared_order_can_include_an_account_outside_gemini(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pool = bare_pool(directory, configured=KEYS[:3])
+            order = list(reversed(KEYS))
+            self.assertEqual(pool.save_account_order(order, visible_accounts=KEYS), order)
+            self.assertEqual(pool.priority_order(KEYS[:3]), list(reversed(KEYS[:3])))
 
     @unittest.skipUnless(os.name == 'posix', 'Workbench account pool requires Linux')
     def test_flash_chat_and_material_jobs_share_the_saved_order(self):
@@ -88,6 +78,8 @@ class AccountOrderTest(unittest.TestCase):
             try:
                 accounts = dict.fromkeys(KEYS, True)
                 official = pool.official
+                quotas = {}
+                official.account_quotas = lambda _: quotas
                 official.runtime = SimpleNamespace(
                     settings=lambda: {'accounts': accounts}, inventory=lambda: accounts,
                     text_models=lambda: {},
@@ -97,15 +89,28 @@ class AccountOrderTest(unittest.TestCase):
 
                 first, _ = official.generate('auto', 'fixture', str(uuid.uuid4()), items)
                 self.assertEqual(first['account_key'], KEYS[2])
+                another, _ = official.generate('auto', 'second fixture', str(uuid.uuid4()), items)
+                self.assertEqual(another['account_key'], KEYS[2])
+                job = official.claim()
+                official.finish(job, {'status': 'completed', 'response': 'fixture reply', 'native': str(uuid.uuid4())})
+                quotas[KEYS[2]] = {'status':'ok','checked_at':time.time(),'five_hour':{'remaining_percent':0}}
+                with self.assertRaises(DispatchBusy):
+                    official.generate('auto','follow up',str(uuid.uuid4()),items,conversation_id=first['conversation_id'])
+                rerouted = official.claim()
+                self.assertEqual(rerouted['request_id'], another['request_id'])
+                self.assertEqual(rerouted['account_key'], KEYS[0])
+                official.finish(rerouted, {'status': 'completed', 'response': 'fixture reply', 'native': str(uuid.uuid4())})
                 with pool.connection() as db:
-                    db.execute("UPDATE requests SET status='completed' WHERE request_id=?", (first['request_id'],))
                     db.execute("INSERT INTO auto_material_jobs(asset_id,status,added,updated) VALUES(?,'waiting',1,1)", ('a' * 64,))
 
                 material = claim_material(pool, auto=True)
                 self.assertIsNotNone(material)
                 self.assertEqual(material['account'], KEYS[0])
                 third, _ = official.generate('auto', 'fixture', str(uuid.uuid4()), items)
-                self.assertEqual(third['account_key'], KEYS[3])
+                self.assertEqual(third['account_key'], KEYS[0])
+                quotas.clear()
+                follow_up, _ = official.generate('auto','follow up',str(uuid.uuid4()),items,conversation_id=first['conversation_id'])
+                self.assertEqual(follow_up['account_key'], KEYS[2])
             finally:
                 pool.close()
 

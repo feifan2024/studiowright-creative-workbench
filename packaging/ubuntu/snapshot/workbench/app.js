@@ -138,7 +138,7 @@ async function refreshChannelStatus() {
       const data = await getJson('/api/channel-status', {timeoutMs:8000});
       if (data.schema_version !== 1 || data.available !== true || !Array.isArray(data.accounts)) throw new Error('unknown');
       state.channelStatus = data; channelReadFailed = false;
-      if (accountOrderOverride && JSON.stringify(data.account_order) === JSON.stringify(accountOrderOverride)) accountOrderOverride = null;
+      if (accountOrderOverride && JSON.stringify(data.shared_account_order || data.account_order) === JSON.stringify(accountOrderOverride)) accountOrderOverride = null;
     } catch (_) { channelReadFailed = true; }
     renderConnections();
     if (state.snapshot && state.view === 'overview') renderAccountInsights(state.snapshot, $('overviewInsights'));
@@ -474,7 +474,7 @@ function renderGeminiAccountOptions(select, accounts) {
   const selected = select.value;
   const poolAccounts = accounts.filter(item=>!item.gemini_removed);
   const autoCount = poolAccounts.filter((item) => geminiAccountAvailability(item).auto).length;
-  const markup = `<option value="auto"${autoCount ? '' : ' disabled'}>轮询分配账号（${autoCount ? autoCount + ' 个可参与' : '暂无符合条件账号'}）</option>`
+  const markup = `<option value="auto"${autoCount ? '' : ' disabled'}>按号池优先顺序分配（${autoCount ? autoCount + ' 个可参与' : '暂无符合条件账号'}）</option>`
     + poolAccounts.map((item) => {
       const availability = geminiAccountAvailability(item);
       return `<option value="${esc(item.key.slice('flow-account-'.length))}"${availability.manual ? '' : ' disabled'}>${esc(item.email || item.label || item.profile)} · ${esc(availability.reason)}</option>`;
@@ -811,7 +811,7 @@ function renderOverview() {
   const flowAudit=governanceAudits.flow;
   if (snapshot?.flow_state?.available && !snapshot.flow_state.simulated && !flowAudit?.running &&
       (!flowAudit || Date.now()-(flowAudit.startedAt || 0)>60000)) void startGovernanceAudit('flow',false);
-  const dataNotice = snapshot?.flow_state?.simulated ? "当前来源不是正式后台，不能作为真实账号或任务使用。" : "Flow 保留原后台；Gemini 使用官方调用。新对话轮询分配，多轮固定账号。";
+  const dataNotice = snapshot?.flow_state?.simulated ? "当前来源不是正式后台，不能作为真实账号或任务使用。" : "Flow 保留原后台；Gemini 使用官方调用。新对话按号池优先顺序分配，多轮固定账号。";
   $("sourceNotice").textContent = dataNotice + (snapshot?.flow_state?.skipped_projects || snapshot?.flow_state?.skipped_tasks ? " 有格式异常的记录未显示，请在原后台查看。" : "");
   const readable = snapshot?.flow_state?.available === true;
   const projects = readable ? snapshot.projects : [];
@@ -1472,7 +1472,7 @@ function renderAccountInsights(snapshot, target) {
     : musicTotal === 0 ? '账号池为空' : musicReady < musicTotal ? `${musicTotal - musicReady} 个未就绪` : '';
   const musicRingMarkup = `<button type="button" class="dashboard-ring-item governance-entry" data-music-readiness aria-label="音乐一键就绪，${musicKnown ? `就绪 ${amount(musicReady)} / ${musicTotal}` : '状态待读取'}"><span>MUSIC</span><span class="insight-ring insight-ring--music ${musicKnown ? '' : 'is-unknown'}" data-dashboard-ring="MUSIC"><span class="governance-ring-center"><strong>${musicKnown ? amount(musicReady) : '—'}<small> / ${musicTotal || '—'}</small></strong><span>就绪账号</span></span></span><span class="governance-alert" data-govern-alert="music" ${musicLabel ? '' : 'hidden'}>${esc(musicLabel)}</span></button>`;
   target.innerHTML = `<div class="dashboard-metrics"><div class="dashboard-rings">${ring('FLOW',flowReady,flowStale ? '同步暂缓 · 上次结果' : null)}${ring('GEMINI',eligible,geminiVerifyCount ? `${geminiVerifyCount} 个待 Google 核验` : (geminiPending || geminiBlocked ? [geminiBlocked ? geminiBlocked+' 个受限' : '',geminiPending ? geminiPending+' 个待确认' : ''].filter(Boolean).join(' · ') : null))}${musicRingMarkup}</div><div class="dashboard-primary"><span>Flow 就绪账号积分</span><strong>${amount(usableBalance)}</strong><small>${amount(flowReady)} 个就绪账号 · 全账号总余额 ${amount(flow?.pool_balance)}</small></div><div class="dashboard-primary"><span>Gemini 最近成功平均耗时</span><strong>${latency}<em>${latency==='—' ? '' : ' 秒'}</em></strong><small>${eligible!=null ? `派发就绪 ${amount(eligible)} / ${geminiTotal} · ` : ''}每账号仅取最近一次成功记录</small></div></div>
-  <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话轮询分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
+  <details class="dashboard-runtime-details" data-dashboard-running ${opened ? 'open' : ''}><summary>运行记录与统计说明<span>账号状态、用量和检查结果</span></summary><div class="dashboard-runtime-columns"><article><header><h3>Flow 运行记录</h3><div><button type="button" class="insight-account-link" data-insight-accounts>查看账号 →</button></div></header><p>${esc(flowCurrent)}</p><dl><div><dt>昨日记录用量</dt><dd>${esc(recorded)}</dd></div><div><dt>就绪账号积分</dt><dd>${amount(usableBalance)}</dd></div></dl><p>${esc(coverage)}；按任务记录计算，非实际账单。</p><p>未提供积分总上限，不将余额换算为额度百分比。</p><p>${flow?.updated ? 'Flow 数据更新于 '+esc(dateTime(flow.updated)) : 'Flow 数据暂未读取'}</p><div class="insight-activation-feedback" data-activation-feedback="flow" hidden></div></article><article><header><h3>Gemini 运行记录</h3><button type="button" class="insight-account-link" data-insight-conversations>进入对话 →</button></header><p>${esc(officialSummary())}</p><p>官方账号池：${state.channelStatus?.production_send_available ? '已接入' : '暂不可用'}${dispatch ? ` · 排队 ${amount(dispatch.queued)} · 执行中 ${amount(dispatch.active)}` : ''}。</p><p>新对话按号池优先顺序分配，多轮对话固定账号；按当前派发限制使用。</p><p>圆环与账号页使用同一份就绪状态；Gemini 以云端验活结果为准。</p><p>${state.channelStatus?.read_at ? '实测记录读取于 '+esc(dateTime(state.channelStatus.read_at)) : '实测记录暂未读取'}。耗时不含旧通道；长期稳定性持续观察。</p><div class="insight-activation-feedback" data-activation-feedback="gemini" hidden></div></article></div></details>`;
   scope.querySelector('.dashboard-metrics').insertAdjacentHTML('afterend',
     '<p data-governance-status role="status" class="sr-only"></p>');
   $('dashboardRuntime').replaceChildren(scope.querySelector('[data-dashboard-running]'));
@@ -2287,7 +2287,7 @@ const bareAccountKey = key => String(key || "").replace(/^flow-account-/, "");
 let accountOrderOverride = null;
 const accountDrag = {key: null};
 function applyAccountOrder(list) {
-  const order = accountOrderOverride || state.channelStatus?.account_order;
+  const order = accountOrderOverride || state.channelStatus?.shared_account_order || state.channelStatus?.account_order;
   if (!Array.isArray(order) || !order.length) return list;
   const rank = new Map(order.map((key, index) => [key, index]));
   return [...list].sort((x, y) =>
@@ -2495,7 +2495,7 @@ function renderAccounts() {
     const geminiVerify = (geminiRow && geminiRow.status !== 'ready' && geminiRow.status !== 'queue') ? `<button type="button" class="button button-light" style="margin-top:6px" data-gemini-verify>开始 Gemini 验证</button>` : '';
     const removeGemini = item.gemini_registered && !item.gemini_removed
       ? `<button class="button button-light" type="button" data-remove-gemini="${accountKey}" aria-label="从 Gemini 号池删除 ${esc(identity)}"${item.gemini_busy ? ' disabled title="该账号正在处理 Gemini 请求"' : ''}>删除 Gemini 账号</button>` : '';
-    return `<article class="account-card${cardState}"${item.gemini_removed ? '' : ` draggable="true" data-drag-key="${esc(quotaKey)}"`}>
+    return `<article class="account-card${cardState}" draggable="true" data-drag-key="${esc(quotaKey)}">
       <div class="account-card-heading">${accountAvatarMarkup(identity, item.gemini_model_options)}<div class="account-identity"><span class="account-alias">${esc(item.label || item.profile)}</span><h3 title="${esc(identity)}">${esc(identity)}</h3></div><span class="account-login ${item.flow_login === 'verified' && !googleVerification ? 'is-ready' : ''}">${esc(login)}</span>
         <div class="account-detail-anchor"><details class="account-details"><summary aria-label="查看 ${esc(identity)} 的详细状态" aria-controls="account-detail-${accountKey}">详情</summary></details><div id="account-detail-${accountKey}" class="account-detail-popup"><strong>账号状态详情</strong><p>Flow：${esc(flowStatusText)} · ${esc(freshness + observed)}。${hasBalance ? '剩余 ' + esc(balance) + ' 积分。' : ''}未提供积分总额度。</p>${coolingInfo ? `<p>${esc(coolingInfo)}</p>` : ''}${item.gemini_removed ? '<p>Gemini 已从号池删除，历史对话可在算力中心查看。</p>' : officialDetails(official)}<p>Flow · ${esc(flowPerformance)}</p>${issues.length ? `<div class="account-detail-issues"><strong>状态说明</strong>${issues.map(issue => `<p><b>${esc(issue.title)}</b><br>${esc(issue.impact)} ${esc(issue.action)}</p>`).join('')}</div>` : ''}</div></div></div>
       <div class="account-services"><div class="account-service account-service-flow${flowNeedsAttention ? ' is-service-issue' : ''}" role="group" aria-label="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}" title="${esc(flowIssueTitle || ('Flow：' + flowStatusText))}"><div class="account-service-heading"><span>Flow</span><strong class="account-health ${flowPaused ? 'is-paused' : cooling ? 'is-cooling' : flowRow?.status!=='ready' ? 'is-unknown' : ''}">${esc(flowStatusText)}</strong></div><div class="account-flow-value"><div title="${esc(flowBalanceTitle)}"><strong>${esc(balance)}</strong><small class="account-quota-reset">下次积分到账 ${esc(flowNextCredit || '待官方更新')}${flowNextCredit && !item.flow_balance_fresh ? '（上次读取）' : ''}</small></div>${cooling ? `<div class="account-cooldown" data-risk-paused="${flowPaused}"${cooldownEnd !== null ? ` data-cooldown-end="${cooldownEnd}"` : ' aria-label="冷却中，剩余时间待核对"'}><span class="account-cooldown-time">—</span><span class="account-cooldown-label">冷却中</span></div>` : '<span class="account-credit-icon" aria-hidden="true">✦</span>'}</div></div>
@@ -3456,7 +3456,7 @@ function syncConversationControls(announce = false) {
   effortSelect.disabled=locked || levels.length<2;
   $('chatModelNote').textContent=imageAnalysis ? 'API 识图记录 · 每次识图独立提问。' : archived ? '历史归档只读；原问答与草稿保留，请新建官方对话。' : '首次发送后固定账号和模型。续聊时可调整思考等级。';
   $('chatSend').disabled=!ready || !item || archived || pending || chatSending || !!item.hidden || !geminiSelectionReady(select.value);
-  if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理；可在原消息下查看处理和重试进度。' : !ready ? '官方调用暂不可用，草稿保留。' : '新对话轮询分配；多轮固定账号。单条新文字对话确认超时后，最多用原账号重试三次。';
+  if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理；可在原消息下查看处理和重试进度。' : !ready ? '官方调用暂不可用，草稿保留。' : '新对话按号池优先顺序分配；多轮固定账号。单条新文字对话确认超时后，最多用原账号重试三次。';
 }
 
 function renderRealTurnAccountLabels() {
@@ -4671,7 +4671,7 @@ $('overviewApiCopy').addEventListener('click', () => copyCompleteApiDocument($('
 let dispatchConcurrencySaving = false;
 let dispatchConcurrencySequence = 0;
 let dispatchConcurrencyMaximum = null;
-function dispatchStateText(paused) { return state.channelStatus?.production_send_available ? '官方调用已接入 · 新对话轮询，多轮固定账号，单条新文字对话确认超时后，最多用原账号重试三次。' : '官方调用暂不可用；消息不会自动改走旧通道。'; }
+function dispatchStateText(paused) { return state.channelStatus?.production_send_available ? '官方调用已接入 · 新对话按号池优先顺序分配，多轮固定账号，单条新文字对话确认超时后，最多用原账号重试三次。' : '官方调用暂不可用；消息不会自动改走旧通道。'; }
 function updateDispatchState(paused) {
   state.dispatchPaused = typeof paused === 'boolean' ? paused : null;
   const detail = document.querySelector('[data-gemini-dispatch-state]');

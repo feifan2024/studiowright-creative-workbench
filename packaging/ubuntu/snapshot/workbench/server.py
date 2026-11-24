@@ -1318,7 +1318,17 @@ def music_service_status():
     return status
 
 
-def music_generate(prompt, model):
+def music_account_order(official, items):
+    names = {}
+    for item in items:
+        key = item.get('key','').removeprefix('flow-account-')
+        email = item.get('email')
+        if re.fullmatch(r'[0-9a-f]{64}',key) and isinstance(email,str) and email.strip():
+            names[key] = email.strip().lower()
+    return list(dict.fromkeys(names[key] for key in official.priority_order(list(names))))
+
+
+def music_generate(prompt, model, *, account_order=None):
     if not isinstance(prompt, str):
         raise ValueError('请填写音乐描述。')
     if model is not None and not isinstance(model, str):
@@ -1335,7 +1345,12 @@ def music_generate(prompt, model):
     if not key:
         raise ValueError('音乐服务未配置（缺少 FlowMusic2API 凭据）。')
     # The upstream call blocks until the song finishes (usually 1-3 minutes).
-    result = music_call('POST', '/v1/audio/generations', body={'model': model, 'prompt': prompt},
+    path = '/v1/audio/generations'
+    body = {'model': model, 'prompt': prompt}
+    if account_order is not None:
+        path += '/priority'
+        body['account_order'] = account_order
+    result = music_call('POST', path, body=body,
                         token=key, timeout=660)
     clips = []
     for clip in result.get('data') or []:
@@ -1393,10 +1408,20 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
     from music_recovery import recover as recover_music
     music_holder = []
     music_lock = threading.Lock()
+    def generate_music_for_pool(prompt, model):
+        order = []
+        if real_pool:
+            accounts = sources.snapshot().get('real_accounts',{})
+            if accounts.get('available') is True:
+                order = music_account_order(real_pool.official, accounts.get('items',[]))
+            elif real_pool.official.saved_account_order():
+                raise ValueError('暂时无法核对已保存的音乐账号顺序，尚未提交。')
+        return music_generate(prompt,model,account_order=order)
+
     def get_music_jobs():
         with music_lock:
             if not music_holder:
-                music_holder.append(MusicJobs(real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench', music_generate, music_library_ingest, real_pool.maintenance if real_pool else lambda:False, recover=recover_music))
+                music_holder.append(MusicJobs(real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench', generate_music_for_pool, music_library_ingest, real_pool.maintenance if real_pool else lambda:False, recover=recover_music))
             return music_holder[0]
     frontend_connections = threading.BoundedSemaphore(16)
     coordinator = coordinator or Coordinator()
@@ -1538,7 +1563,9 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 data = read_status(real_pool.path, real_pool.official.public_status()) if real_pool else {'schema_version': 1, 'available': False}
                 if real_pool and data.get('available'):
                     removed = real_pool.removed_gemini_accounts()
-                    data['account_order'] = [key for key in real_pool.official.saved_account_order() if key not in removed]
+                    order = real_pool.official.saved_account_order()
+                    data['shared_account_order'] = order
+                    data['account_order'] = [key for key in order if key not in removed]
                 return self.json_response(200 if data.get('available') else 503, data)
             if self.path == '/api/music/records':
                 state_dir = real_pool.state_dir if real_pool else Path.home()/'.local/state/creative-unified-workbench'
@@ -1861,7 +1888,7 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                 try:
                     from music_metadata import validate_metadata, attach_metadata
                     metadata=validate_metadata({k:raw[k] for k in ('tags','style_id') if k in raw})
-                    result = attach_metadata(music_generate(prompt, model),prompt,model or 'lyria-fast','',metadata)
+                    result = attach_metadata(generate_music_for_pool(prompt, model),prompt,model or 'lyria-fast','',metadata)
                 except ValueError as exc:
                     return self.json_response(400, {'error':str(exc)})
                 except (OSError,TimeoutError) as exc:
@@ -1923,7 +1950,11 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                     return self.json_response(400, {'error':'请求格式不正确。'})
                 order = raw.get('order') if isinstance(raw,dict) else None
                 try:
-                    saved = real_pool.official.save_account_order(order)
+                    accounts = sources.snapshot().get('real_accounts',{})
+                    if accounts.get('available') is not True:
+                        return self.json_response(503, {'error':'账号名单暂不可读取。'})
+                    visible = {item.get('key','').removeprefix('flow-account-') for item in accounts.get('items',[])}
+                    saved = real_pool.official.save_account_order(order,visible_accounts=visible)
                 except ValueError as exc:
                     return self.json_response(400, {'error':str(exc)})
                 except (OSError,TypeError,AttributeError):

@@ -48,7 +48,7 @@ class Effort(unittest.TestCase):
 
     @unittest.skipUnless(os.name=='posix','Workbench account pool requires Linux')
     @patch('official_pool.reader_for')
-    def test_advanced_auto_filters_models_and_quota_and_keeps_its_own_rotation(self,reader_for):
+    def test_advanced_auto_prefers_the_first_supported_account_until_quota_changes(self,reader_for):
         a,b,standard=('a'*64,'b'*64,'c'*64)
         keys=(a,b,standard)
         models={a:{NEON_FAMILY+'-high',HYDROGEN_FAMILY+'-low'},b:{NEON_FAMILY+'-high'}}
@@ -58,7 +58,6 @@ class Effort(unittest.TestCase):
             pool=RealPool(directory,directory)
             official=pool.official
             official.runtime=S(inventory=lambda:dict.fromkeys(keys,True),text_models=lambda:models)
-            official.circle_order=lambda eligible:eligible
             items=[{'key':'flow-account-'+k} for k in keys]
             def send(model, rid=None):
                 request=rid or str(uuid.uuid4())
@@ -67,15 +66,14 @@ class Effort(unittest.TestCase):
             self.assertEqual(send(NEON_FAMILY,rid)[0]['account_key'],a)
             self.assertFalse(send(NEON_FAMILY,rid)[1])
             self.assertEqual(send(DEFAULT)[0]['account_key'],a)
-            self.assertEqual(send(NEON_FAMILY)[0]['account_key'],b)
+            self.assertEqual(send(NEON_FAMILY)[0]['account_key'],a)
             self.assertEqual(send(HYDROGEN_FAMILY+'-low')[0]['account_key'],a)
             quotas[a]={'status':'ok','checked_at':time.time(),'five_hour':{'remaining_percent':0}}
             self.assertEqual(send(NEON_FAMILY)[0]['account_key'],b)
             with self.assertRaises(DispatchBusy):
                 send(HYDROGEN_FAMILY+'-low')
             claimed=official.claim()
-            self.assertEqual(claimed['model'],DEFAULT)
-            self.assertEqual(pool.get(rid)['reason'],'quota_exhausted')
+            self.assertEqual((claimed['request_id'],claimed['account_key'],claimed['model']), (rid,b,NEON_FAMILY+'-high'))
 
     @unittest.skipUnless(os.name=='posix','Workbench account pool requires Linux')
     @patch('official_pool.reader_for')
@@ -87,7 +85,6 @@ class Effort(unittest.TestCase):
             pool=RealPool(directory,directory)
             official=pool.official
             official.runtime=S(inventory=lambda:{first:True,second:True},text_models=lambda:models)
-            official.circle_order=lambda eligible:eligible
             items=[{'key':'flow-account-'+k} for k in models]
             rid=str(uuid.uuid4())
             request,_=official.generate('auto','first',rid,items,model=NEON_FAMILY)
@@ -126,7 +123,6 @@ class Effort(unittest.TestCase):
             official = pool.official
             official.runtime = S(inventory=lambda:dict.fromkeys((first,second,standard),True),
                                  text_models=lambda:{first:{neon},second:{neon}})
-            official.circle_order = lambda keys:keys
             items = [{'key':'flow-account-'+k} for k in (first,second,standard)]
             def submit(rid, fallback='gemini-3.8-flash-low'):
                 return official.generate('auto','test',rid,items,model=neon,fallback_model=fallback)

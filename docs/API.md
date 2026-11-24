@@ -98,7 +98,7 @@ Gemini CLI 账号池默认总并发 20，与 Flow 的 1～5 并发设置独立�
 | `gemini-4-hydrogen` | `low`、`medium`、`high`、`xhigh` | `high` |
 | `gemini-3.8-flash` | `low`、`medium`、`high` | `medium` |
 
-高级模型用于文字对话。也可传完整型号，如 `gemini-4-neon-xhigh`。若同时传 `effort`，两者必须一致，否则返回 HTTP 400。选择 `account: "auto"` 时，高级池只在已开通所选型号和档位、授权就绪且无已知额度限制的账号中轮询。已登记账号数和当下可派发账号数会分别显示。
+高级模型用于文字对话。也可传完整型号，如 `gemini-4-neon-xhigh`。若同时传 `effort`，两者必须一致，否则返回 HTTP 400。选择 `account: "auto"` 时，按账号页顺序优先选用第一个开通所选模型、授权就绪且无已知额度限制的账号。Flash 同样跳过已知额度用尽的账号。已登记账号数和当下可派发账号数会分别显示。
 
 - 新对话首轮使用 `account: "auto"` 时，可传 `fallback_model`，明确允许降级。支持 `gemini-3.8-flash`（等同于 `gemini-3.8-flash-medium`）及 Flash 的三个完整档位。省略该字段时只使用请求的高级型号。Flash 的档位由 `fallback_model` 决定。
 - 入队或实际派发前若没有可用的高级账号，工作台用可用的 Flash 账号继续处理同一请求。入队前两个模型池都不可用会返回 HTTP 409。入队后仍无可用账号时，按原编号查询 `failed` 和 `reason`。
@@ -121,7 +121,7 @@ print(submission["model"], submission["fallback"])
 
 **账号与额度监控**可在工作台「总览 → Gemini 各账号额度」查看。工作台本机面板端口 `18920` 的 `GET /api/channel-status` 返回 `dispatch.advanced_pool`，`GET /api/official-quota` 返回各高级账号的 5 小时及每周剩余与恢复时间。`advanced_pool.quota_scope` 为 `gemini_models_shared`，表示 Hydrogen 与 Neon 共用同一个 Gemini Models 额度池。`advanced_pool.windows.*.total_remaining_percent` 是可读账号剩余百分比的合计，`average_remaining_percent` 是账号平均剩余，不代表供应商公布的绝对积分。两个监控接口由面板提供，程序调用端口 `18922` 提供对话提交及结果查询。额度按账号共享，可读的高级账号每 5 分钟刷新。
 
-接着问时沿用 `conversation_id`，为新消息生成新的请求编号。查回复用下方「结果与下载」中的 Gemini 查询接口。
+接着问时沿用 `conversation_id`，为新消息生成新的请求编号。原账号受限时续聊暂缓。自动分配的新请求仅在确认还未发送时允许切换账号。查回复用下方「结果与下载」中的 Gemini 查询接口。
 
 仅在确认消息未发出、且遇到临时启动故障时，工作台才用原账号自动重试一次。已收到部分回复或结果不明时不会重发。用原请求编号查询，文字对话的 `attempts` 记录每次尝试的状态、原因和耗时。
 
@@ -284,6 +284,8 @@ if record.get("task_id"):
 错误通常返回 `{"error":"原因"}`。`401` 检查密钥，`400` 检查请求参数，`404` 核对路径或编号，`409` 先查询原任务。`GET /health` 检查 18922 API 是否可访问，无需密钥。
 
 ## 音乐生成与音频
+
+音乐新任务使用账号页优先顺序，提交生成前核对额度，并跳过无额度或不可用的账号。未出现在账号页的音乐账号按登记顺序补在后面。上游接收任务后继续查询原单。
 
 使用同一统一 API 地址 `http://127.0.0.1:18922` 和工作台 Bearer 密钥。音乐走音乐服务，不改派 Gemini 或 Flow 图片/视频。
 

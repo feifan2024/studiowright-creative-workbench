@@ -1,15 +1,17 @@
 import ast
 from pathlib import Path
+import re
 import time
 import unittest
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 SOURCE=Path(__file__).resolve().parents[1]/'packaging/ubuntu/snapshot/workbench/server.py'
 
 def functions():
     tree=ast.parse(SOURCE.read_text(encoding='utf-8'))
-    selected=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('music_generate','music_service_status')]
-    scope={'time':time,'MUSIC_MODELS':{'lyria-fast'},'music_credentials':lambda:('user','password','test-key'),
+    selected=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('music_generate','music_service_status','music_account_order')]
+    scope={'time':time,'re':re,'MUSIC_MODELS':{'lyria-fast'},'music_credentials':lambda:('user','password','test-key'),
            'music_admin_token':lambda:'test-admin','music_call':Mock()}
     exec(compile(ast.Module(body=selected,type_ignores=[]),str(SOURCE),'exec'),scope)
     return scope
@@ -36,3 +38,15 @@ class MusicWorkbench(unittest.TestCase):
         self.assertEqual(result['clips'][0]['prompt'],'test')
         self.assertEqual(result['clips'][0]['wav_url'],'https://example.test/w')
         s['music_call'].assert_called_once()
+
+    def test_shared_order_uses_the_priority_service_route_and_keeps_music_only_members(self):
+        s=functions()
+        a,b='a'*64,'b'*64
+        items=[{'key':'flow-account-'+a,'email':'A@example.test'},
+               {'key':'flow-account-'+b,'email':'b@example.test','gemini_removed':True}]
+        order=s['music_account_order'](SimpleNamespace(priority_order=lambda keys:list(reversed(keys))),items)
+        s['music_call'].return_value={'data':[{'id':'clip','audio':{'url':'https://example.test/a'}}]}
+        s['music_generate']('prompt','lyria-fast',account_order=order)
+        s['music_call'].assert_called_once_with('POST','/v1/audio/generations/priority',
+            body={'model':'lyria-fast','prompt':'prompt','account_order':['b@example.test','a@example.test']},
+            token='test-key',timeout=660)
