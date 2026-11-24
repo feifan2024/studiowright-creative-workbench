@@ -793,9 +793,6 @@ function renderOverview() {
       (!flowAudit || Date.now()-(flowAudit.startedAt || 0)>60000)) void startGovernanceAudit('flow',false);
   const dataNotice = snapshot?.flow_state?.simulated ? "当前来源不是正式后台，不能作为真实账号或任务使用。" : "Flow 保留原后台；Gemini 使用官方调用。新对话按号池优先顺序分配，多轮固定账号。";
   $("sourceNotice").textContent = dataNotice + (snapshot?.flow_state?.skipped_projects || snapshot?.flow_state?.skipped_tasks ? " 有格式异常的记录未显示，请在原后台查看。" : "");
-  const readable = snapshot?.flow_state?.available === true;
-  const projects = readable ? snapshot.projects : [];
-  $("projectCount").textContent = readable ? projects.length.toLocaleString("zh-CN") : "—";
 }
 
 function overviewDistribution(target, title, caption, parts, displayedTotal = null) {

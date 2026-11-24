@@ -560,7 +560,7 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 
 .desk-activity > h2, .dashboard-heading h2 { margin: 0; font-size: 20px; letter-spacing: -.025em; }
 .desk-activity > h2 { margin-bottom: 12px; }
-.overview-distributions { display: grid; grid-template-columns: repeat(2,minmax(0,1.25fr)) minmax(0,.8fr); gap: 12px; }
+.overview-distributions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .overview-chart { display: flex; flex-direction: column; min-width: 0; padding: 16px; border: 1px solid #dce6df; border-radius: 12px; background: #fff; }
 .overview-chart-header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
 .overview-chart-header h3 { margin: 0; color: #233c32; font-size: 14px; }
@@ -578,7 +578,6 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .chart-dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; }
 .overview-chart .chart-unavailable { margin: 0; }
 .overview-chart > button { align-self: flex-start; margin-top: auto; padding-top: 15px; }
-.desk-projects p { margin-bottom: 12px; }
 .desk-footer { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px 16px; margin-top: 24px; padding-top: 14px; border-top: 1px solid #dce6df; }
 .desk-footer .notice { display: flex; align-items: baseline; gap: 8px; margin: 0; padding: 0; border: 0; background: none; color: #51675c; }
 .desk-footer-actions { display: flex; flex-direction: column; gap: 4px; }
@@ -587,10 +586,6 @@ td strong { color: #283b31; font-size: 13px; } td code { color: #7c8d82; font-si
 .desk-maintenance { grid-column: 1 / -1; }
 .desk-maintenance summary { width: fit-content; padding: 6px 0; color: #51675c; font-size: 12px; cursor: pointer; }
 
-@media (max-width: 980px) {
-  .overview-distributions { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .desk-projects { grid-column: 1 / -1; }
-}
 @media (max-width: 560px) {
   .desk-heading { align-items: flex-start; flex-direction: column; gap: 12px; margin-bottom: 22px; }
   .desk-heading .button { width: auto; }
