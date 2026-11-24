@@ -2339,14 +2339,10 @@ def make_handler(sources, deployment="local", coordinator=None, real_pool=None, 
                         }.get(self.path)
                         if expected is None or data.pop('method') != expected:
                             return self.json_response(400, {'error': '请求操作与接口不匹配，未提交。'})
-                    if self.path == '/api/real-pool/chat':
-                        # Text dispatch takes its account list from the official Gemini registry.
-                        account_data = {'items': None}
-                    else:
-                        snapshot = sources.snapshot()
-                        account_data = snapshot.get("real_accounts", {})
-                        if not account_data.get("available"):
-                            return self.json_response(503, {"error": "现有账号池暂不可读取。"})
+                    snapshot = sources.snapshot()
+                    account_data = snapshot.get("real_accounts", {})
+                    if not account_data.get("available"):
+                        return self.json_response(503, {"error": "现有账号池暂不可读取。"})
                     if self.path in {'/api/real-pool/image-analysis', '/api/real-pool/image-analysis-validate'}:
                         import gemini_image_input as vision
                         if not {'account', 'prompt', 'attachments'} <= data.keys() or data.keys() - {'account', 'prompt', 'attachments', 'retry_policy', 'effort'}:
