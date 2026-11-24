@@ -22,7 +22,8 @@ OFFICIAL_REQUEST_SQL = """(EXISTS(SELECT 1 FROM official_jobs j WHERE j.request_
 QUOTA_CHECK_ONLY_BLOCKS=('activation_verification_required','official_authorization_verification_required')
 # These blocks can be checked by a new short probe. Business messages remain
 # blocked until that probe succeeds; unknown business results are checked separately.
-READINESS_RECOVERABLE_BLOCKS=('provider_error','provider_connection_failed','provider_unavailable')
+READINESS_RECOVERABLE_BLOCKS=('provider_error','provider_connection_failed','provider_unavailable',
+                             AUTH_UNSENT,'authorization_still_required')
 READINESS_REPLY='GEMINI_READY'
 READINESS_PROMPT='这是创作工作台的云端连通性检查。请只回复 GEMINI_READY，不要添加其他文字。'
 MAX_TIMEOUT_ATTEMPTS=4
@@ -263,8 +264,10 @@ class OfficialPool:
     @staticmethod
     def recent_readiness_probe(db,key):
         return db.execute("""SELECT r.request_id FROM requests r JOIN official_jobs j USING(request_id)
+            LEFT JOIN official_reauth a USING(request_id)
             WHERE r.account_key=? AND j.readiness_probe=1
             AND (r.status IN ('queued','dispatching') OR r.created>=?)
+            AND NOT (r.status='failed' AND COALESCE(a.state,'')='completed')
             ORDER BY r.created DESC LIMIT 1""",(key,time.time()-30)).fetchone()
 
     def saved_account_order(self):

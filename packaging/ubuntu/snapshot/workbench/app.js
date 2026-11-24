@@ -1629,6 +1629,7 @@ const geminiProbeReasons={
   readiness_authorization_required:'授权未通过，云端请求未发出',
   authorization_not_ready:'本机没有可用的 Gemini 授权',
   authorization_required_unsent:'授权未通过，云端请求未发出',
+  authorization_still_required:'重新读取授权后仍未通过，云端请求未发出',
   verification_required:'Google 要求额外账号验证',
   quota_or_rate_limit:'Gemini 额度不足或频率受限',
   provider_connection_failed:'连接 Google 失败',
@@ -1751,33 +1752,28 @@ async function startGovernanceAudit(service, repair = true) {
         repair ? postJson('/api/gemini-readiness',{}) : null
       ]);
       const quota=latestQuota || readiness;
-      const probes=Array.isArray(readiness?.readiness_probes) ? readiness.readiness_probes : [];
-      const expected=new Map(probes.map(p=>[p.account_key,p.request_id]));
-      audit.probes=probes.length;
       let latest=extra;
-      audit.rows=auditGeminiAccounts(snapshot,extra,quota,expected);
-      renderGovernance();
-      const probePending=()=>probes.some(p=>{
-        const call=latest?.accounts?.find(a=>a.account_key===p.account_key)?.latest_probe;
-        return !call || call.request_id!==p.request_id || ['queued','dispatching'].includes(call.status);
-      });
-      // Observe the cloud calls submitted by this click.
-      const checkDeadline=Date.now()+Math.min(30,3*probes.length+1)*60*1000;
-      while (probePending() && Date.now()<checkDeadline) {
-        await new Promise(resolve=>setTimeout(resolve,2000));
-        latest=await getJson('/api/channel-status',{timeoutMs:8000}).catch(()=>null) || latest;
+      const expected=new Map();
+      const observeProbes=async result=>{
+        const probes=Array.isArray(result?.readiness_probes) ? result.readiness_probes : [];
+        for (const probe of probes) expected.set(probe.account_key,probe.request_id);
+        audit.probes=expected.size;
         audit.rows=auditGeminiAccounts(snapshot,latest,officialQuotaData || quota,expected);
         renderGovernance();
-      }
-      if (probePending()) audit.error='部分账号的云端验活还在排队或执行，可在对话管理查看。';
-      // Re-read dispatch conditions after the potentially slow quota check.
-      const [currentSnapshot,currentChannel]=await Promise.all([
-        getJson('/api/snapshot',{timeoutMs:10000}).catch(()=>null),
-        getJson('/api/channel-status',{timeoutMs:8000}).catch(()=>null)]);
-      if (currentSnapshot?.real_accounts?.available===true)
-        audit.rows=auditGeminiAccounts(currentSnapshot,currentChannel,officialQuotaData || quota,expected);
-      else throw new Error('本轮未能重新核对账号和队列。');
-      if (currentChannel?.available) {state.channelStatus=currentChannel;channelReadFailed=false;}
+        const probePending=()=>probes.some(probe=>{
+          const call=latest?.accounts?.find(a=>a.account_key===probe.account_key)?.latest_probe;
+          return !call || call.request_id!==probe.request_id || ['queued','dispatching'].includes(call.status);
+        });
+        const deadline=Date.now()+Math.min(30,3*probes.length+1)*60*1000;
+        while (probePending() && Date.now()<deadline) {
+          await new Promise(resolve=>setTimeout(resolve,2000));
+          latest=await getJson('/api/channel-status',{timeoutMs:8000}).catch(()=>null) || latest;
+          audit.rows=auditGeminiAccounts(snapshot,latest,officialQuotaData || quota,expected);
+          renderGovernance();
+        }
+        if (probePending()) audit.error='部分账号的云端验活还在排队或执行，可在对话管理查看。';
+      };
+      await observeProbes(readiness);
       await refreshGovernanceCases();
       if (repair) {
         audit.authorization=await postJson('/api/official-reauth/activate',{});
@@ -1786,16 +1782,26 @@ async function startGovernanceAudit(service, repair = true) {
           await new Promise(resolve=>setTimeout(resolve,2000));
           audit.authorization=await getJson('/api/official-reauth/activate',{timeoutMs:8000});
         }
-        if (audit.authorization.state==='stopped') audit.error=audit.authorization.message;
         if (audit.authorization.completed) {
-          audit.checkAfterAuthorization=true;
-          const [updated,channel]=await Promise.all([getJson('/api/snapshot',{timeoutMs:10000}),
-            getJson('/api/channel-status',{timeoutMs:8000})]);
-          audit.rows=auditGeminiAccounts(updated,channel,officialQuotaData || quota,expected);
-          if (channel.available) {state.channelStatus=channel;channelReadFailed=false;}
+          audit.checkingAfterAuthorization=true;
+          renderGovernance();
+          try {
+            await observeProbes(await postJson('/api/gemini-readiness?scope=recoverable',{}));
+          } finally {
+            audit.checkingAfterAuthorization=false;
+          }
         }
-
+        if (audit.authorization.state==='stopped')
+          audit.error=[audit.error,audit.authorization.message || '授权未完成。'].filter(Boolean).join(' ');
       }
+      const [currentSnapshot,currentChannel]=await Promise.all([
+        getJson('/api/snapshot',{timeoutMs:10000}).catch(()=>null),
+        getJson('/api/channel-status',{timeoutMs:8000}).catch(()=>null)]);
+      if (currentSnapshot?.real_accounts?.available!==true || currentChannel?.available!==true)
+        throw new Error('本轮未能重新核对账号和队列。');
+      audit.rows=auditGeminiAccounts(currentSnapshot,currentChannel,officialQuotaData || quota,expected);
+      state.channelStatus=currentChannel;
+      channelReadFailed=false;
     }
     audit.checkedAt=Date.now()/1000;
   } catch (error) {
@@ -1807,7 +1813,6 @@ async function startGovernanceAudit(service, repair = true) {
     delete audit.snapshot;
     renderGovernance();
     if (audit.repairNext) void startGovernanceAudit(service);
-    else if (audit.checkAfterAuthorization) void startGovernanceAudit(service,false);
   }
 }
 
@@ -1815,8 +1820,8 @@ function openGovernance(service) {
   governanceService = service;
   governanceError = '';
   if (governanceDialog) {
-    governanceDialog.hidden=false;
-    governanceDialog.scrollIntoView({block:'nearest'});
+    governanceDialog.hidden=service!=='gemini';
+    if (!governanceDialog.hidden) governanceDialog.scrollIntoView({block:'nearest'});
   }
   renderGovernance();
   const pending=governanceAudits[service];
@@ -1927,14 +1932,18 @@ function renderGovernance() {
       ? ` · 两项额度已读取 ${quota.known_accounts}/${quota.total_accounts}` : ' · 额度暂未获取';
   }
   if (isGemini && audit && quota?.refreshing) quotaSummary = ' · 正在读取额度…';
-  const status = governanceError || verificationProgress || authProgress+(audit?.running ? (authorization?.state==='waiting' ? '' : '正在自动检查全部账号…') : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
+  const runningStatus = authorization?.state==='waiting' ? '' : authorization?.state==='starting' ? '正在打开 Google 授权窗口…' :
+    audit?.checkingAfterAuthorization ? '正在复查授权后的派发状态…' : '正在自动检查全部账号…';
+  const status = governanceError || verificationProgress || authProgress+(audit?.running ? runningStatus : audit?.checkedAt ? dateTime(audit.checkedAt)+' · '+summary+
     (audit.probes ? ` · 云端验活 ${audit.probes} 个账号` : '') : '') + quotaSummary + (audit?.error ? ' '+audit.error : '');
   if ($('governanceStatus').textContent !== status) $('governanceStatus').textContent = status;
   const detailRows=rows.map(({account,status,issues,note})=>{
     const visibleIssues=isGemini && audit?.running ? issues.filter(issue=>!['confirmed_verification','confirmed_reauth'].includes(issue.key)) : issues;
     const reasons=[...new Set(visibleIssues.map(issue=>issue.title.replace(/^固定任务窗口绑定待核对$/,'任务窗口绑定待核对')))];
+    const nextStep=isGemini && !audit?.running && visibleIssues.some(issue=>issue.key==='confirmed_verification')
+      ? '<p>请在账号页打开该账号的 Google 验证，完成后再重新检查。</p>' : '';
     return `<article class="governance-row"><div><strong>${esc(governanceAccountName(account))}</strong><span class="governance-result" data-state="${status}">${esc(!isGemini && status==='ready' ? '就绪' : governanceAuditLabels[status])}</span>
-      ${note ? '<p>'+esc(note)+'</p>' : ''}${reasons.map(reason=>'<p>'+esc(reason)+'</p>').join('')}</div></article>`;
+      ${note ? '<p>'+esc(note)+'</p>' : ''}${reasons.map(reason=>'<p>'+esc(reason)+'</p>').join('')}${nextStep}</div></article>`;
   }).join('');
   let body;
   if (audit?.running && !rows.length) body='<p class="governance-empty">正在检查账号、授权和队列，你不用操作。</p>';
@@ -1970,13 +1979,6 @@ async function handleGovernanceClick(event) {
   } else if (button.dataset.governService) {
     openGovernance(button.dataset.governService);
   } else if (button.id === 'governanceCheck') {
-    button.disabled = true;
-    governanceError = '';
-    try {
-      // 重新检查现在会执行真正的修复：重开缺失窗口、把页面带回标准项目、重建绑定。
-      await postJson('/api/flow-readiness', {});
-    } catch (error) { governanceError = error.message || '检查未完成，请稍后重试。'; }
-    finally { button.disabled = false; }
     openGovernance(governanceService);
   } else if (button.hasAttribute('data-govern-close')) {
     if (governanceDialog) governanceDialog.hidden=true;

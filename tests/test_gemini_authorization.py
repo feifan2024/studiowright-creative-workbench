@@ -2,18 +2,66 @@ import sys
 import io
 import json
 import sqlite3
+import tempfile
+import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'packaging/ubuntu/snapshot/workbench'))
 from gemini_authorization import GeminiAuthorization
-from official_reauth import close_authorization_tab
-from official_pool import OfficialPool
+from live_pool import RealPool
+from official_reauth import PROBE_AUTH, close_authorization_tab
+from official_pool import AUTH_UNSENT, OfficialPool, READINESS_PROMPT, READINESS_REPLY
 
 
 class GeminiAuthorizationTest(unittest.TestCase):
+    def test_business_auth_block_is_recovered_by_independent_probe_without_resending(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            pool = RealPool(root, root, execute=lambda *_: None)
+            try:
+                key = 'a' * 64
+                items = [{'key': 'flow-account-' + key}]
+                official = pool.official
+                official.runtime = SimpleNamespace(inventory=lambda: {key: True})
+                original = str(uuid.uuid4())
+                official.generate(key, 'original user message', original, items)
+                job = official.claim()
+                self.assertEqual(job['request_id'], original)
+                official.finish(job, dict(status='failed', reason=AUTH_UNSENT, submitted=False))
+
+                [first] = official.queue_readiness_probes(items, {}, blocked_only=True)
+                job = official.claim(probe_only=True)
+                self.assertEqual(job['prompt'], READINESS_PROMPT)
+                official.finish(job, dict(status='failed', reason=PROBE_AUTH, submitted=False))
+                request = first['request_id']
+                self.assertTrue(any(item['request_id'] == request and item['mode'] == 'login_only'
+                                    and item['can_start'] for item in official.reauth.dashboard()['items']))
+                with pool.connection() as db:
+                    self.assertEqual(official.reason(db, key, {key: True}), 'official_call_blocked')
+                    finished = db.execute('SELECT finished FROM requests WHERE request_id=?', (request,)).fetchone()[0]
+                    db.execute('INSERT INTO official_reauth VALUES(?,?,?,?,?,?,?,?)',
+                               (request, key, 'completed', None, None, PROBE_AUTH, finished, time.time() + 300))
+
+                [second] = official.queue_readiness_probes(items, {}, blocked_only=True)
+                self.assertNotEqual(second['request_id'], request)
+                job = official.claim(probe_only=True)
+                self.assertEqual(job['prompt'], READINESS_PROMPT)
+                official.finish(job, dict(status='completed', submitted=True, response=READINESS_REPLY,
+                                          native=str(uuid.uuid4())))
+                with pool.connection() as db:
+                    self.assertIsNone(official.reason(db, key, {key: True}))
+                    self.assertEqual(db.execute('SELECT status FROM requests WHERE request_id=?',
+                                                (original,)).fetchone()[0], 'failed')
+                    attempts = db.execute('SELECT submitted FROM official_attempts WHERE request_id=?',
+                                          (original,)).fetchall()
+                    self.assertEqual([row[0] for row in attempts], [0])
+            finally:
+                pool.close()
+
     def test_unknown_business_request_does_not_lock_account(self):
         pool = OfficialPool.__new__(OfficialPool)
         with sqlite3.connect(':memory:') as db:

@@ -310,6 +310,72 @@ test('Gemini readiness requests quota recovery and still finishes when quota is 
   assert.ok(audit.checkedAt);
 });
 
+test('Gemini readiness panel opens and its recheck does not ask Flow to run', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'packaging', 'ubuntu', 'snapshot', 'workbench', 'index.html'), 'utf8');
+  const panel = html.match(/<section id="governanceDialog"[^>]+>[\s\S]*?<\/section>/)?.[0];
+  assert.ok(panel);
+  for (const id of ['governanceTitle', 'governanceStatus', 'governanceItems', 'governanceCheck', 'governanceRecords']) {
+    assert.ok(panel.includes(`id="${id}"`));
+  }
+  const calls = [];
+  const governanceDialog = {hidden: true, scrollIntoView() { calls.push('scroll'); }};
+  const context = vm.createContext({
+    governanceService: 'gemini', governanceError: '', governanceDialog, governanceAudits: {},
+    renderGovernance() { calls.push('render'); },
+    async startGovernanceAudit(service) { calls.push(service); },
+    async refreshGovernanceCases() {},
+    async postJson(url) { calls.push(url); },
+    button: {id: 'governanceCheck', dataset: {}},
+  });
+  load('openGovernance', context);
+  load('handleGovernanceClick', context);
+  await vm.runInContext("handleGovernanceClick({target: {closest: () => button}})", context);
+  assert.equal(governanceDialog.hidden, false);
+  assert.deepEqual(calls, ['scroll', 'render', 'gemini']);
+});
+
+test('Gemini readiness rechecks after login and keeps the authorization result visible', async () => {
+  const snapshot = {real_accounts: {available: true, items: []}};
+  const channel = {available: true, accounts: []};
+  const requests = [];
+  const renders = [];
+  const context = vm.createContext({
+    governanceAudits: {}, state: {view: 'accounts'}, officialQuotaData: null, channelReadFailed: false,
+    setTimeout(callback) { callback(); },
+    async getJson(path) {
+      if (path === '/api/snapshot') return snapshot;
+      if (path === '/api/official-reauth/activate') return {state: 'completed', completed: 1, total: 1};
+      return channel;
+    },
+    async postJson(path) {
+      requests.push(path);
+      if (path === '/api/official-reauth/activate') return {state: 'waiting', email: 'a@example.test', completed: 0, total: 1};
+      if (path === '/api/gemini-readiness?scope=recoverable') {
+        channel.accounts = [{account_key: 'account', latest_probe: {request_id: 'followup', status: 'completed'}}];
+        return {readiness_probes: [{account_key: 'account', request_id: 'followup'}]};
+      }
+      return {readiness_probes: []};
+    },
+    async refreshOfficialQuota() { return null; },
+    auditGeminiAccounts: (_snapshot, _channel, _quota, expected) => [{request: expected.get('account')}],
+    renderGovernance() {
+      const audit = context.governanceAudits.gemini;
+      renders.push([audit.authorization?.state, audit.checkingAfterAuthorization]);
+    },
+    renderAccountQuotas() {},
+    async refreshGovernanceCases() {},
+  });
+  load('startGovernanceAudit', context);
+  await vm.runInContext("startGovernanceAudit('gemini')", context);
+  assert.deepEqual(requests, ['/api/gemini-readiness', '/api/official-reauth/activate', '/api/gemini-readiness?scope=recoverable']);
+  assert.ok(renders.some(([state]) => state === 'waiting'));
+  assert.ok(renders.some(([, checking]) => checking === true));
+  const audit = context.governanceAudits.gemini;
+  assert.equal(audit.authorization.completed, 1);
+  assert.equal(audit.rows[0].request, 'followup');
+  assert.equal(audit.running, false);
+});
+
 test('cooldown counts down and becomes awaiting confirmation without changing eligibility', () => {
   const time = {textContent: ''};
   const label = {textContent: ''};
