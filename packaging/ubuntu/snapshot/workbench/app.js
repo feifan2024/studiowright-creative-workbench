@@ -3325,6 +3325,10 @@ function renderConversationList() {
   const list = $('chatList');
   if (!list) return;
   const {found, pending, unavailable, filtered} = conversationFilterResults();
+  const filterCount = ['chatFilterAccount', 'chatFilterStatus', 'chatFilterKind'].filter(id => $(id)?.value).length;
+  $('chatFilterReset').hidden = !filtered;
+  $('chatFilterCount').hidden = !filterCount;
+  $('chatFilterCount').textContent = filterCount ? String(filterCount) : '';
   const scrollTop = list.scrollTop;
   const focused = document.activeElement?.closest?.('#chatList [data-chat]')?.dataset.chat;
   const statusNames = {completed:'已完成', processing:'处理中', failed:'失败', unconfirmed:'待核对', empty:'未开始', unknown:'状态未知'};
@@ -3340,7 +3344,7 @@ function renderConversationList() {
       if (meta.imageResult) badges.push('<span class="chat-row-tag">已有图片</span>');
       if (meta.attachment) badges.push('<span class="chat-row-tag">含附件</span>');
     } else if (meta?.error) badges.push('<span class="chat-row-tag is-attention">筛选信息未读取</span>');
-    return `<div class="compact-row"><button class="text-link${item.id === activeConversation ? ' chat-selected' : ''}" type="button" data-chat="${esc(item.id)}"${item.simulated ? ' data-simulated="1"' : ''}${item.id === activeConversation ? ' aria-current="true"' : ''}>${item.simulated ? '<span class="simulation-list-badge">模拟</span> ' : ''}${esc(item.title)}</button><span class="row-sub">${esc(dateTime(item.updated))}</span>${badges.length ? `<div class="chat-row-tags">${badges.join('')}</div>` : ''}</div>`;
+    return `<button class="chat-list-item${item.id === activeConversation ? ' chat-selected' : ''}" type="button" data-chat="${esc(item.id)}"${item.simulated ? ' data-simulated="1"' : ''}${item.id === activeConversation ? ' aria-current="true"' : ''}><span class="chat-list-title" title="${esc(item.title)}">${item.simulated ? '<span class="simulation-list-badge">模拟</span> ' : ''}${esc(item.title)}</span><span class="chat-list-time">${esc(dateTime(item.updated))}</span>${badges.length ? `<span class="chat-row-tags">${badges.join('')}</span>` : ''}</button>`;
   }).join('') : pending ? empty('正在读取筛选信息', '请稍候。') : filtered ? empty('没有符合筛选的对话', '可调整条件或清空筛选。') : empty(showingHiddenConversations ? '没有隐藏的对话' : '还没有对话', showingHiddenConversations ? '隐藏的对话可在这里恢复。' : '点击新建对话开始。');
   list.scrollTop = scrollTop;
   if (focused) [...list.querySelectorAll('[data-chat]')].find((button) => button.dataset.chat === focused)?.focus({preventScroll:true});
@@ -3349,7 +3353,7 @@ function renderConversationList() {
     let text = `显示 ${found.length} / ${conversationEntries.length} 条`;
     if (conversationMetadataState.loading) text += ` · 正在读取 ${conversationMetadataState.done} / ${conversationMetadataState.total}`;
     if (conversationMetadataState.failed) text += ` · ${conversationMetadataState.failed} 条筛选信息未读取`;
-    if (filtered && activeConversation && !found.some((item) => item.id === activeConversation)) text += ' · 当前对话保留在右侧';
+    if (filtered && activeConversation && !found.some((item) => item.id === activeConversation)) text += ' · 当前对话仍可查看';
     if (unavailable) text += ` · ${unavailable} 条未纳入筛选`;
     summary.textContent = text;
   }
@@ -3391,6 +3395,7 @@ for (const id of ['chatFilterSearch', 'chatFilterAccount', 'chatFilterStatus', '
 }
 $('chatFilterReset')?.addEventListener('click', () => {
   for (const id of ['chatFilterSearch', 'chatFilterAccount', 'chatFilterStatus', 'chatFilterKind']) $(id).value = '';
+  $('chatFilterSearch').focus();
   renderConversationList();
 });
 
@@ -3485,7 +3490,7 @@ function syncConversationControls(announce = false) {
   effortSelect.disabled=locked || levels.length<2;
   $('chatModelNote').textContent=imageAnalysis ? 'API 识图记录 · 每次识图独立提问。' : archived ? '历史归档只读；原问答与草稿保留，请新建官方对话。' : '首次发送后固定账号和模型。续聊时可调整思考等级。';
   $('chatSend').disabled=!ready || !item || archived || pending || chatSending || !!item.hidden || !geminiSelectionReady(select.value);
-  if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理；可在原消息下查看处理和重试进度。' : !ready ? '官方调用暂不可用，草稿保留。' : '新对话按号池优先顺序分配；多轮固定账号。单条新文字对话确认超时后，最多用原账号重试三次。';
+  if(announce && !chatSending) $('chatMessage').textContent=!item ? '请选择或新建对话。' : imageAnalysis ? (pending ? '正在处理识图请求，请等待结果。' : '继续传图请使用 API 文档里的 Gemini 识图接口。') : archived ? '历史记录保留；请新建对话使用官方通道。' : pending ? '任务正在排队或处理；可在原消息下查看处理和重试进度。' : !ready ? '官方调用暂不可用，草稿保留。' : '';
 }
 
 function renderRealTurnAccountLabels() {
@@ -3553,13 +3558,47 @@ async function refreshConversationView() {
   finally { conversationViewRefreshing = false; }
 }
 
+function renderConversationPrompt(prompt, index, expanded) {
+  const value = prompt || '';
+  const full = `<p>${esc(value).replace(/\n/g, '<br>')}</p>`;
+  if (value.length <= 300 && value.split('\n').length <= 6) return full;
+  const compact = value.replace(/\s+/g, ' ').trim();
+  const preview = compact.length > 135 ? compact.slice(0, 135) + '…' : compact;
+  return `<details class="conversation-long-prompt" data-chat-prompt-turn="${index}"${expanded ? ' open' : ''}>
+    <summary><span class="conversation-prompt-preview">${esc(preview)}</span><span class="conversation-prompt-action prompt-show">展开完整提问</span><span class="conversation-prompt-action prompt-hide">收起提问</span></summary>
+    ${full}</details>`;
+}
+
+function renderConversationTurn(turn, index, expanded) {
+  const timing = (value) => typeof value === 'number' ? (value / 1000).toFixed(1) + ' 秒' : '未采集';
+  return `<article class="conversation-turn">
+    <section class="conversation-message conversation-question">
+      <div class="conversation-message-header"><strong>你</strong></div>
+      ${renderConversationPrompt(turn.prompt, index, expanded)}
+      ${turn.attachments.length ? `<span class="subtle">附件：${esc(turn.attachments.join('、'))}</span>` : ''}
+    </section>
+    <section class="conversation-message conversation-answer">
+      <div class="conversation-message-header"><strong>Gemini</strong><span class="chat-turn-account" data-real-turn-account="${index}">本轮账号读取中…</span></div>
+      ${turn.selected_model ? `<small class="response-timing">所选模型：${esc(turn.selected_model)}</small>` : ''}
+      ${renderGeminiReply(turn)}${renderGeminiAttempts(turn.attempts)}${renderGeminiReauth(turn)}
+      ${turn.status === 'completed' ? `<small class="response-timing">首段 ${timing(turn.first_text_ms)} · 完成 ${timing(turn.total_ms)} · 排队 ${timing(turn.queue_wait_ms)}</small>` : ''}
+      ${turn.reconciliation_note ? `<p class="subtle">${esc(turn.reconciliation_note)}</p>` : ''}
+    </section></article>`;
+}
+
 async function showConversation(id, {background = false} = {}) {
   const request = ++conversationDetailRequest;
   const item = await getJson((simulatedConversationIds.has(id) ? '/api/simulated-conversations/' : '/api/conversations/') + encodeURIComponent(id), {timeoutMs: 12000});
   if (request !== conversationDetailRequest) return null;
   if (background && (chatSending || document.querySelector('dialog[open]') || id !== activeConversation || state.view !== 'conversations' ||
       JSON.stringify(item) === JSON.stringify(currentConversation))) return currentConversation;
-  if (currentConversation?.id !== item.id) {
+  const history = $('chatHistory');
+  const sameConversation = currentConversation?.id === item.id;
+  const chatScroll = sameConversation ? history.scrollTop : 0;
+  const expanded = new Set(sameConversation ? [...history.querySelectorAll('details[open][data-chat-prompt-turn]')].map(node => node.dataset.chatPromptTurn) : []);
+  const focusedPrompt = sameConversation && history.contains(document.activeElement)
+    ? document.activeElement.closest('details[data-chat-prompt-turn]')?.dataset.chatPromptTurn : undefined;
+  if (!sameConversation) {
     $('chatModel').value = '';
     $('chatEffort').value = '';
     if (!item.account_key && [...$('chatAccount').options].some((option) => option.value === 'auto')) $('chatAccount').value = 'auto';
@@ -3571,23 +3610,30 @@ async function showConversation(id, {background = false} = {}) {
   $('chatHide').disabled = !!item.simulated;
   $('chatHide').textContent = item.hidden ? '恢复对话' : '隐藏';
   $('chatHide').dataset.hidden = item.hidden ? '1' : '0';
-  syncConversationControls(!background);
-  const chatScroll = $('chatHistory').scrollTop;
+  syncConversationControls(!background || !sameConversation);
   if (item.simulated) {
     realTurnAccountState = null;
     const changed = item.turns.filter((turn) => turn.matches_first === false).length;
     const unknown = item.turns.filter((turn) => turn.matches_first === null).length;
     const result = changed ? `发现 ${changed} 轮账号与首轮不同` : unknown ? `有 ${unknown} 轮账号未确认` : '各轮使用同一模拟账号';
-    $('chatHistory').innerHTML = `<div class="simulation-notice"><strong>模拟测试 · ${esc(result)}</strong><span>问题、回复和账号均由程序模拟，未调用真实 Gemini。</span></div>` + item.turns.map((turn) => {
+    history.innerHTML = `<div class="simulation-notice"><strong>模拟测试 · ${esc(result)}</strong><span>问题、回复和账号由程序模拟。</span></div>` + item.turns.map((turn, index) => {
       const account = turn.account_label || '未记录';
       const compare = turn.matches_first === false ? '发生切号' : turn.matches_first === true ? (turn.ordinal === 1 ? '首轮账号' : '与首轮一致') : '账号待确认';
-      return `<div class="compact-row simulation-turn" data-simulated-turn="${turn.ordinal}"><div class="row-info"><div class="simulation-turn-heading"><strong>第 ${turn.ordinal} 轮</strong><span class="simulation-account${turn.matches_first === false ? ' is-changed' : ''}">本轮使用：${esc(account)} · ${esc(compare)}</span></div><strong>问题</strong><p>${esc(turn.prompt).replace(/\n/g, '<br>')}</p><strong>模拟回复</strong><p>${esc(turn.response).replace(/\n/g, '<br>')}</p><small class="response-timing">模拟耗时 ${(turn.elapsed_ms / 1000).toFixed(2)} 秒 · 提交 ${turn.attempts} 次${turn.status !== 'completed' ? ' · 未完成' : ''}</small></div></div>`;
+      return `<article class="conversation-turn simulation-turn" data-simulated-turn="${turn.ordinal}">
+        <section class="conversation-message conversation-question"><div class="conversation-message-header"><strong>第 ${turn.ordinal} 轮 · 提问</strong></div>
+          ${renderConversationPrompt(turn.prompt, index, expanded.has(String(index)))}</section>
+        <section class="conversation-message conversation-answer"><div class="conversation-message-header"><strong>模拟回复</strong><span class="simulation-account${turn.matches_first === false ? ' is-changed' : ''}">本轮使用：${esc(account)} · ${esc(compare)}</span></div>
+          <p>${esc(turn.response).replace(/\n/g, '<br>')}</p><small class="response-timing">模拟耗时 ${(turn.elapsed_ms / 1000).toFixed(2)} 秒 · 提交 ${turn.attempts} 次${turn.status !== 'completed' ? ' · 未完成' : ''}</small></section>
+        </article>`;
     }).join('');
   } else {
-    $('chatHistory').innerHTML = item.turns.length ? item.turns.map((turn,index) => `<div class="compact-row"><div class="row-info"><span class="chat-turn-account" data-real-turn-account="${index}">本轮账号读取中…</span><strong>你</strong><p>${esc(turn.prompt).replace(/\n/g, '<br>')}</p>${turn.attachments.length ? `<span class="subtle">附件：${esc(turn.attachments.join('、'))}</span>` : ''}<strong>Gemini</strong>${turn.selected_model ? `<small class="response-timing">所选模型：${esc(turn.selected_model)}</small>` : ''}${renderGeminiReply(turn)}${renderGeminiAttempts(turn.attempts)}${renderGeminiReauth(turn)}${turn.status === 'completed' ? `<small class="response-timing">首段 ${typeof turn.first_text_ms === 'number' ? (turn.first_text_ms / 1000).toFixed(1) + ' 秒' : '未采集'} · 完成 ${typeof turn.total_ms === 'number' ? (turn.total_ms / 1000).toFixed(1) + ' 秒' : '未采集'} · 排队 ${typeof turn.queue_wait_ms === "number" ? (turn.queue_wait_ms / 1000).toFixed(1) + " 秒" : "未采集"}</small>` : ''}${turn.reconciliation_note ? `<p class="subtle">${esc(turn.reconciliation_note)}</p>` : ''}</div></div>`).join('') : empty('开始对话', '发送第一条消息后将保存记录。');
+    history.innerHTML = item.turns.length
+      ? item.turns.map((turn, index) => renderConversationTurn(turn, index, expanded.has(String(index)))).join('')
+      : empty('开始对话', '发送第一条消息后将保存记录。');
     loadRealTurnAccountLabels(item, request);
   }
-  if (background) $('chatHistory').scrollTop = chatScroll;
+  history.scrollTop = chatScroll;
+  if (focusedPrompt !== undefined) history.querySelector(`[data-chat-prompt-turn="${focusedPrompt}"] > summary`)?.focus({preventScroll:true});
   $('chatList').querySelectorAll('[data-chat]').forEach((button) => {
     const selected = button.dataset.chat === item.id;
     button.classList.toggle('chat-selected', selected);
@@ -3598,7 +3644,14 @@ async function showConversation(id, {background = false} = {}) {
 
 $('chatList').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-chat]');
-  if (button) { try { $('chatCreateStatus').textContent = ''; await showConversation(button.dataset.chat); } catch (_) { $('chatMessage').textContent = '对话暂不可读取。'; } }
+  if (!button) return;
+  try {
+    $('chatCreateStatus').textContent = '';
+    if (await showConversation(button.dataset.chat) && matchMedia('(max-width: 900px)').matches) {
+      $('chatTitle').focus({preventScroll:true});
+      $('chatTitle').scrollIntoView({block:'start'});
+    }
+  } catch (_) { $('chatMessage').textContent = '对话暂不可读取。'; }
 });
 $('chatHistory').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-reauth-request]');
@@ -5055,7 +5108,7 @@ try {
 
   page('tasksHeading', '#tasksView > .notice');
 
-  page('conversationsHeading');
+  page('conversationsHeading', '#conversationsView > .notice');
 
   page('libraryHeading');
 
@@ -5070,8 +5123,6 @@ try {
   attach(one('#dispatchPolicyHeading'), [one('#dispatchPolicyHeading + p.panel-caption')], '自动选号规则');
 
   attach(one('#geminiActivityHeading'), [one('#geminiActivityHeading + p.panel-caption')], '请求记录');
-
-  attach(one('#conversationsView .conversation-filter-footer'), [one('#chatFilterHelp')], '对话类型筛选');
 
   attach(one('#libraryView .library-intro h2'), [one('#libraryView .library-intro p')], '素材库');
 
