@@ -2,6 +2,8 @@
 import importlib.util
 import json
 import os
+import sys
+import threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
@@ -38,7 +40,40 @@ def selected_bridge():
         return None
 
 
+def exit_when_parent_exits():
+    """Exit with the desktop client so inherited forwarded sockets are released."""
+    if sys.platform != 'win32':
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    parent = os.getppid()
+    if parent <= 0:
+        return
+    handle = kernel32.OpenProcess(0x00100000, False, parent)  # SYNCHRONIZE
+    if not handle:
+        # The client is already gone; do not keep its forwarded ports open.
+        os._exit(0)
+
+    def watch():
+        try:
+            kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+        finally:
+            kernel32.CloseHandle(handle)
+            os._exit(0)
+
+    threading.Thread(target=watch, name='parent-watchdog', daemon=True).start()
+
+
 def main():
+    exit_when_parent_exits()
     if SCRIPT.is_symlink() or not SCRIPT.is_file():
         raise RuntimeError('本机账号管理组件缺失')
     spec = importlib.util.spec_from_file_location('studiowright_profile_manager', SCRIPT)
