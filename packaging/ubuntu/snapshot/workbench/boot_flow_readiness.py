@@ -1,5 +1,7 @@
 """Recover registered Flow windows after the Ubuntu desktop starts."""
+import asyncio
 import json
+import subprocess
 import time
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -16,10 +18,28 @@ def request(path, repair=False):
         return json.load(response)
 
 
+def prepare_keyboard(env):
+    """Restore the shared portal keyboard helper after login; never block recovery."""
+    try:
+        from input_backend import open_keyboard
+        keyboard = open_keyboard(None, gui_environment=env)
+        if keyboard.ready():
+            return True
+        asyncio.run(keyboard.ensure_ready(timeout=45))
+        return keyboard.ready()
+    except (ImportError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+        print(f'桌面键盘暂未就绪（{type(error).__name__}）', flush=True)
+        return False
+
+
 def main():
+    keyboard_checked = False
     for attempt in range(6):
         try:
             env = gui_env()
+            if (env.get('WAYLAND_DISPLAY') or env.get('DISPLAY')) and not keyboard_checked:
+                keyboard_checked = True
+                prepare_keyboard(env)
             if (env.get('WAYLAND_DISPLAY') or env.get('DISPLAY')) and network_ready():
                 accounts = request('/api/flow-readiness')['accounts']
                 if all(state in ('ok', 'busy') for state in accounts.values()):
