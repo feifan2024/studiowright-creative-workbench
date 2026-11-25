@@ -141,6 +141,68 @@ class FlowOverlayReload(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([call.args[2] for call in command.await_args_list if call.args[1]=='Page.navigate'],
                                  [{'url': PROJECT, 'frameId': 'frame'}])
 
+    def test_home_restore_only_uses_a_registered_verified_project(self):
+        project_id = PROJECT.rsplit('/', 1)[1]
+        verified = dict(binding_state='verified', project_url=PROJECT)
+        self.assertEqual(recovery.bound_project_for_home('https://flow.google.com/', verified, {project_id}), PROJECT)
+        self.assertEqual(recovery.bound_project_for_home('https://flow.google.com/?authuser=0', verified, {project_id}), PROJECT)
+        self.assertIsNone(recovery.bound_project_for_home('https://flow.google.com/', dict(verified, binding_state='unconfirmed'), {project_id}))
+        self.assertIsNone(recovery.bound_project_for_home('https://flow.google.com/', verified, set()))
+        self.assertIsNone(recovery.bound_project_for_home(PROJECT, verified, {project_id}))
+        self.assertIsNone(recovery.bound_project_for_home('https://accounts.google.com/signin', verified, {project_id}))
+
+    async def test_home_page_returns_to_the_previously_bound_project_without_standard_name(self):
+        account = {'profile': 'profile-a', 'key': 'flow-account-key', 'email': 'test@example.com'}
+        project_id = PROJECT.rsplit('/', 1)[1]
+        current = dict(account_key='key', profile='profile-a', browser_pid=100, process_start='stamp',
+                       port=9222, page_target='fixed', window_id=12, workspace=0)
+        # Chrome restarted after a reboot, so the registry entry is stale but
+        # still names the original project for this account.
+        old = dict(account_key='key', profile='profile-a', browser_pid=55, process_start='old-stamp',
+                   port=9334, page_target='old-page', window_id=99, workspace=0,
+                   chrome_window=77, project_url=PROJECT, binding_state='verified')
+        home = dict(id='frame', loaderId='old', url='https://flow.google.com/')
+        loaded = dict(id='frame', loaderId='new', url=PROJECT)
+        editor = dict(STATE, overlay=False, editor=True)
+        registry, lifecycle, coordinator = MagicMock(), MagicMock(), MagicMock()
+        registry.get.return_value = old
+        session = MagicMock()
+        fake_websockets = SimpleNamespace(connect=MagicMock(return_value=session))
+        endpoint = 'ws://127.0.0.1:9222/devtools/page/fixed'
+        with patch.dict(sys.modules, websockets=fake_websockets), \
+                patch.object(recovery, 'guard_live', return_value=({project_id}, set())), \
+                patch.object(recovery, 'candidate', AsyncMock(return_value=(current, {'url': 'https://flow.google.com/'}, endpoint))), \
+                patch.object(recovery, 'TaskWindowRegistry', return_value=registry), \
+                patch('flow_window_policy.Lifecycle', return_value=lifecycle), \
+                patch('task_coordinator.Coordinator', return_value=coordinator), \
+                patch.object(recovery, 'command', AsyncMock(side_effect=[
+                    {'windowId': 34},
+                    {'frameTree': {'frame': home}}, {'frameTree': {'frame': home}}, {},
+                    {'frameTree': {'frame': loaded}}])) as command, \
+                patch.object(recovery, 'evaluate', AsyncMock(side_effect=[dict(origin=True, account=True), editor])), \
+                patch.object(recovery, 'inspect_page', AsyncMock(return_value='ok')) as inspect, \
+                patch.object(recovery.asyncio, 'sleep', AsyncMock()):
+            actions = []
+            verdict, confirmed = await recovery.repair(account, 'binding', actions, safe_only=True)
+        self.assertEqual(verdict, 'ok')
+        self.assertEqual(confirmed['project_url'], PROJECT)
+        self.assertEqual(actions, ['return_to_project', 'rebind'])
+        self.assertEqual([call.args[2] for call in command.await_args_list if call.args[1] == 'Page.navigate'],
+                         [{'url': PROJECT, 'frameId': 'frame'}])
+        inspect.assert_awaited_once()
+        registry.bind.assert_called_once()
+
+    async def test_home_return_with_a_draft_does_not_navigate(self):
+        frame = {'frameTree': {'frame': {'url': 'https://flow.google.com/'}}}
+        actions = []
+        with patch.object(recovery, 'guard_live'), \
+                patch.object(recovery, 'command', AsyncMock(return_value=frame)) as command, \
+                patch.object(recovery, 'evaluate', AsyncMock(return_value=dict(origin=True, draft=True))):
+            result = await recovery.reopen_redirected_project(None, {}, '', PROJECT, actions, allow_home=True)
+        self.assertEqual(recovery.page_verdict(result), 'draft')
+        command.assert_awaited_once()
+        self.assertEqual(actions, [])
+
     async def test_intro_with_a_draft_does_not_navigate(self):
         frame = {'frameTree': {'frame': {'url':'https://flow.google.com/about?returnUrl=' + STATE['path']}}}
         actions = []

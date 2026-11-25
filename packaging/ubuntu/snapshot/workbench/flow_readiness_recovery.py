@@ -429,10 +429,28 @@ async def reload_failed_project(ws, account, expected, project, actions):
     return state
 
 
-async def reopen_redirected_project(ws, account, expected, project, actions):
+def bound_project_for_home(page_url, binding, projects):
+    """Return the verified fixed project when Chrome reopened on the Flow home page."""
+    if not binding or binding.get('binding_state') != 'verified':
+        return None
+    location = urlsplit(page_url or '')
+    if (location.scheme, location.netloc) != ('https', 'flow.google.com') or location.path.rstrip('/') != '':
+        return None
+    try:
+        project = canonical_project_url(binding.get('project_url', ''))
+    except (TypeError, ValueError):
+        return None
+    return project if project.rsplit('/', 1)[1] in projects else None
+
+
+async def reopen_redirected_project(ws, account, expected, project, actions, allow_home=False):
     await asyncio.to_thread(guard_live, account)
     frame = (await command(ws, 'Page.getFrameTree'))['frameTree']['frame']
-    if not flow_project_redirect(frame['url'], project):
+    if allow_home:
+        location = urlsplit(frame['url'])
+        if (location.scheme, location.netloc) != ('https', 'flow.google.com') or location.path.rstrip('/') != '':
+            return {}
+    elif not flow_project_redirect(frame['url'], project):
         return {}
     state = await evaluate(ws, expected)
     if not state.get('origin') or state.get('busy') or state.get('draft'):
@@ -478,15 +496,21 @@ async def repair(account, initial, actions, safe_only=False):
     except ValueError:
         project = None
     old = TaskWindowRegistry().get(current['account_key'])
+    restore_home = bound_project_for_home(page['url'], old, projects)
     redirected = bool(old and old.get('binding_state') == 'verified'
                       and old.get('project_url', '').rsplit('/', 1)[-1] in projects
                       and flow_project_redirect(page['url'], old['project_url']))
     if redirected:
         project = old['project_url']
     same = project and project.rsplit('/',1)[1] in projects
-    if not same and len(standard) != 1:
+    if restore_home:
+        desired = restore_home
+    elif same:
+        desired = project
+    elif len(standard) == 1:
+        desired = canonical_project_url('https://flow.google.com/project/'+next(iter(standard)))
+    else:
         return 'project',None
-    desired = project if same else canonical_project_url('https://flow.google.com/project/'+next(iter(standard)))
     restart_safe = False
     navigated_once = False
     try:
@@ -497,13 +521,21 @@ async def repair(account, initial, actions, safe_only=False):
                     return 'binding', None
                 before = await reopen_redirected_project(ws, account, expected, desired, actions)
                 navigated_once = 'return_to_project' in actions
+            elif restore_home:
+                # The browser restarted, so the registry entry is stale by design;
+                # candidate() already re-verified the live profile, port and window.
+                before = await reopen_redirected_project(ws, account, expected, desired, actions, allow_home=True)
+                navigated_once = 'return_to_project' in actions
+                if not navigated_once:
+                    return page_verdict(before), None
             else:
                 before = await evaluate(ws,expected)
             verdict = page_verdict(before)
             if verdict in ('login', 'verification_required', 'flow_landing') or (redirected and verdict != 'ok'):
                 return verdict,None
+            on_project = same or (restore_home and navigated_once)
             if verdict == 'load_failed':
-                if (not same or not old or old.get('binding_state') != 'verified'
+                if (not on_project or not old or old.get('binding_state') != 'verified'
                         or old.get('project_url') != project or any(old.get(k)!=v for k,v in current.items())):
                     return 'binding',None
                 before = await reload_failed_project(ws, account, expected, project, actions)
@@ -534,10 +566,10 @@ async def repair(account, initial, actions, safe_only=False):
             if before.get('draft'):
                 return 'draft',None
             if (before.get('overlay') and not before.get('busy')
-                    and same and old and old.get('binding_state') == 'verified'
+                    and on_project and old and old.get('binding_state') == 'verified'
                     and old.get('project_url') == project and all(old.get(k) == v for k,v in current.items())):
                 before = await close_account_panel(ws, account, expected, project, before, actions)
-            if same and before.get('overlay') and not before.get('busy') and 'reload' not in actions:
+            if on_project and before.get('overlay') and not before.get('busy') and 'reload' not in actions:
                 before = await reload_overlay(ws, account, expected, project, actions)
                 navigated_once = navigated_once or 'reload' in actions
                 if not before:
@@ -566,8 +598,8 @@ async def repair(account, initial, actions, safe_only=False):
                     return ('overlay' if before.get('overlay') else 'busy'),None
             if not before.get('account') or before.get('draft') or before.get('busy'):
                 return page_verdict(before),None
-            if not same or not before.get('editor'):
-                if same and (initial == 'after_restart' or 'reload' in actions):
+            if not on_project or not before.get('editor'):
+                if on_project and (initial == 'after_restart' or 'reload' in actions):
                     return 'editor',None
                 await asyncio.to_thread(guard_live,account)
                 frame = (await command(ws,'Page.getFrameTree'))['frameTree']['frame']
@@ -578,7 +610,7 @@ async def repair(account, initial, actions, safe_only=False):
                 if (not before.get('account') or before.get('draft') or before.get('overlay') or before.get('busy')
                         or before.get('path') != urlsplit(frame['url']).path):
                     return 'unconfirmed',None
-                if same:
+                if on_project:
                     port = current['port']
                     with build_opener(ProxyHandler({})).open(f'http://127.0.0.1:{port}/json/list',timeout=2) as response:
                         tabs = [x for x in json.load(response) if x.get('type') == 'page']
