@@ -33,13 +33,15 @@ def prepare_keyboard(env):
 
 
 def main():
-    keyboard_checked = False
+    keyboard_ready = False
+    keyboard_attempts = 0
     for attempt in range(6):
         try:
             env = gui_env()
-            if (env.get('WAYLAND_DISPLAY') or env.get('DISPLAY')) and not keyboard_checked:
-                keyboard_checked = True
-                prepare_keyboard(env)
+            if ((env.get('WAYLAND_DISPLAY') or env.get('DISPLAY')) and not keyboard_ready
+                    and keyboard_attempts < 3):
+                keyboard_attempts += 1
+                keyboard_ready = prepare_keyboard(env)
             if (env.get('WAYLAND_DISPLAY') or env.get('DISPLAY')) and network_ready():
                 accounts = request('/api/flow-readiness')['accounts']
                 if all(state in ('ok', 'busy') for state in accounts.values()):

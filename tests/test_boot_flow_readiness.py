@@ -43,6 +43,15 @@ class BootKeyboard(unittest.TestCase):
                 patch('builtins.print'):
             self.assertFalse(boot.prepare_keyboard({'DISPLAY': ':0'}))
 
+    def test_boot_retries_keyboard_until_the_desktop_portal_is_ready(self):
+        with patch.object(boot, 'gui_env', return_value={'DISPLAY': ':0'}), \
+                patch.object(boot, 'network_ready', return_value=True), \
+                patch.object(boot, 'prepare_keyboard', side_effect=[False, True]) as keyboard, \
+                patch.object(boot, 'request', side_effect=[OSError('not ready'), {'accounts': {'a': 'ok'}}]), \
+                patch.object(boot.time, 'sleep'):
+            boot.main()
+        self.assertEqual(keyboard.call_count, 2)
+
 
 if __name__ == '__main__':
     unittest.main()
