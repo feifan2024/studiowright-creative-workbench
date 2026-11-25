@@ -762,7 +762,7 @@ function followWorkbenchReleases() {
     if (!pending || reloading || document.hidden || !document.hasFocus() ||
         !['overview','accounts','projects','records'].includes(state.view) || document.querySelector('dialog[open]') ||
         insightActivationPosting || accountActionsInFlight.size || dispatchPolicyDirty ||
-        ['flowPrompt', 'chatPrompt', 'geminiPrompt', 'apiKeyName'].some(id => $(id)?.value) ||
+        ['flowPrompt', 'chatPrompt', 'geminiPrompt', 'apiKeyName', 'musicPrompt', 'musicTags', 'musicStyleId'].some(id => $(id)?.value) ||
         ['chatFiles', 'geminiFiles'].some(id => $(id)?.files?.length)) return;
     reloading = true;
     window.location.reload();
@@ -2235,15 +2235,40 @@ async function refreshMusicStatus() {
   renderMusicReadiness();
   if (musicReadinessState?.state === 'running') void pollMusicReadiness();
 }
+const musicNumber = new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 2});
 function renderMusicStatus() {
   const el = $("musicCredits");
-  if (!el) return;
+  const details = $("musicAccountDetails");
+  if (!el || !details) return;
+  if (!musicServiceStatus?.available) details.replaceChildren();
   if (!musicServiceStatus) { el.textContent = "音乐服务状态未读取。"; return; }
   if (!musicServiceStatus.available) { el.textContent = musicServiceStatus.reason || "音乐服务暂不可用。"; return; }
-  const rows = (musicServiceStatus.accounts || []).map(a =>
-    `${a.email}：${a.ready ? '就绪' : '令牌待刷新'} · 余 ${a.credits ?? '—'} 积分 · 今日已生成 ${a.today_music ?? 0} 首`).join('；');
-  el.textContent = rows || '账号池为空，请先导入 Flow Music 账号。';
+  const accounts = musicServiceStatus.accounts || [];
+  if (!accounts.length) {
+    el.textContent = '账号池为空，请先导入 Flow Music 账号。';
+    details.replaceChildren();
+    return;
+  }
+  const ready = accounts.filter(account => account.ready).length;
+  const total = musicServiceStatus.credits?.total;
+  el.textContent = `${ready} / ${accounts.length} 就绪 · ${Number.isFinite(total) ? '总积分 '+musicNumber.format(total) : '总积分待读取'}`;
+  details.innerHTML = `<table aria-label="音乐账号明细"><thead><tr>
+    <th scope="col">账号</th><th scope="col">状态</th><th scope="col">剩余积分</th><th scope="col">今日生成</th>
+    </tr></thead><tbody>${accounts.map(account => `<tr>
+    <th scope="row">${esc(account.email || '未登记名称')}</th>
+    <td${account.ready ? '' : ' class="music-account-not-ready"'}>${account.ready ? '就绪' : '待刷新'}</td>
+    <td>${Number.isFinite(account.credits) ? musicNumber.format(account.credits) : '—'}</td>
+    <td>${Number.isFinite(account.today_music) ? musicNumber.format(account.today_music)+' 首' : '—'}</td>
+    </tr>`).join('')}</tbody></table>`;
 }
+$('musicPrompt')?.addEventListener('input', event => {
+  const count = $('musicPromptCount');
+  if (count) count.textContent = musicNumber.format(event.target.value.length) + ' / 2,000';
+});
+$('musicOpenRecords')?.addEventListener('click', () => {
+  setView('records');
+  selectRecordsTab('music', true);
+});
 let musicPolling = false;
 let musicRendered = null;
 function renderMusicJob(job) {
@@ -2252,15 +2277,20 @@ function renderMusicJob(job) {
   $("musicGenerate").disabled = busy;
   $("musicStatus").textContent = ({recovering:'已找回原任务，正在查询结果或恢复入库…',generating:'音乐生成中，可刷新页面；不会重复提交。',ingesting:'音乐已生成，正在登记素材…',completed:'完成。',unknown:job.error || '结果待核对，不会重新生成。'})[job.status] || job.status;
   const result = job.result;
-  if (result && musicRendered !== JSON.stringify(result)) {
-    musicRendered = JSON.stringify(result);
+  const revision = result && JSON.stringify([job.id, result]);
+  if (result && musicRendered !== revision) {
+    musicRendered = revision;
     const clips = result.clips || [];
-    $("musicResultSummary").textContent = `模型 ${result.model} · 完成 ${clips.length} 首 · 已进素材池 ${result.ingested ?? 0} 件${result.ingest_error ? "（" + result.ingest_error + "）" : ""} · ${dateTime(Date.now()/1000)}`;
+    const model = Array.from($('musicModel').options).find(option => option.value === result.model)?.textContent || result.model || job.model;
+    const time = Number.isFinite(job.updated) ? ' · ' + dateTime(job.updated) : '';
+    $("musicResultSummary").textContent = `${model} · 完成 ${clips.length} 首 · 已入库 ${result.ingested ?? 0} 件${result.ingest_error ? "（" + result.ingest_error + "）" : ""}${time}`;
     $("musicResult").innerHTML = clips.map(clip => `
-      <div class="music-result-item"><strong>${esc(clip.title)}</strong>
-      <p>提示词标签：${esc((clip.auto_tags||[]).join("、"))} · 手动标签：<span style="white-space:pre-wrap">${esc((clip.tags||[]).join("、"))}</span>${typeof clip.style_id==="string" ? ` · 画风 ID：<code style="white-space:pre-wrap">${esc(clip.style_id)}</code>` : ""}</p>
+      <article class="music-result-item"><h3>${esc(clip.title)}</h3>
+      ${clip.auto_tags?.length ? `<p>提示词标签 · ${esc(clip.auto_tags.join("、"))}</p>` : ''}
+      ${clip.tags?.length ? `<p>手动标签 · <span class="music-result-metadata">${esc(clip.tags.join("、"))}</span></p>` : ''}
+      ${typeof clip.style_id === "string" && clip.style_id !== '' ? `<p>画风 ID · <code class="music-result-metadata">${esc(clip.style_id)}</code></p>` : ''}
       ${clip.audio_url ? `<audio controls preload="metadata" src="${esc(clip.audio_url)}"></audio>` : ''}
-      <div>${clip.audio_url ? `<a class="text-link" href="${esc(clip.audio_url)}" download>下载音频</a>` : ''}${clip.wav_url ? ` <a class="text-link" href="${esc(clip.wav_url)}" download>下载 WAV</a>` : ''}${clip.cover_url ? ` <a class="text-link" href="${esc(clip.cover_url)}" target="_blank" rel="noopener noreferrer">封面</a>` : ''}</div></div>`).join('');
+      <div class="music-result-links">${clip.audio_url ? `<a class="text-link" href="${esc(clip.audio_url)}" download>下载音频</a>` : ''}${clip.wav_url ? `<a class="text-link" href="${esc(clip.wav_url)}" download>下载 WAV</a>` : ''}${clip.cover_url ? `<a class="text-link" href="${esc(clip.cover_url)}" target="_blank" rel="noopener noreferrer">封面</a>` : ''}</div></article>`).join('');
     $("musicResultPanel").hidden = false;
 
   }
@@ -2279,7 +2309,7 @@ async function recoverMusicJob() {
 }
 $("musicGenerate")?.addEventListener("click", async () => {
   const prompt = $("musicPrompt").value.trim();
-  if (!prompt) { $("musicStatus").textContent='请先填写音乐描述。'; return; }
+  if (!prompt) { $("musicStatus").textContent='请先填写音乐描述。'; $("musicPrompt").focus(); return; }
   const id = crypto.randomUUID();
   try {
     localStorage.setItem('workbench.music.request',id);

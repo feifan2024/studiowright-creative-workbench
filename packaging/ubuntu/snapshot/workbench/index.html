@@ -296,23 +296,34 @@
           </section>
         </section>
         <section id="musicView" class="view" aria-labelledby="musicHeading" hidden>
-          <div class="page-heading"><div><div class="eyebrow"><span></span> MUSIC STUDIO</div><h1 id="musicHeading">音乐生成</h1><p>用 Flow Music 的 Lyria 模型生成可下载的音频，消耗对应账号的音乐积分。</p></div></div>
-          <section class="panel list-panel" aria-labelledby="musicFormHeading">
-            <div class="panel-heading"><div><h2 id="musicFormHeading">生成音乐</h2><p id="musicCredits" class="panel-caption">正在读取音乐账号状态…</p></div></div>
-            <div class="music-form">
-              <label for="musicModel">模型</label>
-              <select id="musicModel"><option value="lyria-fast">Lyria 3.5 Fast（快 · 省）</option><option value="lyria">Lyria 3.5</option><option value="lyria-pro">Lyria 3 Pro</option><option value="lyria-pro-fast">Lyria 3 Pro Fast</option></select>
-              <label for="musicPrompt">描述（可写风格、情绪、乐器、歌词或时长，例如"无人声钢琴 BGM，约 1 分钟"）</label>
-              <textarea id="musicPrompt" rows="4" maxlength="2000" placeholder="轻快的钢琴背景音乐，无人声，适合短视频背景"></textarea>
-              <label for="musicTags">手动标签（可选，每行一个，原样保存）</label><textarea id="musicTags" rows="2" placeholder="项目配乐&#10;片头备选"></textarea>
-              <label for="musicStyleId">画风 ID（可选，原样保存）</label><input id="musicStyleId" maxlength="256">
-              <p class="subtle">从描述自动提取风格、情绪和用途标签，表示生成要求，不代表音频已经分析。</p>
-              <div class="music-form-actions"><button id="musicGenerate" class="button button-primary" type="button">生成音乐</button><span id="musicStatus" role="status" aria-live="polite"></span></div>
+          <div class="page-heading music-page-heading"><h1 id="musicHeading">音乐生成</h1><button id="musicOpenRecords" class="button button-light" type="button">生成记录 <span aria-hidden="true">→</span></button></div>
+          <details class="music-pool">
+            <summary><strong>音乐账号</strong><span id="musicCredits" role="status">正在读取…</span></summary>
+            <div id="musicAccountDetails" class="music-account-details"></div>
+          </details>
+          <section class="music-workspace" aria-labelledby="musicFormHeading">
+            <div class="music-description">
+              <div class="music-description-heading">
+                <label id="musicFormHeading" for="musicPrompt">音乐描述</label>
+                <span id="musicPromptCount" aria-hidden="true">0 / 2,000</span>
+              </div>
+              <p id="musicPromptHint">可写风格、情绪、乐器、时长或歌词。</p>
+              <textarea id="musicPrompt" rows="7" maxlength="2000" aria-describedby="musicPromptHint" placeholder="例如：约 1 分钟的轻快钢琴配乐，无人声，适合短视频片头。"></textarea>
+            </div>
+            <div class="music-settings">
+              <h2>生成设置</h2>
+              <div class="music-field"><label for="musicModel">模型</label><select id="musicModel"><option value="lyria-fast">Lyria 3.5 Fast（快 · 省）</option><option value="lyria">Lyria 3.5</option><option value="lyria-pro">Lyria 3 Pro</option><option value="lyria-pro-fast">Lyria 3 Pro Fast</option></select></div>
+              <div class="music-field"><label for="musicTags">手动标签 <small>可选 · 每行一个</small></label><textarea id="musicTags" rows="2" placeholder="项目配乐&#10;片头备选"></textarea></div>
+              <div class="music-field"><label for="musicStyleId">画风 ID <small>可选</small></label><input id="musicStyleId" maxlength="256"></div>
+            </div>
+            <div class="music-form-footer">
+              <div><p>生成会消耗音乐积分。手动标签与画风 ID 原样保存。</p><p id="musicStatus" role="status"></p></div>
+              <button id="musicGenerate" class="button button-primary" type="button">生成音乐</button>
             </div>
           </section>
-          <section class="panel list-panel" aria-labelledby="musicResultHeading" id="musicResultPanel" hidden>
-            <div class="panel-heading"><div><h2 id="musicResultHeading">生成结果</h2><p id="musicResultSummary" class="panel-caption"></p></div></div>
-            <div id="musicResult" class="table-wrap"></div>
+          <section class="music-results" aria-labelledby="musicResultHeading" id="musicResultPanel" hidden>
+            <div class="music-results-heading"><h2 id="musicResultHeading">最近生成结果</h2><p id="musicResultSummary"></p></div>
+            <div id="musicResult" class="music-result-grid"></div>
           </section>
         </section>
         <section id="apiView" class="view api-view" aria-labelledby="apiHeading" hidden>
